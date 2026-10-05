@@ -1,0 +1,43 @@
+/* Vault Syncryption dialogs */
+.syncryption-code {
+	font-family: var(--font-monospace);
+	font-size: 1.6em;
+	letter-spacing: 0.1em;
+	text-align: center;
+	user-select: all;
+}
+
+.syncryption-stacked {
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-4-2);
+}
+
+.syncryption-wide {
+	width: 100%;
+	font-family: var(--font-monospace);
+}
+
+.syncryption-path {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	word-break: break-all;
+}
+
+.syncryption-preview {
+	max-height: 60vh;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	user-select: text;
+}
+
+.syncryption-secret {
+	-webkit-user-select: text;
+	user-select: text;
+	font-size: var(--font-ui-medium);
+	letter-spacing: normal;
+	word-break: break-all;
+}

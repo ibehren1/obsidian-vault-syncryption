@@ -1,0 +1,21 @@
+# Vault Syncryption server. Every setting is an environment variable below (no .env file).
+# See docs/self-hosting.md.
+services:
+  vault-syncryption:
+    image: ibehren1/vault-syncryption:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"        # Let's Encrypt HTTP-01 and the redirect to HTTPS (BEHIND_PROXY=FALSE)
+      - "443:443"      # HTTPS (BEHIND_PROXY=FALSE)
+      # - "8080:8080"  # plain HTTP for your own proxy (BEHIND_PROXY=TRUE)
+    volumes:
+      - ./data:/data
+    environment:
+      BEHIND_PROXY: "FALSE"
+      URL: "https://notes.example.com"   # required when BEHIND_PROXY=FALSE
+      SHARED_SECRET: "change-me"         # required; people need it to join the server
+      S3_BUCKET: ""                      # set all three S3_* variables, or none
+      S3_ACCESS_KEY: ""
+      S3_SECRET_KEY: ""
+      S3_ENDPOINT: ""                    # optional: MinIO, B2, R2, ...; empty means AWS
+      MIGRATE_TO_S3: "FALSE"

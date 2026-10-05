@@ -1,0 +1,29 @@
+{
+  "description": "Ed25519 to X25519 conversion (crypto.md 3.4). xPublicKey from libsodium, xSecretKey = SHA-512(seed)[0:32], unclamped.",
+  "cases": [
+    {
+      "seed": "19a46039f5fa1cb1293f3d41b3039476653ef52309f604727aaf105360e1c724",
+      "edPublicKey": "a5c5861980433dc6d95c4ae427d71a2b727e4ee6d6b54f55ab225d7a47b7fed4",
+      "xPublicKey": "944ad1fd0cebfa5e5ea43ba6e8dbe6adf03f243fe754bb9690e3072f9ea4b51f",
+      "xSecretKey": "c236e0f9b106c79bda8405c3b05a5b24656f72a72cdb17c6ab570243d7d1b687"
+    },
+    {
+      "seed": "ef1607835c6893699990d6994ceca8075448f3b344ee1fb3b8b5776f88cad639",
+      "edPublicKey": "a1af2a2c4fef35d79ccb12195466d9f685d623f312fd46c258844f3ccb76ce37",
+      "xPublicKey": "2ef524922989ef1a58d5857032da04bd0182c947573dedc1abccf2db26f7d250",
+      "xSecretKey": "ef9715e1ebdcbacc06d2ab50aa3a57e42c0e827f795fc55db467ead7356f9328"
+    },
+    {
+      "seed": "af49b04fe51f42dd40b81b6bd4a9e0dee68a945a0e1fae76f6657c96bdf60f7d",
+      "edPublicKey": "706b9fbdd94b3d8af212451a2c143f1a746d0161ef417b54002d6f884148c518",
+      "xPublicKey": "f6baa2c9a6b2c6781511df3b3053fc2fcca11e6aa1ce1fffd5de014713c1973f",
+      "xSecretKey": "8e8d39a5d54a15ca3b9ef466acd54db4d484cabb2e3ae16c40cfa990f599e7b2"
+    },
+    {
+      "seed": "6c80a5001d7d721176b28366c0d28cd6a53342263028b66a40cc62b4476e1c0c",
+      "edPublicKey": "975b94610bb7046971d7ac471392702e91b2039f85571c1aca9c6b8f2b8ada0e",
+      "xPublicKey": "54f73499de47b59ebe6048730431f538a4a273532baaeec7ab8c4e09a9984d0d",
+      "xSecretKey": "e4e93a4a9e36b19db06c8197ef560c0ef85c1cb088813b49ccef3bce180f92ee"
+    }
+  ]
+}

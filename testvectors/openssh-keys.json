@@ -1,0 +1,122 @@
+{
+  "description": "OpenSSH private keys (crypto.md 3.2). Valid keys come from ssh-keygen, expected values from python cryptography. Strings are UTF-8, binary values hex.",
+  "valid": [
+    {
+      "name": "unencrypted",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lwAAAJAi3WiGIt1o\nhgAAAAtzc2gtZWQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBMXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUsYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcAE=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "seed": "4c5f0288b74d672471c3f0c56acada51570dc16c41ef37e56dfc97340bc5d90d",
+      "publicKey": "4b188e1bcdb80cc71b9ccedbcc9bcdce48dcfe74ebe447977bb0904ad8b17e97",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEsYjhvNuAzHG5zO28ybzc5I3P506+RHl3uwkErYsX6X alice@laptop",
+      "comment": "alice@laptop",
+      "fingerprint": "SHA256:bDv+Hzw9FQ1K2yxQaM5f/UiJt8xIGhz2s+o+7Q4ySf8",
+      "checkint": 584935558
+    },
+    {
+      "name": "aes256-ctr, bcrypt, 16 rounds",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDi/1VZAR\nJbzCOI5Nty6SHYAAAAEAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIPwzNCtJSdLznMeU\nvyLElapfBN8NYX6eG3YjCDjEZhbHAAAAkP523djAVRwoX2wQpYGxsQNQ736YyH1YvX25XE\nWMT6nJi2AAdOV0/nZTqDcb5pVXevXhJd7vBhUqNrgUsLW0kDcZB/08B80TtowMG1fODWWU\nKIL+mRvyvFx6eKjAET7/PTw7kOXPAHC4dhBel3Mhd+SVRg4/hw+kM4NrMruKuO7xdN5C/0\nrcGc078E6IWJdQZw==\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "correct horse",
+      "seed": "c0bfd4e8cb16d01a74f1e9654a964dcfabe2a911a63f3034e53438c582c41415",
+      "publicKey": "fc33342b4949d2f39cc794bf22c495aa5f04df0d617e9e1b76230838c46616c7",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPwzNCtJSdLznMeUvyLElapfBN8NYX6eG3YjCDjEZhbH bob@phone",
+      "comment": "bob@phone",
+      "fingerprint": "SHA256:RajvXQNr7YIQiPm7TJiVEdjI64WvgDZmxgTbRkIWJsE",
+      "checkint": 412761325,
+      "salt": "e2ff555901125bcc2388e4db72e921d8",
+      "rounds": 16
+    },
+    {
+      "name": "aes256-ctr, bcrypt, 4 rounds, non-ASCII passphrase",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDg4AMAnV\nY6375OkCFeyuE7AAAABAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIGhHw3SXJBSA5E7e\n7Wvkj8s4jt8P+3Iv+7ORjCK8vYS7AAAAkHmNyHsyIQmQLa3rh3K8dJBS0Dm5SyzEWHeJ1o\nKhv2/jAh7ohefsXDtP9XgfH/qabX0AHhiYrU0H0dl+rgBNSCl78FDyeYlHsuwwZrQfG0QZ\nOkEEnZXzt2uVJ27EANgQXqUreIycmzj9Zc7/zzWyPupyI6naYhzJS2p+6uI8naaG5pO6p1\nXjPBdBXEvUMKdL8A==\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "pässwörd 🔑",
+      "seed": "c2fb84283dc9afe527bf31219e96acb741d45cd43a7773d069efd44c904f5d0a",
+      "publicKey": "6847c37497241480e44edeed6be48fcb388edf0ffb722ffbb3918c22bcbd84bb",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGhHw3SXJBSA5E7e7Wvkj8s4jt8P+3Iv+7ORjCK8vYS7",
+      "comment": "",
+      "fingerprint": "SHA256:jo3aomvbIxXIfisceMdDh5mkKSjB9olqZBtP9zEERnU",
+      "checkint": 4046866520,
+      "salt": "e0e003009d563adfbe4e90215ecae13b",
+      "rounds": 4
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong passphrase",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDi/1VZAR\nJbzCOI5Nty6SHYAAAAEAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIPwzNCtJSdLznMeU\nvyLElapfBN8NYX6eG3YjCDjEZhbHAAAAkP523djAVRwoX2wQpYGxsQNQ736YyH1YvX25XE\nWMT6nJi2AAdOV0/nZTqDcb5pVXevXhJd7vBhUqNrgUsLW0kDcZB/08B80TtowMG1fODWWU\nKIL+mRvyvFx6eKjAET7/PTw7kOXPAHC4dhBel3Mhd+SVRg4/hw+kM4NrMruKuO7xdN5C/0\nrcGc078E6IWJdQZw==\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "wrong",
+      "error": "wrong-passphrase"
+    },
+    {
+      "name": "missing passphrase",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDi/1VZAR\nJbzCOI5Nty6SHYAAAAEAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIPwzNCtJSdLznMeU\nvyLElapfBN8NYX6eG3YjCDjEZhbHAAAAkP523djAVRwoX2wQpYGxsQNQ736YyH1YvX25XE\nWMT6nJi2AAdOV0/nZTqDcb5pVXevXhJd7vBhUqNrgUsLW0kDcZB/08B80TtowMG1fODWWU\nKIL+mRvyvFx6eKjAET7/PTw7kOXPAHC4dhBel3Mhd+SVRg4/hw+kM4NrMruKuO7xdN5C/0\nrcGc078E6IWJdQZw==\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "passphrase-required"
+    },
+    {
+      "name": "bad checkint, unencrypted",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lwAAAJAi3WiGIt1o\nhwAAAAtzc2gtZWQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBMXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUsYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcAE=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    },
+    {
+      "name": "bad padding",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lwAAAJAi3WiGIt1o\nhgAAAAtzc2gtZWQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBMXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUsYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcP4=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    },
+    {
+      "name": "inner public key mismatch",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lwAAAJAi3WiGIt1o\nhgAAAAtzc2gtZWQyNTUxOQAAACBKGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBMXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUsYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcAE=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    },
+    {
+      "name": "sk64 public half mismatch",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lwAAAJAi3WiGIt1o\nhgAAAAtzc2gtZWQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBMXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUoYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcAE=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    },
+    {
+      "name": "seed does not match public key",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lwAAAJAi3WiGIt1o\nhgAAAAtzc2gtZWQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBNXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUsYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcAE=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    },
+    {
+      "name": "outer public key mismatch",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBL2LF+lwAAAJAi3WiGIt1o\nhgAAAAtzc2gtZWQyNTUxOQAAACBLGI4bzbgMxxucztvMm83OSNz+dOvkR5d7sJBK2LF+lw\nAAAEBMXwKIt01nJHHD8MVqytpRVw3BbEHvN+Vt/Jc0C8XZDUsYjhvNuAzHG5zO28ybzc5I\n3P506+RHl3uwkErYsX6XAAAADGFsaWNlQGxhcHRvcAE=\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    },
+    {
+      "name": "rsa key",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn\nNhAAAAAwEAAQAAAQEAndcY3SiXVZxNS81V0TbfZAOTS39y3UlWcJRoVNf7MUjvgANVaQs2\ns4zcX+8y63Pn6jpD8a2A2ol5gq7H1tCguOA5kBd60EU510vFOxnEBC8k9MbHSVmkDJmhwM\nbmv2RqcIhg/9vzkvmsVejOm6KnUh6Edf1c7nCDTIgkpJOnK54fwGmrOe6fJfDARAWyCooT\npQu6TL9cH/yckrXnxCZ63/7MSeiB6YUVSJJ8spLprpHs5+Zz7PATXEuwTHM4ni/7shVieF\nTsTIxJ//UU5dBENPPG1UnFytHPlMlFCm6+wigDgPwcGcVPJWZYWJKxWpDH+tMkfFvGxOIB\nlsT/LHdnMQAAA9AHKCpSBygqUgAAAAdzc2gtcnNhAAABAQCd1xjdKJdVnE1LzVXRNt9kA5\nNLf3LdSVZwlGhU1/sxSO+AA1VpCzazjNxf7zLrc+fqOkPxrYDaiXmCrsfW0KC44DmQF3rQ\nRTnXS8U7GcQELyT0xsdJWaQMmaHAxua/ZGpwiGD/2/OS+axV6M6boqdSHoR1/VzucINMiC\nSkk6crnh/Aaas57p8l8MBEBbIKihOlC7pMv1wf/JyStefEJnrf/sxJ6IHphRVIknyykumu\nkezn5nPs8BNcS7BMczieL/uyFWJ4VOxMjEn/9RTl0EQ088bVScXK0c+UyUUKbr7CKAOA/B\nwZxU8lZlhYkrFakMf60yR8W8bE4gGWxP8sd2cxAAAAAwEAAQAAAQEAhuIa0Fvwv2s7rsyB\nSrFuw6Q+imUWfr4+TSS159NOSPbAHJA8u/CmRVfZt23NAOLizAoQqAYSOC8FFMVR52QQBQ\n0wg89c14BhBngsyu2g0caL+VWpVihxhYcAcKJI7EPepd4VrnCDPRV5zUyOyvd7rzR/E+l5\nMhYaThuF3NKFKEK3mxQM/Pnx0XuI+2atzs1G3LcWi8QJ7eUnq2K3goPvltpxFfk3K+n292\nKHgRYERt/7On0V0ZDDj0lDu8psAOVhejOQGdNVfuwy775CVXA+RE3fOkA3UI89QGKvnGUI\njzlk2Tno7mzXxJ//MK62YaNaiF30mTmSoJUvS35dyxVJQQAAAIBanH7VGtpvnNzScdRMRW\nF1s6g07VZEyj7hMsufnqEMhe1yMuFjk7jZxaGaUEWXOBIXUmWWHAzrUfyCUXheV1nmuUi7\nejNit2rfJGMVDCjEgBOtTrpXf7huJqBMVWwKyhDNYnabAmsFbI+Hj4c/V/W3yW9ehECHUq\nGGRDzYWwzjqwAAAIEA0XYE+3aYDGYuIVjVLTTKNw7JAJVHi5U+4GoREEH1sg861LaKMY+m\nIDXhM2GOK7yvSce7YIQT+U+8LH9MXGDPl1o587XKnMEyinG8p0m9y+V5cHJTiV7lUNsxL8\neSCPQNgHFUaGh0+acrnerahEVZvkwGfr4bwLsYwAjnLAIpZ7kAAACBAMDo7VBm/E9rqTaB\n/AY6rV1Bs5nd0PNuz9Q+3c+ZgVt6Ru6CacJQrZA8Fd4dNUxbAim+oDYdSNBSphv77lArJB\nbgHVFmAv5LFC/nAKEeBzerTfIiZz9SFM/x0DcXR3LCwQGoRNNRZ9sFBCMroKO+tasDgLRk\neEskZ3D9Nqp400c5AAAAF2liZWhyQGliZWhyLW1iYS5pYWMubGFuAQID\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "unsupported-key-type"
+    },
+    {
+      "name": "ecdsa key",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS\n1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQSOvW+CDxb5tSEzPk5eMswt0RbnHk/a\nGV+wyiV2jU04Hw/WoB0MWJfBKEl/S6AH7UXn4Ig9hMMGFXp0vZNIqigaAAAAsEweqEBMHq\nhAAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBI69b4IPFvm1ITM+\nTl4yzC3RFuceT9oZX7DKJXaNTTgfD9agHQxYl8EoSX9LoAftRefgiD2EwwYVenS9k0iqKB\noAAAAgOZi64at0wt54Q1+ZQj3GbA+8tP2r0zjyPkgY2s/Is4sAAAAXaWJlaHJAaWJlaHIt\nbWJhLmlhYy5sYW4B\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "unsupported-key-type"
+    },
+    {
+      "name": "chacha20-poly1305 cipher",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAHWNoYWNoYTIwLXBvbHkxMzA1QG9wZW5zc2guY29tAAAABm\nJjcnlwdAAAABgAAAAQ9W6bv/pz4OQXgj1836eCPAAAABgAAAABAAAAMwAAAAtzc2gtZWQy\nNTUxOQAAACAvscc5Mpsd/chiebbVJTazVGsRPyrFFlp4tgaij6rHbAAAAKCJ9qY6LGURzp\nzmulx69RBZMoqKHOI3wAHNY8e2YcrvLw++EahaRkzGg9clkKfBoWf8R0RycBfgrJEuVGMx\nqgQEYqdU/we7Y6RLwTufduTAoN6qDPcT4NzvM7FwRPbZu3GwktcRoqEWnfBdGZ3TNnSeqR\n4qD6a7KXajacLNt1BHuk4Mwa0GoWyUyL5fWMVEqVcPITRO7zxVn90FkdNHdO6Wi2TeAJ79\nShdU7SQ1TclBlA==\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "pw",
+      "error": "unsupported-cipher"
+    },
+    {
+      "name": "not an OpenSSH key",
+      "pem": "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "not-openssh"
+    },
+    {
+      "name": "truncated",
+      "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAA\n-----END OPENSSH PRIVATE KEY-----\n",
+      "passphrase": "",
+      "error": "corrupt"
+    }
+  ]
+}

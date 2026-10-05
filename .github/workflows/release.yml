@@ -1,0 +1,57 @@
+# Runs on the public GitHub repo only (Gitea uses .gitea/workflows). When main carries a
+# plugin version that has no release yet, build the plugin and publish the release that
+# Obsidian and BRAT install from: tag = version, with main.js, manifest.json and styles.css.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the version
+        id: version
+        run: |
+          version=$(jq -r .version manifest.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "Release $version already exists."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Check the root manifest and versions match the plugin's
+        if: steps.version.outputs.new == 'true'
+        run: cmp manifest.json plugin/manifest.json && cmp versions.json plugin/versions.json
+      - uses: actions/setup-node@v4
+        if: steps.version.outputs.new == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+      - name: Build
+        if: steps.version.outputs.new == 'true'
+        working-directory: plugin
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+      - name: Publish the release
+        if: steps.version.outputs.new == 'true'
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            plugin/main.js plugin/manifest.json plugin/styles.css \
+            --title "${{ steps.version.outputs.version }}" \
+            --target "$GITHUB_SHA" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,44 @@
+[project]
+name = "syncryption-server"
+version = "0.1.0"
+description = "Vault Syncryption sync server: stores and relays end-to-end encrypted Obsidian vault data"
+readme = "README.md"
+authors = [
+    { name = "Isaac Behrens", email = "isaac@behrenshome.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aioboto3>=15.5.0",
+    "cryptography>=50.0.2",
+    "fastapi>=0.142.2",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "moto[server]>=5.2.3",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

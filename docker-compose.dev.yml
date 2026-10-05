@@ -1,0 +1,55 @@
+# Development: the server behind no proxy on http://localhost:8080, with MinIO as S3.
+#   docker compose -f docker-compose.dev.yml up --build
+# MinIO's console is on http://localhost:9001 (minioadmin / minioadmin). The backend
+# tests can use it too: MINIO_ENDPOINT=http://localhost:9000 uv run pytest
+services:
+  minio:
+    # MinIO no longer publishes images on Docker Hub or Quay; Chainguard builds it from source.
+    image: cgr.dev/chainguard/minio:latest
+    command: server /data --console-address :9001
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+
+  create-bucket:
+    # Uses botocore from the server image, so no MinIO client image is needed.
+    build: ./backend
+    depends_on: [minio]
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import time, botocore.session
+        s3 = botocore.session.get_session().create_client(
+            "s3", endpoint_url="http://minio:9000", region_name="us-east-1",
+            aws_access_key_id="minioadmin", aws_secret_access_key="minioadmin")
+        for attempt in range(60):
+            try:
+                if "syncryption" not in [b["Name"] for b in s3.list_buckets()["Buckets"]]:
+                    s3.create_bucket(Bucket="syncryption")
+                break
+            except Exception:
+                time.sleep(1)
+        else:
+            raise SystemExit("MinIO did not come up")
+
+  syncryption:
+    build: ./backend
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data-dev:/data
+    environment:
+      BEHIND_PROXY: "TRUE"
+      URL: ""
+      SHARED_SECRET: "dev-secret"
+      S3_BUCKET: "syncryption"
+      S3_ACCESS_KEY: "minioadmin"
+      S3_SECRET_KEY: "minioadmin"
+      S3_ENDPOINT: "http://minio:9000"
+      MIGRATE_TO_S3: "FALSE"

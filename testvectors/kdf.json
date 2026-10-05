@@ -1,0 +1,103 @@
+{
+  "description": "Vault key derivations (crypto.md 5) and pairing codes (crypto.md 6.5). Strings are UTF-8, binary values hex, fileIdString is b64u.",
+  "vdk1": "6ff42288771ea608e5d2db3755d04d26e22388e5ea56e7dedbf088b860615ea4",
+  "vdk2": "de2a41c0bdfb2fe36e48e0e35487b00827d2dfdb7d56caaa2aa648fbf7e2677a",
+  "indexKey": "6f199d67f74d8809d10032e53e66c78ab406122de4049c4e379e20cc7677b7ad",
+  "files": [
+    {
+      "name": "plain",
+      "path": "Notes/Projects/Plan.md",
+      "normPath": "Notes/Projects/Plan.md",
+      "fileId": "d6c1e4530d3ea5477674c5e1853314f9aa80ea93d199662e4e3aa80cdc3748b4",
+      "fileIdString": "1sHkUw0-pUd2dMXhhTMU-aqA6pPRmWYuTjqoDNw3SLQ",
+      "fileKeyEpoch1": "9b5a1ff0ccdab1fdb0b24d9e1cccdb5365d64a03a64954486850eda59e1df581",
+      "fileKeyEpoch2": "9c0e0f0a46cdcce03250464e71b838cf3c1e8fed79c6345c94dae6d4c8ea574b"
+    },
+    {
+      "name": "case differs",
+      "path": "notes/projects/plan.md",
+      "normPath": "notes/projects/plan.md",
+      "fileId": "538caa1e36e5da8fe2c57e86ea3fc1f1535a4078c09613543bccff81cd34e5ee",
+      "fileIdString": "U4yqHjbl2o_ixX6G6j_B8VNaQHjAlhNUO8z_gc005e4",
+      "fileKeyEpoch1": "64a2d856658c3d3a414e1bb3f60a78f270d8ee71a5e73ea225e880f62e53226a",
+      "fileKeyEpoch2": "8ed02f259412eb82f472652caacdc13d2b56fc31e792251ab44132118e58c1ee"
+    },
+    {
+      "name": "NFC already",
+      "path": "Café.md",
+      "normPath": "Café.md",
+      "fileId": "8c010b2966602a732025d4a7626849ff92c4bb12f726650d40687d4c33c8c877",
+      "fileIdString": "jAELKWZgKnMgJdSnYmhJ_5LEuxL3JmUNQGh9TDPIyHc",
+      "fileKeyEpoch1": "fefd63d5693076921832328a9959ec86bdd7a1ad1cb0bf5e59cecce3fcc506e8",
+      "fileKeyEpoch2": "a3e9028c4f2329bf3e3d3442e3f4b918e01d8efae55b6e9f90e00a68463d2654"
+    },
+    {
+      "name": "NFD input normalised to NFC",
+      "path": "Café.md",
+      "normPath": "Café.md",
+      "fileId": "8c010b2966602a732025d4a7626849ff92c4bb12f726650d40687d4c33c8c877",
+      "fileIdString": "jAELKWZgKnMgJdSnYmhJ_5LEuxL3JmUNQGh9TDPIyHc",
+      "fileKeyEpoch1": "fefd63d5693076921832328a9959ec86bdd7a1ad1cb0bf5e59cecce3fcc506e8",
+      "fileKeyEpoch2": "a3e9028c4f2329bf3e3d3442e3f4b918e01d8efae55b6e9f90e00a68463d2654"
+    },
+    {
+      "name": "config folder",
+      "path": ".obsidian/app.json",
+      "normPath": ".obsidian/app.json",
+      "fileId": "75083e48a309da4c3c7d9bf436f6bd30e1ec6e80aed659ad7753492d79cd190f",
+      "fileIdString": "dQg-SKMJ2kw8fZv0Nva9MOHsboCu1lmtd1NJLXnNGQ8",
+      "fileKeyEpoch1": "bf7685c5055a2dd4e51028bbc6d8d134f3d01154031555919c2ee537258934c0",
+      "fileKeyEpoch2": "f8cb0aa31f8967f0d281b7af38736047692d452486f1e0908227cb7cb3c02c3d"
+    },
+    {
+      "name": "non-BMP",
+      "path": "Daily/📝 2026-10-02.md",
+      "normPath": "Daily/📝 2026-10-02.md",
+      "fileId": "41bcc812178977fe87f6497edd8197957f70a75e43de040aa05db0e83cf15706",
+      "fileIdString": "QbzIEheJd_6H9kl-3YGXlX9wp15D3gQKoF2w6DzxVwY",
+      "fileKeyEpoch1": "69b625d2e1b165bb59bd0edb5f32db69130566748202cb36f37a0dd0b146bd33",
+      "fileKeyEpoch2": "3c3e71343e8106dddb8b5af06e11d9a94fa3551055d2e84e8515a0435c8cf455"
+    },
+    {
+      "name": "spaces and dots",
+      "path": "a b/c.d.e/ f .md",
+      "normPath": "a b/c.d.e/ f .md",
+      "fileId": "5b83cf931620875a36bb00f2bb36df21388cc44178e18e52e6a50b0bb560884f",
+      "fileIdString": "W4PPkxYgh1o2uwDyuzbfITiMxEF44Y5S5qULC7VgiE8",
+      "fileKeyEpoch1": "88f4bad2ca74ae016532955406cb9ccf3dacd7b6c8a40dbc3ba3ee46ba7c0af8",
+      "fileKeyEpoch2": "c9bf018867d51b2a47f225db3ebd44cc0fe8fc3deca1e9a11db6892cadf24174"
+    }
+  ],
+  "invalidPaths": [
+    "",
+    "/Notes/a.md",
+    "Notes/a.md/",
+    "Notes//a.md",
+    "./a.md",
+    "Notes/../a.md",
+    "..",
+    "."
+  ],
+  "pairingCodes": [
+    {
+      "publicKey": "bae110584286927e36296be6d707cd6d8292f0e3d7f8999caeac04612cbbc960",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILrhEFhChpJ+Nilr5tcHzW2CkvDj1/iZnK6sBGEsu8lg",
+      "code": "BEW8T-BBAGH"
+    },
+    {
+      "publicKey": "07e95f40fb4c681c7e9a75333d1ed6bb3b4d38723c0abdc1f355aa9976221d59",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfpX0D7TGgcfpp1Mz0e1rs7TThyPAq9wfNVqpl2Ih1Z",
+      "code": "GMBRF-GHJ6V"
+    },
+    {
+      "publicKey": "255bef5c43e4d6345d48ab2db34f1bfa4bcb09d8f7810bdc6aba6bda84b9448c",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICVb71xD5NY0XUirLbNPG/pLywnY94EL3Gq6a9qEuUSM",
+      "code": "YFCFP-DF54S"
+    },
+    {
+      "publicKey": "1ce4b0d2d3ba1ff9f844716c4b287deeecf5a5e0b6e8e472446128b07a60b621",
+      "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBzksNLTuh/5+ERxbEsofe7s9aXgtujkckRhKLB6YLYh",
+      "code": "YMNB9-7FQ49"
+    }
+  ]
+}
