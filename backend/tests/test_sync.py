@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from tests.helpers import Device, blob, file_id
+from tests.helpers import META, Device, blob, file_id, meta
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def upload(dev: Device, vault_id: str, data: bytes) -> str:
     return blob_id
 
 
-def commit(dev, vault_id, fid, parent, blobs=(), meta="bWV0YQ", deleted=False):
+def commit(dev, vault_id, fid, parent, blobs=(), meta=META, deleted=False):
     return dev.put(
         f"/api/v1/vaults/{vault_id}/files/{fid}",
         json={"parentRev": parent, "deleted": deleted, "meta": meta, "blobs": list(blobs)},
@@ -36,16 +36,16 @@ def test_commit_and_head(alice, vault):
     assert rev["rev"] == 1
     assert rev["parentRev"] is None
     assert rev["blobs"] == [a, b]
-    assert rev["size"] == 4 + 7 + 8  # meta + blobs
+    assert rev["size"] == 9 + 7 + 8  # meta + blobs
     assert rev["device"] == alice.device_id
     assert alice.get(f"/api/v1/vaults/{vault}/files/{file_id()}").json() == rev
 
 
 def test_stale_parent_returns_the_head(alice, vault):
     first = commit(alice, vault, file_id(), None).json()
-    second = commit(alice, vault, file_id(), first["rev"], meta="djI").json()
+    second = commit(alice, vault, file_id(), first["rev"], meta=meta(b"v2")).json()
 
-    r = commit(alice, vault, file_id(), first["rev"], meta="djM")
+    r = commit(alice, vault, file_id(), first["rev"], meta=meta(b"v3"))
     assert r.status_code == 409
     body = r.json()
     assert body["error"] == "stale_parent"
@@ -71,8 +71,8 @@ def test_validation(alice, vault):
     cases = [
         (file_id(), {"parentRev": None, "meta": "", "blobs": []}, 400),
         (file_id(), {"parentRev": None, "meta": "a=", "blobs": []}, 400),
-        (file_id(), {"parentRev": None, "meta": "bWV0YQ", "blobs": ["XY"]}, 400),
-        ("short", {"parentRev": None, "meta": "bWV0YQ", "blobs": []}, 400),
+        (file_id(), {"parentRev": None, "meta": META, "blobs": ["XY"]}, 400),
+        ("short", {"parentRev": None, "meta": META, "blobs": []}, 400),
         (file_id(), {"parentRev": None, "meta": "A" * (90 * 1024), "blobs": []}, 413),
     ]
     for fid, body, status in cases:
@@ -92,7 +92,7 @@ def test_delete_and_recreate(alice, vault):
 def test_history(alice, vault):
     parent = None
     for i in range(5):
-        parent = commit(alice, vault, file_id(), parent, meta=f"djA{i}").json()["rev"]
+        parent = commit(alice, vault, file_id(), parent, meta=meta(f"v{i}".encode())).json()["rev"]
         commit(alice, vault, file_id(1), parent - 1 if i else None)  # interleave another file
     r = alice.get(f"/api/v1/vaults/{vault}/files/{file_id()}/revs?limit=2").json()
     revs = [x["rev"] for x in r["revisions"]]
@@ -119,7 +119,7 @@ def test_change_feed_is_ordered_and_paged(alice, vault):
     rest = alice.get(f"/api/v1/vaults/{vault}/changes?since=5").json()
     assert [c["rev"] for c in rest["changes"]] == list(range(6, 13))
     assert rest["cursor"] == 12 and rest["more"] is False
-    assert rest["changes"][0]["meta"] == "bWV0YQ"
+    assert rest["changes"][0]["meta"] == META
     empty = alice.get(f"/api/v1/vaults/{vault}/changes?since=12").json()
     assert empty == {"changes": [], "cursor": 12, "more": False, "keyringVersion": 1}
     assert alice.get(f"/api/v1/vaults/{vault}/changes?limit=1001").status_code == 400

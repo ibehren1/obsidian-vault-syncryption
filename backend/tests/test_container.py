@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from tests.helpers import Device, blob, file_id
+from tests.helpers import META, Device, blob, file_id
 
 URL = os.environ.get("SYNCRYPTION_URL", "")
 ADMIN_TOKEN = os.environ.get("SYNCRYPTION_ADMIN_TOKEN", "")
@@ -117,7 +117,7 @@ def test_join_create_upload_and_commit():
     assert r.status_code == 201, r.text
     assert alice.get(f"/api/v1/vaults/{vault}/blobs/{blob_id}").content == data
 
-    body = {"parentRev": None, "deleted": False, "meta": "bWV0YQ", "blobs": [blob_id]}
+    body = {"parentRev": None, "deleted": False, "meta": META, "blobs": [blob_id]}
     r = alice.put(f"/api/v1/vaults/{vault}/files/{file_id()}", json=body)
     assert r.status_code == 201, r.text
     r = alice.put(f"/api/v1/vaults/{vault}/files/{file_id()}", json=body)

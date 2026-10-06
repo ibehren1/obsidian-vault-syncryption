@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import aioboto3
 import pytest
@@ -44,6 +45,46 @@ async def test_round_trip(store):
     await store.delete(KEY)
     assert not await store.exists(KEY)
     await store.delete(KEY)  # deleting a missing blob is fine
+
+
+async def test_iter_keys_by_prefix(store):
+    keys = sorted(
+        blob_key(user, vault, c * 64)
+        for user, vault, c in [
+            ("u1", "v1", "a"),
+            ("u1", "v1", "b"),
+            ("u1", "v2", "c"),
+            ("u2", "v3", "d"),
+        ]
+    )
+    for key in keys:
+        await store.put(key, b"x")
+    assert [k async for k in store.iter_keys()] == keys
+    assert [k async for k in store.iter_keys("blobs/")] == keys
+    assert [k async for k in store.iter_keys("blobs/u1/v1/")] == keys[:2]
+    assert [k async for k in store.iter_keys("blobs/u1/")] == keys[:3]
+    assert [k async for k in store.iter_keys("blobs/u1/v")] == keys[:3]
+    assert [k async for k in store.iter_keys("blobs/nobody/")] == []
+    assert [k async for k in store.iter_keys("other/")] == []
+
+
+async def test_local_iter_keys_walks_only_the_prefix(tmp_path, monkeypatch):
+    s = LocalBlobStore(tmp_path)
+    await s.start()
+    await s.put(blob_key("u1", "v1", "a" * 64), b"x")
+    await s.put(blob_key("u2", "v2", "b" * 64), b"x")
+    walked = []
+    rglob = Path.rglob
+
+    def spy(self, pattern):
+        walked.append(self)
+        return rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", spy)
+    assert [k async for k in s.iter_keys("blobs/u2/v2/")] == [blob_key("u2", "v2", "b" * 64)]
+    assert walked == [tmp_path / "blobs/u2/v2"]
+    (tmp_path / "blobs/u2/v2/bb/.tmp-123").write_bytes(b"partial")
+    assert [k async for k in s.iter_keys("blobs/u2/")] == [blob_key("u2", "v2", "b" * 64)]
 
 
 @pytest.mark.parametrize("key", ["", "/etc/passwd", "blobs/../x", "blobs//x", "blobs/./x"])

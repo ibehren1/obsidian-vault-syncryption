@@ -34,8 +34,11 @@ Then open the plugin settings. Enter the server URL, your username and the vault
 ## How it reads your vault
 The plugin syncs the whole vault in place, including the config folder (`.obsidian`, or whichever folder you set): settings, themes and other plugins. The Vault API doesn't cover the config folder, so the plugin uses `app.vault.adapter` for those files. Its own folder and `workspace*.json` are never synced, and each device can exclude more paths in the settings.
 
+The server keeps a history of every file: every version for 30 days and at least the last 10, and a deleted file's versions for 90 days. "Show file history" restores any version still kept.
+
 ## Documentation
 - [docs/self-hosting.md](docs/self-hosting.md): running the server
+- [docs/scaling.md](docs/scaling.md): storage growth and capacity
 - [docs/architecture.md](docs/architecture.md), [docs/protocol.md](docs/protocol.md) and [docs/crypto.md](docs/crypto.md): how it works
 - [docs/PLAN.md](docs/PLAN.md): the design
 - [SECURITY.md](SECURITY.md): reporting a vulnerability

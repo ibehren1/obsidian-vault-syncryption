@@ -7,13 +7,15 @@ transaction.
 """
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 # The schema's `PRAGMA user_version`. Versions 1 to 4 were servers before 0.1.4, where one
 # key served every vault of a user (memberships); their data can't be used and isn't migrated.
-SCHEMA_VERSION = 5
+# BASE_VERSION is the oldest schema that is migrated; SCHEMA_VERSION is the current one.
+BASE_VERSION = 5
+SCHEMA_VERSION = 6
 OLD_DATA_MESSAGE = (
     "This server's data predates server 0.1.4 (one key per device per vault). "
     "Delete ./data (or the S3 data) and start again."
@@ -95,9 +97,12 @@ CREATE TABLE revisions (
     size INTEGER NOT NULL,
     device_id TEXT NOT NULL REFERENCES devices(id),
     created_at INTEGER NOT NULL,
+    -- The key epoch of the meta header (crypto.md 8.1), for retention (protocol.md 9.3).
+    epoch INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (vault_id, rev)
 );
 CREATE INDEX revisions_file ON revisions(vault_id, file_id, rev);
+CREATE INDEX revisions_file_epoch ON revisions(vault_id, file_id, epoch);
 CREATE TABLE blobs (
     vault_id TEXT NOT NULL REFERENCES vaults(id),
     blob_id TEXT NOT NULL,
@@ -142,8 +147,23 @@ CREATE TABLE maintenance (
 );
 """
 
-# Later schema changes: MIGRATIONS[0] takes SCHEMA_VERSION to SCHEMA_VERSION + 1, and so on.
-MIGRATIONS: list[str] = []
+
+def _revision_epochs(conn: sqlite3.Connection) -> None:
+    """Schema 6: `revisions.epoch`, filled in from each meta header (crypto.md 8.1)."""
+    conn.execute("ALTER TABLE revisions ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1")
+    rows = conn.execute("SELECT vault_id, rev, meta FROM revisions").fetchall()
+    updates = [
+        (int.from_bytes(meta[1:5], "big"), vault_id, rev)
+        for vault_id, rev, meta in rows
+        if len(meta) >= 5 and meta[0] == 1 and int.from_bytes(meta[1:5], "big") > 1
+    ]
+    conn.executemany("UPDATE revisions SET epoch = ? WHERE vault_id = ? AND rev = ?", updates)
+    conn.execute("CREATE INDEX revisions_file_epoch ON revisions(vault_id, file_id, epoch)")
+
+
+# Later schema changes: MIGRATIONS[0] takes BASE_VERSION to BASE_VERSION + 1, and so on. An
+# entry is an SQL script or a function that gets the connection; each runs in a transaction.
+MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [_revision_epochs]
 
 
 class OldDataError(RuntimeError):
@@ -159,7 +179,7 @@ def check_version(conn: sqlite3.Connection) -> int:
     if version == 0:
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").fetchone():
             raise OldDataError()
-    elif version < SCHEMA_VERSION:
+    elif version < BASE_VERSION:
         raise OldDataError()
     return version
 
@@ -194,12 +214,15 @@ class Database:
                         self.conn.execute(statement)
                 self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             version = SCHEMA_VERSION
-        done = version - SCHEMA_VERSION
-        for number, script in enumerate(MIGRATIONS[done:], start=version + 1):
+        done = version - BASE_VERSION
+        for number, step in enumerate(MIGRATIONS[done:], start=version + 1):
             with self.transaction():
-                for statement in script.split(";"):
-                    if statement.strip():
-                        self.conn.execute(statement)
+                if callable(step):
+                    step(self.conn)
+                else:
+                    for statement in step.split(";"):
+                        if statement.strip():
+                            self.conn.execute(statement)
                 self.conn.execute(f"PRAGMA user_version = {number}")
 
     @contextmanager

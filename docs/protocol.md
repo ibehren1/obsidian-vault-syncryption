@@ -389,7 +389,9 @@ In a single SQLite transaction, the server:
 
 Response `201`: the revision object.
 
-Other checks: `meta` is at most 64 KiB once decoded (`413 too_large`), a revision has at
+Other checks: `meta` is at most 64 KiB once decoded (`413 too_large`) and must start with
+the object header (crypto.md 8.1: format `0x01`, then an epoch of at least 1), or the
+server returns `422 malformed`. The server keeps the epoch for retention (9.3). A revision has at
 most 10,000 blobs, and a deletion must have an empty `blobs` list (`400 bad_request`).
 
 `GET .../revs` returns `{"revisions": [<revision object>, ...], "more": bool}`. `limit` is
@@ -397,6 +399,31 @@ at most 100 (default 50). To page back, pass the last `rev` as `before`.
 
 Re-creating a deleted file uses the tombstone's `rev` as `parentRev`. Locks are never
 checked here: they are advisory (section 11).
+
+A revision that retention removed (9.3) returns `404 not_found`, and its blobs do too once
+the garbage collector has run.
+
+### 9.3 Retention
+The server prunes old revisions once an hour, then the blob garbage collector (section 8)
+deletes the blobs no revision references any more. The values are fixed:
+
+| Rule | A revision that isn't its file's head is removed when |
+|---|---|
+| History | it is older than 30 days and at least 10 newer revisions of the file exist |
+| Deleted files | the file's head is a deletion older than 90 days |
+| Old keys | a revision of the same file under a newer epoch exists and is older than 30 days |
+
+- The head of every file is never removed, deletions (tombstones) included, so a
+  re-created file always has its `parentRev`, and a client that is behind still reaches
+  the current state.
+- The "old keys" rule applies even to the last 10 revisions. After a rotation (crypto.md
+  8.4) a file's history starts again from its re-encrypted revision 30 days later, and a
+  revoked device's copy of an old vault key no longer opens anything on the server.
+- The server reads the epoch from the clear header of `meta` (crypto.md 8.1). It never
+  decrypts anything.
+- Retention changes only what the server keeps. Files on devices are never touched.
+- A merge whose base was removed falls back to a merge without a base, which leaves a conflict copy
+  more often (PLAN, Conflicts).
 
 ## 10. Change feed and long-poll
 
@@ -415,7 +442,9 @@ checked here: they are advisory (section 11).
 - `cursor` is the highest `rev` returned (or `since` if there are none). The client stores
   it in IndexedDB after it has applied the batch.
 - `limit` is at most 1000.
-- The feed isn't compacted in v1.
+- Revisions removed by retention (9.3) no longer appear. Every file's head always does,
+  so a client that is behind still reaches the current state. A client that meets a
+  revision that was removed meanwhile (`404`) fetches the file's head instead.
 - `keyringVersion` is the vault's current keyring version. A client with an older one
   fetches the keyring before it applies the batch, so it knows a new epoch first (crypto.md
   8.4).
@@ -475,6 +504,7 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 | Creating devices | 1 per vault name; deleted after 24 hours if the vault wasn't created |
 | `POST /vaults/{id}/recover` | 10 requests/min per device |
 | Concurrent `/wait` per device | 2. The oldest is answered with `changed: false`. |
+| Revision history | every revision for 30 days, at least the last 10 per file; deleted files 90 days; revisions under an old epoch 30 days after a newer one (9.3) |
 
 - A client address is the connecting IP (the last `X-Forwarded-For` entry with
   `BEHIND_PROXY=TRUE`). IPv6 addresses count by their /64, since one host usually has a

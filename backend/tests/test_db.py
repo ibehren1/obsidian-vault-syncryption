@@ -7,7 +7,15 @@ from fastapi.testclient import TestClient
 
 from syncryption_server.__main__ import main
 from syncryption_server.app import create_app
-from syncryption_server.db import OLD_DATA_MESSAGE, SCHEMA_VERSION, Database, OldDataError
+from syncryption_server.db import (
+    BASE_VERSION,
+    MIGRATIONS,
+    OLD_DATA_MESSAGE,
+    SCHEMA_VERSION,
+    Database,
+    OldDataError,
+    check_file,
+)
 from tests.helpers import SECRET, Device
 
 
@@ -70,3 +78,44 @@ def test_check_data_command(tmp_path, monkeypatch, capsys):
     old_database(tmp_path / "meta.db")
     assert main(["check-data"]) == 1
     assert "Delete ./data (or the S3 data)" in capsys.readouterr().err
+
+
+def schema_5_database(path) -> None:
+    """A schema 5 database (server 0.1.4): no `revisions.epoch`, with a few revisions."""
+    db = Database(path)
+    db.migrate()
+    db.conn.execute("DROP INDEX revisions_file_epoch")
+    db.conn.execute("ALTER TABLE revisions DROP COLUMN epoch")
+    db.conn.execute("PRAGMA foreign_keys = OFF")
+    metas = [b"\x01\x00\x00\x00\x01ct", b"\x01\x00\x00\x00\x03ct", b"\x01\x00\x01\x00\x00", b"x"]
+    for rev, meta in enumerate(metas, start=1):
+        db.conn.execute(
+            "INSERT INTO revisions (vault_id, rev, file_id, parent_rev, deleted, meta, size, "
+            "device_id, created_at) VALUES ('v', ?, 'f', NULL, 0, ?, 1, 'd', 0)",
+            (rev, meta),
+        )
+    db.conn.execute("PRAGMA user_version = 5")
+    db.close()
+
+
+def test_schema_5_migrates_to_6_with_epochs(tmp_path):
+    schema_5_database(tmp_path / "meta.db")
+    db = Database(tmp_path / "meta.db")
+    db.migrate()
+    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 6
+    assert BASE_VERSION + len(MIGRATIONS) == SCHEMA_VERSION
+    epochs = [r[0] for r in db.all("SELECT epoch FROM revisions ORDER BY rev")]
+    assert epochs == [1, 3, 65536, 1]  # a header that can't be read keeps the default
+    indexes = {r[0] for r in db.all("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "revisions_file_epoch" in indexes
+    db.close()
+
+
+def test_schema_5_data_is_accepted_and_migrated_on_start(settings, clock):
+    schema_5_database(settings.db_path)
+    check_file(settings.db_path)  # the entrypoint's check accepts it
+    with TestClient(create_app(settings, clock=clock)):
+        pass
+    db = Database(settings.db_path)
+    assert db.one("PRAGMA user_version")[0] == 6
+    db.close()

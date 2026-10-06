@@ -43,7 +43,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 
 | Module | Responsibility |
 |---|---|
-| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly blob GC task, `/health`, the HTML `/` page, version headers, the maintenance `503` for `/api/v1` |
+| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, the HTML `/` page, version headers, the maintenance `503` for `/api/v1` |
 | `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors) |
 | `db` | SQLite connection (WAL mode), schema migrations (`PRAGMA user_version`), `BEGIN IMMEDIATE` transaction helper |
 | `errors` | `ApiError` and the handlers that turn every error into the protocol's `{error, message, details}` shape |
@@ -55,6 +55,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `vaults` | open/create the key's vault by name, keyring versions, recovery |
 | `storage` | `BlobStore` protocol, `LocalBlobStore`, `S3BlobStore` |
 | `blobs` | blob upload, download and `missing`, and the garbage collector |
+| `retention` | hourly pruning of old revisions (protocol.md 9.3) |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
 | `locks` | lease locks and `locksSeq` (M6) |
 | `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode) |
@@ -137,6 +138,7 @@ erDiagram
         int parent_rev
         bool deleted
         blob meta
+        int epoch
         int size
         text device_id FK
         int created_at
@@ -209,6 +211,11 @@ class BlobStore(Protocol):
 - The garbage collector deletes blobs that no revision references and that are older than
   24 h: first the row, then the stored object. Uploads and the collector take the same
   per-blob lock, so an upload that arrives during collection is never half deleted.
+- The collector works from the database only: it selects unreferenced `blobs` rows and
+  deletes each object by its key. It never lists the store. Before it runs, `retention`
+  removes old revisions (protocol.md 9.3), which is what makes their blobs unreferenced.
+  Listing is used only by an admin purge (the vault's own prefix) and by `MIGRATE_TO_S3`.
+  Capacity and growth are described in [scaling.md](scaling.md).
 
 ### 2.3 Long-poll
 Each vault has an `asyncio.Condition`. A commit or lock change notifies it after the
@@ -346,7 +353,8 @@ flowchart TD
   keyring); revisions that fail their checks are left out and counted. Text files can be
   previewed. Restoring syncs first, so unsynced local edits become a revision of their
   own, then writes the old content to the file and commits it as a new revision on top of
-  the head; history is never rewritten. "Restore a deleted file" lists the synced paths
+  the head, so a restore never rewrites history. The server prunes old revisions
+  (protocol.md 9.3), and the dialog says what it keeps. "Restore a deleted file" lists the synced paths
   whose last revision is a deletion and opens the same history.
 
 - **Pairing:** a new key of an existing vault is pending; it shows its pairing code and

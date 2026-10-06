@@ -526,6 +526,11 @@ If the revoked device is the keyring's `recoverySetBy`, step 2 also removes the 
 key (all three fields), and the plugin asks the user to create a new one: the revoked
 device may have kept a copy of it.
 
+The server removes a file's revisions under the old epoch 30 days after the file has one
+under the new epoch (protocol.md 9.3), so the old copies don't stay on the server. The
+keyring keeps every epoch (6.4): a VDK is 32 bytes, and once the old ciphertext is gone it
+opens nothing on the server.
+
 Status: implemented. The epochs and the chain checks are tested with `keyring.json`, and
 the revocation flow and background re-encryption against the real backend
 (`plugin/tests/revocation.test.ts`).

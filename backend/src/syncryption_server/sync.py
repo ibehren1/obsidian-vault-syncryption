@@ -97,8 +97,19 @@ def _revisions(state: AppState, rows: list[sqlite3.Row]) -> list[Revision]:
 
 
 def _revision(state: AppState, vault_id: str, rev: int) -> Revision:
+    """A revision that must exist: a head, or one just committed (retention keeps heads)."""
     row = state.db.one("SELECT * FROM revisions WHERE vault_id = ? AND rev = ?", vault_id, rev)
+    if row is None:
+        raise ApiError(500, "internal", "A file's head revision is missing.")
     return _revisions(state, [row])[0]
+
+
+def meta_epoch(meta: bytes) -> int:
+    """The key epoch from the meta header, `0x01 || u32be(epoch)` (crypto.md 8.1)."""
+    epoch = int.from_bytes(meta[1:5], "big") if len(meta) >= 5 and meta[0] == 1 else 0
+    if epoch == 0:
+        raise ApiError(422, "malformed", "meta must start with the 0x01 || u32be(epoch) header.")
+    return epoch
 
 
 @router.put("/files/{file_id}", status_code=201)
@@ -119,6 +130,7 @@ async def commit(
         raise bad_request("Blob ids are 64 lowercase hex characters.")
     if body.deleted and body.blobs:
         raise bad_request("A deletion has no blobs.")
+    epoch = meta_epoch(meta)
 
     stale = False
     with state.db.transaction() as db:
@@ -150,7 +162,7 @@ async def commit(
             ).fetchone()[0]
             db.execute(
                 "INSERT INTO revisions (vault_id, rev, file_id, parent_rev, deleted, meta, size, "
-                "device_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "device_id, created_at, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     vault_id,
                     rev,
@@ -161,6 +173,7 @@ async def commit(
                     len(meta) + sum(sizes[b] for b in body.blobs),
                     caller.device_id,
                     state.now(),
+                    epoch,
                 ),
             )
             db.executemany(

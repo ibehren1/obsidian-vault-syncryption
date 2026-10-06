@@ -1,7 +1,7 @@
 import hashlib
 
 from syncryption_server.blobs import MAX_BLOB_SIZE, collect_garbage
-from tests.helpers import SECRET, Device, blob, file_id
+from tests.helpers import META, SECRET, Device, blob, file_id
 
 
 def test_upload_and_download(client, alice, settings):
@@ -83,7 +83,7 @@ def test_garbage_collection(client, clock, alice):
         alice.put(f"/api/v1/vaults/{vault_id}/blobs/{blob_id}", content=data)
     alice.put(
         f"/api/v1/vaults/{vault_id}/files/{file_id()}",
-        json={"parentRev": None, "meta": "bWV0YQ", "blobs": [kept]},
+        json={"parentRev": None, "meta": META, "blobs": [kept]},
     )
     state = client.app.state.ctx
     run = client.portal.call  # the app's event loop, where the database lives

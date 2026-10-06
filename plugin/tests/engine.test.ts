@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "../src/api/http";
 import { MemoryStore } from "../src/store/state";
 import { CURSOR, DEFERRED, FAILED } from "../src/sync/engine";
 import { MemoryFs } from "../src/sync/fs";
@@ -359,6 +360,32 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		const history = await a.engine.history("Note.md");
 		expect(history.entries).toHaveLength(1);
 		expect(history.rejected).toBe(1);
+	});
+	it("applies the head when a pulled revision was pruned on the server", async () => {
+		const [a, b] = await twoDevices();
+		a.fs.set("Note.md", "one");
+		await a.engine.sync();
+		a.fs.set("Note.md", "two");
+		await a.engine.sync();
+		// The first revision's blob is gone (pruned) by the time b downloads it.
+		const getBlob = b.session.api.getBlob.bind(b.session.api);
+		let pruned = 0;
+		b.session.api.getBlob = async (...args) => {
+			if (pruned++ === 0) throw new ApiError(404, "not_found", "Not found.");
+			return getBlob(...args);
+		};
+		await b.engine.sync();
+		expect(pruned).toBeGreaterThan(1);
+		expect(b.fs.text("Note.md")).toBe("two");
+		expect(b.warnings).toEqual([]);
+		expect(await b.store.getMeta(FAILED)).toEqual([]);
+
+		const old = (await a.engine.history("Note.md")).entries[1]!.rev;
+		a.session.api.revision = async () => {
+			throw new ApiError(404, "not_found", "Not found.");
+		};
+		await expect(a.engine.readRevision("Note.md", old)).rejects.toThrow("This version is no longer kept on the server.");
+		await expect(a.engine.restore("Note.md", old)).rejects.toThrow("no longer kept");
 	});
 	it("keeps going when a remote change can't be written, and writes it later", async () => {
 		const [a, b] = await twoDevices();

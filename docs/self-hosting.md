@@ -133,7 +133,7 @@ it.
 
 ## 5. Admin page
 `https://notes.example.com/admin` lists every user with their vaults and each vault's
-keys: the stored (encrypted) size of each vault, its number of files, when it was created
+keys: the stored (encrypted) size of each vault, its number of files and of kept revisions, when it was created
 and last changed, and each key's fingerprint, device name and when it was last seen. File names and contents stay encrypted, so
 the page can't show them.
 
@@ -175,6 +175,12 @@ described in [protocol.md](protocol.md), sections 2 and 14.
 | `./data/meta.db` (+ `-wal`, `-shm`) | SQLite: users, devices, vaults, revisions (encrypted metadata) |
 | `./data/blobs/` | encrypted file chunks, when S3 is not used |
 | `./data/caddy/` | TLS certificates |
+
+**Space:** the server keeps every version of a file for 30 days and at least the last 10,
+a deleted file's versions for 90 days, and the copies left by a key change for 30 days
+(protocol.md 9.3). Older ones are removed every hour and their space is freed, with nothing
+to configure. How storage grows and how far one container goes is in
+[scaling.md](scaling.md).
 
 Everything except the certificates is ciphertext or non-secret metadata, but back it up
 anyway: losing it means devices have to push everything again.

@@ -169,3 +169,12 @@ def blob(data: bytes) -> tuple[str, bytes]:
 
 def file_id(n: int = 0) -> str:
     return b64u(hashlib.sha256(str(n).encode()).digest())
+
+
+def meta(body: bytes = b"meta", epoch: int = 1) -> str:
+    """Encrypted metadata as the server sees it: the header `0x01 || u32be(epoch)`, then
+    opaque bytes (crypto.md 8.1)."""
+    return b64u(b"\x01" + epoch.to_bytes(4, "big") + body)
+
+
+META = meta()

@@ -19,6 +19,7 @@ from syncryption_server import (
     blobs,
     devices,
     locks,
+    retention,
     sync,
     vaults,
 )
@@ -123,6 +124,13 @@ async def _gc_loop(state: AppState) -> None:
     while True:
         await asyncio.sleep(GC_INTERVAL)
         try:
+            pruned = await retention.prune(state)
+            if pruned:
+                log.info("retention pruned %d old revisions", pruned)
+        except Exception:
+            log.exception("history retention failed")
+        try:
+            # Blobs a prune freed are usually older than GC_GRACE, so they go in this pass.
             deleted = await blobs.collect_garbage(state)
             if deleted:
                 log.info("garbage collection deleted %d unreferenced blobs", deleted)

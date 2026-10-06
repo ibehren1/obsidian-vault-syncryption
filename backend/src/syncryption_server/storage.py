@@ -105,9 +105,20 @@ class LocalBlobStore:
         await asyncio.to_thread(self._path(key).unlink, missing_ok=True)
 
     async def iter_keys(self, prefix: str = "") -> AsyncIterator[str]:
-        base = self.root / "blobs"
-        paths = await asyncio.to_thread(lambda: sorted(p for p in base.rglob("*") if p.is_file()))
-        for p in paths:
+        # Walk only the deepest directory the prefix names (a vault purge lists one vault).
+        head, _, _ = prefix.rpartition("/")
+        if head == "blobs" or head.startswith("blobs/"):
+            _check_key(head)
+            base = self.root / head
+        else:
+            base = self.root / "blobs"
+
+        def walk() -> list[Path]:
+            if not base.is_dir():
+                return []
+            return sorted(p for p in base.rglob("*") if p.is_file())
+
+        for p in await asyncio.to_thread(walk):
             key = p.relative_to(self.root).as_posix()
             if not p.name.startswith(".tmp-") and key.startswith(prefix):
                 yield key

@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from tests.helpers import ADMIN_TOKEN, SECRET, Device, blob, file_id
+from tests.helpers import ADMIN_TOKEN, META, SECRET, Device, blob, file_id
 
 BEARER = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
@@ -15,7 +15,7 @@ def vault(alice) -> str:
     assert alice.put(f"/api/v1/vaults/{vault_id}/blobs/{blob_id}", content=data).status_code == 201
     r = alice.put(
         f"/api/v1/vaults/{vault_id}/files/{file_id()}",
-        json={"parentRev": None, "deleted": False, "meta": "bWV0YQ", "blobs": [blob_id]},
+        json={"parentRev": None, "deleted": False, "meta": META, "blobs": [blob_id]},
     )
     assert r.status_code == 201, r.text
     return vault_id
@@ -93,6 +93,7 @@ def test_lists_users_vaults_sizes_and_devices(client, alice, vault):
     assert "devices" not in user
     (v,) = user["vaults"]
     assert (v["name"], v["size"], v["files"], v["disabled"]) == ("Personal", 10, 1, False)
+    assert v["revisions"] == 1
     assert v["lastChangeAt"] is not None
     assert [(d["name"], d["status"]) for d in v["devices"]] == [
         ("MacBook", "active"),
@@ -121,6 +122,14 @@ def test_page_lists_devices_with_fingerprints(client, alice):
     page = client.get("/admin", headers=cookie).text
     fp = alice.get("/api/v1/devices/self").json()["fingerprint"]
     assert "MacBook" in page and fp in page
+
+
+def test_page_explains_retention_and_counts_versions(client, alice, vault):
+    cookie, _ = login(client)
+    page = client.get("/admin", headers=cookie).text
+    assert "every version for 30 days, at least the last 10" in page
+    assert "deleted files for 90 days" in page
+    assert "<th>Versions</th>" in page and '<td class="num">1</td>' in page
 
 
 def test_disable_and_enable_a_vault(client, alice, vault):

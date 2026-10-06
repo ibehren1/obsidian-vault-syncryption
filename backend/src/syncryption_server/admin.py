@@ -27,6 +27,7 @@ from syncryption_server.auth import client_ip, limit_key, request_origin
 from syncryption_server.config import MAX_NOTE, note_problem
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found
+from syncryption_server.retention import DELETED_DAYS, KEEP_DAYS, KEEP_VERSIONS, OLD_EPOCH_DAYS
 from syncryption_server.sshkeys import fingerprint, parse_public_key
 from syncryption_server.state import AppState, Maintenance, get_state
 
@@ -139,6 +140,7 @@ def overview(state: AppState) -> list[dict]:
         "(SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.vault_id = v.id) AS size, "
         "(SELECT COUNT(*) FROM files f JOIN revisions r ON r.vault_id = f.vault_id "
         "AND r.rev = f.head_rev WHERE f.vault_id = v.id AND r.deleted = 0) AS files, "
+        "(SELECT COUNT(*) FROM revisions r WHERE r.vault_id = v.id) AS revisions, "
         "(SELECT MAX(created_at) FROM revisions r WHERE r.vault_id = v.id) AS last_change "
         "FROM vaults v ORDER BY v.name"
     )
@@ -174,6 +176,7 @@ def overview(state: AppState) -> list[dict]:
                         "name": v["name"],
                         "size": v["size"],
                         "files": v["files"],
+                        "revisions": v["revisions"],
                         "createdAt": time(v["created_at"]),
                         "lastChangeAt": time(v["last_change"]),
                         "disabled": v["disabled_at"] is not None,
@@ -513,6 +516,10 @@ def _dashboard(admin: Admin, state: AppState, message: str | None, error: bool) 
     parts.append(
         f'<p class="muted">{len(users)} users, {sum(len(u["vaults"]) for u in users)} vaults, '
         f"{_size(total)} stored. Stored size counts history and deleted files still kept. "
+        f"The server keeps every version for {KEEP_DAYS} days, at least the last "
+        f"{KEEP_VERSIONS} of each file, and deleted files for {DELETED_DAYS} days; the copies "
+        f"a key change leaves behind go after {OLD_EPOCH_DAYS} days. Older versions are "
+        "removed automatically. "
         "Each device is one encryption key in one vault; purging a vault deletes its devices."
         "</p>"
     )
@@ -528,7 +535,8 @@ def _dashboard(admin: Admin, state: AppState, message: str | None, error: bool) 
         )
         if u["vaults"]:
             parts.append(
-                "<table><tr><th>Vault</th><th>Stored</th><th>Files</th><th>Created</th>"
+                "<table><tr><th>Vault</th><th>Stored</th><th>Files</th><th>Versions</th>"
+                "<th>Created</th>"
                 "<th>Last change</th><th></th></tr>"
             )
             for v in u["vaults"]:
@@ -536,6 +544,7 @@ def _dashboard(admin: Admin, state: AppState, message: str | None, error: bool) 
                 parts.append(
                     f"<tr><td>{html.escape(v['name'])}{vtag}</td>"
                     f'<td class="num">{_size(v["size"])}</td><td class="num">{v["files"]}</td>'
+                    f'<td class="num">{v["revisions"]}</td>'
                     f"<td>{_when(v['createdAt'])}</td><td>{_when(v['lastChangeAt'])}</td>"
                     f"<td>{_actions(admin, 'vaults', v, v['name'])}</td></tr>"
                 )

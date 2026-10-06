@@ -1,4 +1,4 @@
-from tests.helpers import SECRET, Device, blob, file_id
+from tests.helpers import META, SECRET, Device, blob, file_id
 
 
 def devices(d: Device, vault_id: str | None = None) -> list[dict]:
@@ -126,7 +126,7 @@ def test_removed_device_keeps_its_history(client, alice):
     vault = alice.vault_id
     blob_id, data = blob(b"x")
     assert phone.put(f"/api/v1/vaults/{vault}/blobs/{blob_id}", content=data).status_code == 201
-    body = {"parentRev": None, "deleted": False, "meta": "bWV0YQ", "blobs": [blob_id]}
+    body = {"parentRev": None, "deleted": False, "meta": META, "blobs": [blob_id]}
     assert phone.put(f"/api/v1/vaults/{vault}/files/{file_id()}", json=body).status_code == 201
     assert alice.delete(f"/api/v1/vaults/{vault}/devices/{phone.device_id}").status_code == 200
     changes = alice.get(f"/api/v1/vaults/{vault}/changes").json()["changes"]

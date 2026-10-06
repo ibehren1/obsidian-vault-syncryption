@@ -6,6 +6,9 @@ import { isMergeable } from "../sync/merge";
 
 /** Preview at most this much of a text revision. */
 const PREVIEW_BYTES = 256 * 1024;
+/** What the server keeps (protocol.md 9.3). */
+const RETENTION =
+	"The server keeps every version for 30 days, at least the last 10 (older ones after a key change only for 30 days), and deleted files for 90 days.";
 
 export interface HistorySource {
 	history(path: string, before?: number): Promise<HistoryPage>;
@@ -48,6 +51,7 @@ export class HistoryModal extends Modal {
 			return;
 		}
 		status.remove();
+		const onlyDeletion = this.first && page.next === undefined && page.entries.length === 1 && page.entries[0]!.deleted;
 		if (this.first && page.entries.length === 0) {
 			this.list.createEl("p", { text: "This file has no synced revisions yet." });
 		}
@@ -65,6 +69,11 @@ export class HistoryModal extends Modal {
 			const next = page.next;
 			this.more = this.contentEl.createDiv();
 			new Setting(this.more).addButton((b) => b.setButtonText("Show older").onClick(() => void this.load(next)));
+		} else {
+			if (onlyDeletion) {
+				this.list.createEl("p", { text: "The earlier versions of this deleted file were removed by the server." });
+			}
+			this.list.createEl("p", { text: RETENTION, cls: "syncryption-note" });
 		}
 	}
 

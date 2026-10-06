@@ -181,8 +181,14 @@ export class SyncEngine {
 	}
 
 	/** The content of revision `rev` of `path`, or null for a deletion. Throws if it fails its checks. */
-	readRevision(path: string, rev: number): Promise<Uint8Array | null> {
-		return this.content(this.opts.cipher.fileId(path), rev);
+	async readRevision(path: string, rev: number): Promise<Uint8Array | null> {
+		try {
+			return await this.content(this.opts.cipher.fileId(path), rev);
+		} catch (e) {
+			// The server prunes old revisions (protocol.md 9.3).
+			if (e instanceof ApiError && e.status === 404) throw new Error("This version is no longer kept on the server.");
+			throw e;
+		}
 	}
 
 	/**
@@ -230,17 +236,29 @@ export class SyncEngine {
 	/**
 	 * Apply a remote revision. If writing it here fails (a name the file system refuses, or
 	 * one that differs only in case from another file), keep it to try again on the next
-	 * pull instead of stopping the sync, and warn the first time.
+	 * pull instead of stopping the sync, and warn the first time. A revision the server has
+	 * pruned since (a 404 for it or its blobs, protocol.md 9.3) is replaced by the file's head,
+	 * which is never pruned.
 	 */
 	private async applyOrKeep(revision: Revision, failed: Revision[], deferred?: Revision[], first = true): Promise<void> {
+		let current = revision;
 		try {
-			await this.applyRemote(revision, deferred);
+			try {
+				await this.applyRemote(revision, deferred);
+			} catch (e) {
+				if (!(e instanceof ApiError) || e.status !== 404) throw e;
+				const head = await this.opts.api.head(this.opts.vaultId, revision.fileId);
+				if (head.rev === revision.rev) throw e;
+				current = head;
+				// Skipped by applyRemote unless newer than the synced revision.
+				await this.applyRemote(head, deferred);
+			}
 		} catch (e) {
 			if (e instanceof ApiError || e instanceof NetworkError) throw e;
-			failed.push(revision);
+			failed.push(current);
 			if (first) {
 				const reason = e instanceof Error && e.message ? `: ${e.message}` : "";
-				this.warn(`Couldn't write a remote change here (revision ${revision.rev})${reason}. It is tried again on every sync.`);
+				this.warn(`Couldn't write a remote change here (revision ${current.rev})${reason}. It is tried again on every sync.`);
 			}
 		}
 	}
