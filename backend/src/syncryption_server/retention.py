@@ -7,8 +7,6 @@ copies a key rotation leaves behind. A file's head revision is never pruned, so 
 stays as the `parentRev` for re-creating the file. The blob GC then frees the chunks.
 """
 
-import asyncio
-
 from syncryption_server.state import AppState
 
 KEEP_DAYS = 30
@@ -52,21 +50,22 @@ _SAME_HEAD = (
 async def prune(state: AppState) -> int:
     """Delete the revisions the retention rules drop. Returns how many were deleted."""
     now = state.now()
-    rows = state.db.conn.execute(
-        _SELECT,
-        {
-            "deleted_before": now - DELETED_DAYS * DAY,
-            "epoch_before": now - OLD_EPOCH_DAYS * DAY,
-            "keep_before": now - KEEP_DAYS * DAY,
-            "keep_versions": KEEP_VERSIONS,
-        },
-    ).fetchall()
-    params = [dict(r) for r in rows]
-    deleted = 0
-    for i in range(0, len(params), BATCH):
-        if i:
-            await asyncio.sleep(0)  # let requests in between batches
-        batch = params[i : i + BATCH]
+    params = await state.db.read(
+        lambda: [
+            dict(r)
+            for r in state.db.conn.execute(
+                _SELECT,
+                {
+                    "deleted_before": now - DELETED_DAYS * DAY,
+                    "epoch_before": now - OLD_EPOCH_DAYS * DAY,
+                    "keep_before": now - KEEP_DAYS * DAY,
+                    "keep_versions": KEEP_VERSIONS,
+                },
+            )
+        ]
+    )
+
+    def delete(batch: list[dict]) -> int:
         with state.db.transaction() as db:
             # revision_blobs first: it references revisions, with no cascade.
             db.executemany(
@@ -74,9 +73,15 @@ async def prune(state: AppState) -> int:
                 f"AND {_SAME_HEAD}",
                 batch,
             )
-            deleted += db.executemany(
+            return db.executemany(
                 "DELETE FROM revisions WHERE vault_id = :vault_id AND rev = :rev "  # noqa: S608
                 f"AND {_SAME_HEAD}",
                 batch,
             ).rowcount
+
+    deleted = 0
+    # One transaction per batch: other requests' queries run in between.
+    for i in range(0, len(params), BATCH):
+        batch = params[i : i + BATCH]
+        deleted += await state.db.run(lambda batch=batch: delete(batch))
     return deleted

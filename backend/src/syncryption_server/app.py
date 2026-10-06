@@ -151,15 +151,15 @@ def create_app(
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         db = Database(settings.db_path)
         try:
-            db.migrate()
+            await db.run(db.migrate)
         except OldDataError as e:
-            db.close()
+            await asyncio.to_thread(db.close)
             log.error("%s", e)
             raise
         blob_store = store or make_blob_store(settings)
         await blob_store.start()
         state = AppState(settings=settings, db=db, store=blob_store)
-        state.maintenance = load_maintenance(db)
+        state.maintenance = await db.run(lambda: load_maintenance(db))
         if clock is not None:
             state.clock = clock
         app.state.ctx = state
@@ -171,7 +171,7 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await gc
             await blob_store.close()
-            db.close()
+            await asyncio.to_thread(db.close)
 
     app = FastAPI(title="Vault Syncryption", version=__version__, lifespan=lifespan)
     install_error_handlers(app)
@@ -204,7 +204,7 @@ def create_app(
             "adminContact": state.settings.admin_contact or None,
         }
         try:
-            state.db.ping()
+            await state.db.run(state.db.ping)
             await state.store.ping()
         except Exception:
             log.exception("health check failed")

@@ -1,6 +1,8 @@
-"""The schema version, and refusing data from servers before 0.1.4."""
+"""The schema version, refusing data from servers before 0.1.4, and the database threads."""
 
+import asyncio
 import sqlite3
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,11 +13,13 @@ from syncryption_server.db import (
     BASE_VERSION,
     MIGRATIONS,
     OLD_DATA_MESSAGE,
+    READERS,
     SCHEMA_VERSION,
     Database,
     OldDataError,
     check_file,
 )
+from syncryption_server.state import Notifier
 from tests.helpers import SECRET, Device
 
 
@@ -119,3 +123,104 @@ def test_schema_5_data_is_accepted_and_migrated_on_start(settings, clock):
     db = Database(settings.db_path)
     assert db.one("PRAGMA user_version")[0] == 6
     db.close()
+
+
+async def test_queries_on_the_event_loop_thread_are_refused(tmp_path):
+    db = Database(tmp_path / "meta.db")
+    try:
+        with pytest.raises(RuntimeError, match="event loop thread"):
+            db.one("SELECT 1")
+        assert await db.run(lambda: db.one("SELECT 1")[0]) == 1
+    finally:
+        await asyncio.to_thread(db.close)
+
+
+async def test_the_loop_runs_while_a_query_does(tmp_path):
+    db = Database(tmp_path / "meta.db")
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.001)
+
+    slow = (
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000000) "
+        "SELECT COUNT(*) FROM n"
+    )
+    task = asyncio.create_task(ticker())
+    try:
+        await asyncio.sleep(0)
+        start = ticks
+        assert await db.run(lambda: db.one(slow)[0]) == 3000000
+        assert ticks - start > 5
+    finally:
+        task.cancel()
+        await asyncio.to_thread(db.close)
+
+
+async def test_run_keeps_order_and_raises(tmp_path):
+    db = Database(tmp_path / "meta.db")
+    order: list[int] = []
+    try:
+        await asyncio.gather(*(db.run(lambda i=i: order.append(i)) for i in range(20)))
+        assert order == list(range(20))
+        with pytest.raises(sqlite3.OperationalError):
+            await db.run(lambda: db.one("SELECT * FROM missing"))
+    finally:
+        await asyncio.to_thread(db.close)
+
+
+async def test_a_notify_during_the_check_is_not_lost():
+    notifier = Notifier()
+    checks = 0
+
+    async def changed() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            # Lands after the check has looked, before the waiter sleeps.
+            await notifier.notify("v")
+            return False
+        return True
+
+    moved = await asyncio.wait_for(notifier.wait("v", "d", changed, 10), timeout=2)
+    assert moved
+
+
+async def test_reads_run_beside_the_writer_and_each_other(tmp_path):
+    db = Database(tmp_path / "meta.db")
+    await db.run(db.migrate)
+    inside = threading.Barrier(READERS + 1, timeout=5)
+
+    def wait_for_all() -> int:
+        inside.wait()  # passes only once every reader and the writer are in at once
+        return db.one("SELECT COUNT(*) FROM users")[0]
+
+    try:
+        counts = await asyncio.gather(
+            *(db.read(wait_for_all) for _ in range(READERS)), db.run(wait_for_all)
+        )
+        assert counts == [0] * (READERS + 1)
+    finally:
+        await asyncio.to_thread(db.close)
+
+
+async def test_reads_see_committed_writes_and_refuse_to_write(tmp_path):
+    db = Database(tmp_path / "meta.db")
+    await db.run(db.migrate)
+
+    def add() -> None:
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO users (id, username, created_at) VALUES ('u', 'a', 0)")
+
+    try:
+        await db.run(add)
+        assert await db.read(lambda: db.one("SELECT username FROM users")[0]) == "a"
+        with pytest.raises(RuntimeError, match="Database.read"):
+            await db.read(add)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            await db.read(lambda: db.conn.execute("DELETE FROM users"))
+    finally:
+        await asyncio.to_thread(db.close)

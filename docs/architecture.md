@@ -188,8 +188,17 @@ erDiagram
   seconds.
 - `maintenance` and `admin_sessions` stand alone. The app reads `maintenance` at startup and
   then keeps it in memory; only the admin routes change it (protocol.md 14.1).
-- There is one `sqlite3` connection and every handler is `async`, so the database is only
-  touched from the event loop thread. Nothing is awaited inside a transaction.
+- There is one `sqlite3` connection for writes, used only from one dedicated database
+  thread: a handler runs its queries with `await db.run(fn)`. Each stretch of queries that
+  must be consistent is one `fn`, and the thread runs them one at a time, so nothing
+  interleaves inside one. Work that only reads uses `await db.read(fn)` instead: five
+  threads, each with its own read-only connection, run beside the writer, each `fn` in one
+  read transaction, so it sees one snapshot of everything committed before it started.
+  Authentication reads the session on a reader and updates `last_seen_at` on the writer
+  only when it is due. Using a connection on the event loop thread, or `transaction()` in
+  `read`, raises an error. Nothing is
+  awaited inside a transaction; notifications, blob I/O and blob locks stay on the loop,
+  between the `fn`s.
 
 ### 2.2 Blob store
 ```python

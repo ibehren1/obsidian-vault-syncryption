@@ -115,6 +115,10 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 			{
 				name: "Connect",
 				render: (setting) => {
+					// Follows the connection and the progress of a sync while the tab is open.
+					this.plugin.onStatus = (text) => {
+						setting.setDesc(text);
+					};
 					setting.setDesc(this.plugin.statusText()).addButton((b) =>
 						b
 							.setButtonText("Connect")
@@ -145,6 +149,11 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 			this.vaultKeys(),
 			{ name: "Recovery key", render: (setting) => this.renderRecovery(setting) },
 		];
+	}
+
+	override hide(): void {
+		this.plugin.onStatus = null;
+		super.hide();
 	}
 
 	/** Trim the text fields; a new exclude list rebuilds the path filter. */

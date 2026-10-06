@@ -53,6 +53,26 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		expect(b.warnings).toEqual([]);
 	});
 
+	it("reports its progress through the local files, the outbox and the change feed", async () => {
+		const [a, b] = await twoDevices();
+		a.fs.set("one.md", "1");
+		a.fs.set("two.md", "2");
+		expect(await a.engine.localFileCount()).toBe(2);
+		await a.engine.sync();
+		expect(a.progress.filter((p) => p.phase === "scan")).toEqual([
+			{ phase: "scan", done: 0, total: 2 },
+			{ phase: "scan", done: 1, total: 2 },
+		]);
+		expect(a.progress.filter((p) => p.phase === "push")).toEqual([
+			{ phase: "push", done: 0, total: 2 },
+			{ phase: "push", done: 1, total: 2 },
+		]);
+		await b.engine.sync();
+		const pulls = b.progress.filter((p) => p.phase === "pull");
+		expect(pulls.map((p) => p.done)).toEqual([1, 2]);
+		expect(pulls.every((p) => p.phase === "pull" && p.since === 0 && p.rev > 0)).toBe(true);
+	});
+
 	it("doesn't push files that were only touched", async () => {
 		const [a] = await twoDevices();
 		a.fs.set("a.md", "same");

@@ -1,13 +1,22 @@
 """SQLite metadata store (docs/architecture.md 2.1).
 
-One connection in WAL mode, used only from the event loop thread. Writes go through
-`transaction()`, which takes the write lock up front (`BEGIN IMMEDIATE`), so a commit's
-read-check-write is serialised with every other writer. Never `await` inside a
-transaction.
+WAL mode, and no query on the event loop thread, so a slow query never holds up the loop.
+Handlers pass each piece of work that must be consistent as one function:
+- `run()` for anything that writes: one connection on one database thread, so these
+  functions run one at a time, in order. Writes go through `transaction()`, which takes the
+  write lock up front (`BEGIN IMMEDIATE`), so a commit's read-check-write is serialised with
+  every other writer.
+- `read()` for work that only reads: READERS threads, each with its own read-only
+  connection, beside the database thread and each other. Each function runs in one read
+  transaction, so it sees one snapshot: everything committed before it started.
+Inside either, wait only on SQLite.
 """
 
+import asyncio
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,6 +24,8 @@ from pathlib import Path
 # key served every vault of a user (memberships); their data can't be used and isn't migrated.
 # BASE_VERSION is the oldest schema that is migrated; SCHEMA_VERSION is the current one.
 BASE_VERSION = 5
+# Read-only connections for `Database.read`, each on its own thread.
+READERS = 5
 SCHEMA_VERSION = 6
 OLD_DATA_MESSAGE = (
     "This server's data predates server 0.1.4 (one key per device per vault). "
@@ -196,14 +207,65 @@ def check_file(path: Path) -> None:
         conn.close()
 
 
+def _off_loop() -> None:
+    """Queries must not run on the event loop thread: they go through `Database.run`."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError("The database was used on the event loop thread: use Database.run.")
+
+
 class Database:
     def __init__(self, path: Path | str):
-        self.conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA synchronous = NORMAL")
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA busy_timeout = 5000")
+        self._path = Path(path)
+        self._conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite")
+        self._read_executor = ThreadPoolExecutor(
+            max_workers=READERS, thread_name_prefix="sqlite-read"
+        )
+        self._local = threading.local()  # a reader thread's connection
+        self._readers: list[sqlite3.Connection] = []
+        self._readers_lock = threading.Lock()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """The connection of this thread: the reader's on a reader thread, else the writer."""
+        _off_loop()
+        return getattr(self._local, "conn", None) or self._conn
+
+    async def run[T](self, fn: Callable[[], T]) -> T:
+        """Run `fn` on the database thread, after every function passed before it."""
+        return await asyncio.get_running_loop().run_in_executor(self._executor, fn)
+
+    async def read[T](self, fn: Callable[[], T]) -> T:
+        """Run `fn`, which only reads, on a reader thread, in one read transaction."""
+        return await asyncio.get_running_loop().run_in_executor(self._read_executor, self._read, fn)
+
+    def _read[T](self, fn: Callable[[], T]) -> T:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                f"{self._path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000")
+            self._local.conn = conn
+            with self._readers_lock:
+                self._readers.append(conn)
+        conn.execute("BEGIN")
+        try:
+            return fn()
+        finally:
+            conn.execute("ROLLBACK")
 
     def migrate(self) -> None:
         version = check_version(self.conn)
@@ -227,6 +289,8 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        if getattr(self._local, "conn", None) is not None:
+            raise RuntimeError("A write in Database.read: use Database.run.")
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             yield self.conn
@@ -245,4 +309,9 @@ class Database:
         self.conn.execute("SELECT 1").fetchone()
 
     def close(self) -> None:
+        """Wait for queued work, then close. Not on the event loop thread."""
+        self._read_executor.shutdown(wait=True)
+        self._executor.shutdown(wait=True)
+        for conn in self._readers:
+            conn.close()
         self.conn.close()

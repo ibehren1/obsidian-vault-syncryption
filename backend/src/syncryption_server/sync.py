@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from syncryption_server.auth import ActiveCaller, State
+from syncryption_server.auth import ActiveCaller, Caller, State
 from syncryption_server.encoding import BLOB_ID_RE, FILE_ID_RE, b64u, from_b64u, rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found, too_large
 from syncryption_server.state import AppState
@@ -116,6 +116,15 @@ def meta_epoch(meta: bytes) -> int:
 async def commit(
     vault_id: str, file_id: str, body: CommitRequest, caller: ActiveCaller, state: State
 ) -> Revision:
+    rev = await state.db.run(lambda: _commit(vault_id, file_id, body, caller, state))
+    await state.notifier.notify(vault_id)
+    return await state.db.read(lambda: _revision(state, vault_id, rev))
+
+
+def _commit(
+    vault_id: str, file_id: str, body: CommitRequest, caller: Caller, state: AppState
+) -> int:
+    """Commit the revision and return its number, or raise 409 with the head."""
     require_member(state, caller, vault_id)
     _file_id(file_id)
     try:
@@ -194,14 +203,17 @@ async def commit(
             "The file has changed since its parent revision.",
             {"head": head_obj},
         )
-    await state.notifier.notify(vault_id)
-    return _revision(state, vault_id, rev)
+    return rev
 
 
 @router.get("/files/{file_id}")
 async def head_revision(
     vault_id: str, file_id: str, caller: ActiveCaller, state: State
 ) -> Revision:
+    return await state.db.read(lambda: _head_revision(vault_id, file_id, caller, state))
+
+
+def _head_revision(vault_id: str, file_id: str, caller: Caller, state: AppState) -> Revision:
     require_member(state, caller, vault_id)
     row = state.db.one(
         "SELECT head_rev FROM files WHERE vault_id = ? AND file_id = ?", vault_id, _file_id(file_id)
@@ -220,6 +232,12 @@ async def history(
     before: Annotated[int | None, Query(ge=1)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> History:
+    return await state.db.read(lambda: _history(vault_id, file_id, caller, state, before, limit))
+
+
+def _history(
+    vault_id: str, file_id: str, caller: Caller, state: AppState, before: int | None, limit: int
+) -> History:
     require_member(state, caller, vault_id)
     rows = state.db.all(
         "SELECT * FROM revisions WHERE vault_id = ? AND file_id = ? AND rev < ? "
@@ -235,6 +253,12 @@ async def history(
 @router.get("/files/{file_id}/revs/{rev}")
 async def get_revision(
     vault_id: str, file_id: str, rev: int, caller: ActiveCaller, state: State
+) -> Revision:
+    return await state.db.read(lambda: _get_revision(vault_id, file_id, rev, caller, state))
+
+
+def _get_revision(
+    vault_id: str, file_id: str, rev: int, caller: Caller, state: AppState
 ) -> Revision:
     require_member(state, caller, vault_id)
     row = state.db.one(
@@ -256,6 +280,10 @@ async def changes(
     since: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
 ) -> Changes:
+    return await state.db.read(lambda: _changes(vault_id, caller, state, since, limit))
+
+
+def _changes(vault_id: str, caller: Caller, state: AppState, since: int, limit: int) -> Changes:
     require_member(state, caller, vault_id)
     rows = state.db.all(
         "SELECT * FROM revisions WHERE vault_id = ? AND rev > ? ORDER BY rev LIMIT ?",
@@ -283,18 +311,19 @@ async def wait(
     keyringSince: Annotated[int | None, Query(ge=0)] = None,
     timeout: Annotated[float, Query(ge=0, le=MAX_WAIT)] = MAX_WAIT,  # noqa: ASYNC109
 ) -> WaitResponse:
-    require_member(state, caller, vault_id)
+    await state.db.read(lambda: require_member(state, caller, vault_id))
 
     def current() -> sqlite3.Row:
         return state.db.one(
             "SELECT seq, locks_seq, keyring_version FROM vaults WHERE id = ?", vault_id
         )
 
-    def changed() -> bool:
-        row = current()
+    async def changed() -> bool:
+        if state.maintenance is not None:
+            return True
+        row = await state.db.read(current)
         return (
-            state.maintenance is not None
-            or row["seq"] > since
+            row["seq"] > since
             or row["locks_seq"] > locksSince
             or (keyringSince is not None and row["keyring_version"] > keyringSince)
         )
@@ -303,7 +332,7 @@ async def wait(
     # Maintenance started while waiting: answer with its 503 now (protocol.md 14.1).
     if (err := state.maintenance_error()) is not None:
         raise err
-    row = current()
+    row = await state.db.read(current)
     return WaitResponse(
         seq=row["seq"],
         locksSeq=row["locks_seq"],

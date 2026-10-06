@@ -4,7 +4,7 @@ import { ApiClient, type Device } from "./api/client";
 import { ApiError, disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError } from "./api/http";
 import { hasSecretStorage, MIN_APP_VERSION } from "./compat";
 import { generateRecoveryKey } from "./crypto/keyring";
-import { publicKeyText, writeOpenSshPrivateKey, type OpenSshKey } from "./crypto/openssh";
+import { fingerprint, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey, type OpenSshKey } from "./crypto/openssh";
 import { loadKeyText, saveKeyText, unlockKey } from "./keys";
 import { requestUrlTransport } from "./obsidian/transport";
 import { ObsidianFs } from "./obsidian/fs";
@@ -20,14 +20,14 @@ import {
 import { IndexedDbStore } from "./store/idb";
 import { AdapterFs, isHiddenPath, SplitFs } from "./sync/adapter-fs";
 import { VaultCipher } from "./sync/cipher";
-import { CURSOR, SyncEngine, type SyncReport } from "./sync/engine";
+import { CURSOR, SyncEngine, type SyncProgress, type SyncReport } from "./sync/engine";
 import { parseExcludes, pathFilter, type PathFilter } from "./sync/filter";
 import { LiveLoop } from "./sync/live";
 import { LockManager, newClientId } from "./sync/locks";
 import { isMergeable } from "./sync/merge";
 import { connect, handOver, SetupCancelled, type VaultSession } from "./sync/session";
 import { DeletedFilesModal, HistoryModal, type HistorySource } from "./ui/history";
-import { ApproveModal, ConfirmModal, PairingModal, prompt, ReloadModal, type PendingApproval } from "./ui/modals";
+import { ApproveModal, ConfirmModal, confirmFirstSync, PairingModal, prompt, ReloadModal, type PendingApproval } from "./ui/modals";
 import { showRecoveryKey } from "./ui/recovery";
 
 /** Long-poll brings remote changes; the timer is a fallback. Local changes sync soon after. */
@@ -41,6 +41,8 @@ const RECOVERY_OFFERED = "recoveryOffered";
 const DEVICES_CACHE_MS = 10_000;
 /** Maintenance: retry after the server's `Retry-After`, within these bounds (seconds). */
 const MAINTENANCE_RETRY_S = { default: 60, min: 5, max: 600 };
+/** Sync progress is shown at most this often. */
+const PROGRESS_MS = 250;
 
 type State = "off" | "connecting" | "idle" | "syncing" | "offline" | "maintenance" | "error";
 
@@ -83,6 +85,17 @@ export default class SyncryptionPlugin extends Plugin {
 	private retryAt = 0;
 	/** The maintenance notice was shown: once per maintenance period, not on every retry. */
 	private maintenanceNoticed = false;
+	/** What the running sync is doing, for the status text. */
+	private progress = "";
+	private progressAt = 0;
+	private progressPhase: SyncProgress["phase"] | null = null;
+	/** The highest vault `seq` seen, to show how far a pull is. */
+	private seq = 0;
+	/** This device hasn't finished its first sync of the vault: it shows its progress in a notice. */
+	private firstSync = false;
+	private progressNotice: Notice | null = null;
+	/** The settings tab follows the status text while it is open. */
+	onStatus: ((text: string) => void) | null = null;
 	private readonly scheduleSync = debounce(
 		() => {
 			if (!this.paused()) void this.syncNow();
@@ -223,11 +236,12 @@ export default class SyncryptionPlugin extends Plugin {
 	statusText(): string {
 		switch (this.state) {
 			case "off":
+				if (this.detail) return this.detail;
 				return isConfigured(this.settings) ? "Not connected." : "Fill in the settings above, then connect.";
 			case "connecting":
 				return "Connecting…";
 			case "syncing":
-				return "Syncing…";
+				return this.progress ? `Syncing: ${this.progress}` : "Syncing…";
 			case "idle":
 				return this.syncedText();
 			case "offline":
@@ -261,6 +275,9 @@ export default class SyncryptionPlugin extends Plugin {
 		this.sessionSlot = null;
 		this.serverDevices = null;
 		this.engine = null;
+		this.firstSync = false;
+		this.hideProgress();
+		this.detail = "";
 		this.setState("off");
 	}
 
@@ -303,9 +320,7 @@ export default class SyncryptionPlugin extends Plugin {
 				session.store.close();
 				return;
 			}
-			this.session = session;
-			this.sessionSlot = slot;
-			this.engine = new SyncEngine({
+			const engine = new SyncEngine({
 				api,
 				vaultId: session.vault.id,
 				cipher: new VaultCipher(() => session.keyring),
@@ -323,12 +338,32 @@ export default class SyncryptionPlugin extends Plugin {
 				configDir: this.app.vault.configDir,
 				keyring: { version: () => session.keyring.version, refresh: () => session.refreshKeyring() },
 				onWarning: (message) => new Notice(`Sync: ${message}`),
+				onProgress: (progress) => this.showProgress(engine, progress),
 			});
+			this.seq = Math.max(this.seq, session.vault.seq);
+			const first = (await session.store.getMeta<number>(CURSOR)) === undefined;
+			if (first && !(await this.confirmFirstSync(session, engine))) {
+				session.store.close();
+				if (this.abort !== abort) return; // stopped or restarted meanwhile
+				this.stop();
+				this.detail = "Connected, but the first sync wasn't started. Connect again to start it.";
+				this.render();
+				return;
+			}
+			if (this.abort !== abort) {
+				session.store.close();
+				return;
+			}
+			this.session = session;
+			this.sessionSlot = slot;
+			this.engine = engine;
+			this.firstSync = first;
 			this.startLive(session);
 			this.setState("idle");
 			void this.offerRecoveryKey(session);
 			void this.finishRevocations(session);
-			await this.syncNow();
+			// In the background: the first sync of a large vault takes a while.
+			void this.syncNow();
 		} catch (e) {
 			(pairing as PairingModal | null)?.finish();
 			if (this.abort !== abort) return; // stopped or restarted meanwhile
@@ -347,6 +382,20 @@ export default class SyncryptionPlugin extends Plugin {
 			}
 			this.fail(e);
 		}
+	}
+
+	/** Show the setup and what the first sync does, and ask to start it. */
+	private async confirmFirstSync(session: VaultSession, engine: SyncEngine): Promise<boolean> {
+		const s = this.settings;
+		return confirmFirstSync(this.app, {
+			endpoint: s.endpoint,
+			vault: `${s.username} / ${session.vault.name}`,
+			deviceName: s.deviceName,
+			fingerprint: fingerprint(parsePublicKeyText(s.publicKey)),
+			serverRevisions: session.vault.seq,
+			localFiles: await engine.localFileCount(),
+			configDir: this.app.vault.configDir,
+		});
 	}
 
 	private renewTimer = 0;
@@ -491,19 +540,64 @@ export default class SyncryptionPlugin extends Plugin {
 			return;
 		}
 		this.setState("syncing");
+		if (this.firstSync) this.progressNotice ??= new Notice("First sync…", 0);
 		try {
 			const report = await engine.sync();
 			if (this.engine !== engine) return;
+			this.progress = "";
+			this.progressPhase = null;
 			this.lastSync = new Date();
 			this.lastReport = report;
 			this.fileCount = await engine.fileCount();
 			this.lastError = "";
 			this.setState("idle");
+			if (this.firstSync) {
+				this.firstSync = false;
+				this.hideProgress();
+				new Notice(`First sync done. ${plural(this.fileCount ?? 0, "file")} in sync.`, 8000);
+			}
 			this.announce(report);
 			await this.checkApprovals();
 		} catch (e) {
-			if (this.engine === engine) this.fail(e, manual);
+			if (this.engine !== engine) return;
+			this.progress = "";
+			this.progressPhase = null;
+			this.hideProgress();
+			this.fail(e, manual);
 		}
+	}
+
+	/** Follow a sync's progress in the status, and in the notice of a first sync. */
+	private showProgress(engine: SyncEngine, progress: SyncProgress): void {
+		if (this.engine !== engine) return;
+		const now = Date.now();
+		if (progress.phase === this.progressPhase && now - this.progressAt < PROGRESS_MS) return;
+		this.progressAt = now;
+		this.progressPhase = progress.phase;
+		this.progress = this.progressText(progress);
+		this.progressNotice?.setMessage(`First sync: ${this.progress}.`);
+		this.render();
+	}
+
+	/** "receiving changes, 37%", "checking local files, 120 of 800", "uploading, 3 of 12 files" */
+	private progressText(progress: SyncProgress): string {
+		switch (progress.phase) {
+			case "pull": {
+				this.seq = Math.max(this.seq, progress.rev);
+				const total = this.seq - progress.since;
+				const percent = total > 0 ? Math.floor(((progress.rev - progress.since) / total) * 100) : 100;
+				return `receiving changes, ${percent}%`;
+			}
+			case "scan":
+				return `checking local files, ${progress.done} of ${progress.total}`;
+			case "push":
+				return `uploading, ${progress.done} of ${plural(progress.total, "file")}`;
+		}
+	}
+
+	private hideProgress(): void {
+		this.progressNotice?.hide();
+		this.progressNotice = null;
 	}
 
 	/** "Synced at 12:03. 42 files in sync. Last sync: 2 uploaded, 1 received." */
@@ -815,6 +909,7 @@ export default class SyncryptionPlugin extends Plugin {
 		};
 		this.statusBar.setText(label[this.state]);
 		this.statusBar.setAttr("aria-label", this.statusText());
+		this.onStatus?.(this.statusText());
 	}
 }
 

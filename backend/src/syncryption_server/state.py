@@ -3,7 +3,7 @@
 import asyncio
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from fastapi import Request
@@ -71,6 +71,8 @@ class Notifier:
     def __init__(self) -> None:
         self.conditions: dict[str, asyncio.Condition] = {}
         self.waiters: dict[str, deque[tuple[str, _Waiter]]] = defaultdict(deque)
+        # Counts the notifications per vault, so one sent while `changed()` runs isn't lost.
+        self.generations: dict[str, int] = defaultdict(int)
 
     def _condition(self, vault_id: str) -> asyncio.Condition:
         if vault_id not in self.conditions:
@@ -78,6 +80,7 @@ class Notifier:
         return self.conditions[vault_id]
 
     async def notify(self, vault_id: str) -> None:
+        self.generations[vault_id] += 1
         cond = self.conditions.get(vault_id)
         if cond is not None:
             async with cond:
@@ -88,11 +91,17 @@ class Notifier:
             await self.notify(vault_id)
 
     async def wait(
-        self, vault_id: str, device_id: str, changed: Callable[[], bool], seconds: float
+        self,
+        vault_id: str,
+        device_id: str,
+        changed: Callable[[], Awaitable[bool]],
+        seconds: float,
     ) -> bool:
         """Wait until `changed()` is true, the timeout passes, or the device opens a third
-        wait (the oldest then returns). Returns `changed()` at the end."""
+        wait (the oldest then returns). `changed()` runs at the start and after each
+        notification for the vault. Returns `changed()` at the end."""
         cond = self._condition(vault_id)
+        deadline = asyncio.get_running_loop().time() + seconds
         waiter = _Waiter()
         mine = self.waiters[device_id]
         mine.append((vault_id, waiter))
@@ -101,18 +110,31 @@ class Notifier:
             old.kicked = True
             await self.notify(old_vault)
         try:
-            async with cond:
-                await asyncio.wait_for(
-                    cond.wait_for(lambda: waiter.kicked or changed()), timeout=seconds
-                )
-        except TimeoutError:
-            pass
+            while not waiter.kicked:
+                seen = self.generations[vault_id]
+                if await changed():
+                    break
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    async with cond:
+                        await asyncio.wait_for(
+                            cond.wait_for(
+                                lambda seen=seen: (
+                                    waiter.kicked or self.generations[vault_id] != seen
+                                )
+                            ),
+                            timeout=remaining,
+                        )
+                except TimeoutError:
+                    break
         finally:
             if (vault_id, waiter) in mine:
                 mine.remove((vault_id, waiter))
             if not mine:
                 self.waiters.pop(device_id, None)
-        return not waiter.kicked and changed()
+        return not waiter.kicked and await changed()
 
 
 @dataclass(frozen=True)
@@ -161,6 +183,5 @@ class AppState:
 
 
 async def get_state(request: Request) -> AppState:
-    """All handlers and dependencies are async, so the database is only used from the
-    event loop thread."""
+    """The app's state. Handlers run their queries on the database thread (`Database.run`)."""
     return request.app.state.ctx

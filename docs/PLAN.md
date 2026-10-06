@@ -123,6 +123,7 @@ services:
   - hidden files and folders outside the `.obsidian*` folders (Obsidian doesn't index them)
   - an exclude list the user can edit, per device (glob patterns, one per line)
 - **Bootstrap and config changes:** write `community-plugins.json` last, then prompt the user to reload with `app:reload`. On a device's first sync, the vault's config files replace the local defaults without conflict copies.
+- **First sync** (decided 2026-10-06): once a device has connected to a vault it has never synced (no cursor in its local state), the plugin shows the setup (server, vault, device, key fingerprint, local file count, whether the server vault is empty) and what the sync will do, and starts it only when the user confirms. "Not now" disconnects, and the next connect asks again. Connecting doesn't wait for the sync: it runs in the background, and a notice shows its progress (change feed, local scan, uploads) until it finishes.
 - **Device profiles:** every `.obsidian*` folder is synced, so a device can use its own profile through Obsidian's "Override config folder" setting.
 
 ## Sync, Locking, Merge
@@ -146,7 +147,7 @@ services:
   - The Dockerfile uses `ghcr.io/astral-sh/uv` for the build stage and a slim runtime image that adds the `caddy` (2.11) and `litestream` (0.5.17) binaries. The Caddyfile and `litestream.yml` are generated at startup from the environment.
 - **Stack:**
   - FastAPI + uvicorn
-  - SQLite through stdlib `sqlite3`: one connection, used only from the event loop, WAL mode, `BEGIN IMMEDIATE` transactions
+  - SQLite through stdlib `sqlite3`: one write connection on one database thread (`await db.run(fn)`) and five read-only connections on their own threads (`await db.read(fn)`), WAL mode, `BEGIN IMMEDIATE` transactions
   - `aioboto3`
   - `cryptography` (sshsig verification is done in-house)
 - **Storage interface:** `BlobStore` with two implementations, `LocalBlobStore` and `S3BlobStore`. The migration code calls both through the same interface.

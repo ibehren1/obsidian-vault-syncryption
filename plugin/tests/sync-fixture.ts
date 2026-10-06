@@ -1,7 +1,7 @@
 /** Devices (one key each) of one user syncing one vault against the real backend. */
 import { MemoryStore } from "../src/store/state";
 import { VaultCipher } from "../src/sync/cipher";
-import { SyncEngine } from "../src/sync/engine";
+import { SyncEngine, type SyncProgress } from "../src/sync/engine";
 import { pathFilter } from "../src/sync/filter";
 import { MemoryFs } from "../src/sync/fs";
 import { connect, type VaultSession } from "../src/sync/session";
@@ -14,9 +14,16 @@ export interface Device {
 	store: MemoryStore;
 	engine: SyncEngine;
 	warnings: string[];
+	progress: SyncProgress[];
 }
 
-export function engineFor(session: VaultSession, fs: MemoryFs, name: string, warnings: string[]): SyncEngine {
+export function engineFor(
+	session: VaultSession,
+	fs: MemoryFs,
+	name: string,
+	warnings: string[],
+	progress: SyncProgress[] = [],
+): SyncEngine {
 	return new SyncEngine({
 		api: session.api,
 		vaultId: session.vault.id,
@@ -29,6 +36,7 @@ export function engineFor(session: VaultSession, fs: MemoryFs, name: string, war
 		configDir: ".obsidian",
 		keyring: { version: () => session.keyring.version, refresh: () => session.refreshKeyring() },
 		onWarning: (m) => warnings.push(m),
+		onProgress: (p) => progress.push(p),
 	});
 }
 
@@ -48,7 +56,8 @@ export async function device(username: string, vaultName: string, name: string, 
 	});
 	const fs = new MemoryFs();
 	const warnings: string[] = [];
-	return { name, session, fs, store, engine: engineFor(session, fs, name, warnings), warnings };
+	const progress: SyncProgress[] = [];
+	return { name, session, fs, store, engine: engineFor(session, fs, name, warnings, progress), warnings, progress };
 }
 
 /** Connects a second device and approves it from `first` once it waits. */

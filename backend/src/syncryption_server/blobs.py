@@ -2,11 +2,12 @@
 
 import hashlib
 import logging
+import sqlite3
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
-from syncryption_server.auth import ActiveCaller, State
+from syncryption_server.auth import ActiveCaller, Caller, State
 from syncryption_server.encoding import BLOB_ID_RE
 from syncryption_server.errors import ApiError, bad_request, not_found, too_large
 from syncryption_server.state import AppState
@@ -57,15 +58,29 @@ async def _read_body(request: Request) -> bytes:
 async def put_blob(
     vault_id: str, blob_id: str, request: Request, caller: ActiveCaller, state: State
 ) -> Response | BlobInfo:
-    vault = require_member(state, caller, vault_id)
+    vault = await state.db.read(lambda: require_member(state, caller, vault_id))
     _blob_id(blob_id)
     data = await _read_body(request)
     if hashlib.sha256(data).hexdigest() != blob_id:
         raise ApiError(422, "hash_mismatch", "The blob doesn't match its id.")
+
+    def exists() -> bool:
+        return bool(
+            state.db.one(
+                "SELECT 1 FROM blobs WHERE vault_id = ? AND blob_id = ?", vault_id, blob_id
+            )
+        )
+
+    def record() -> None:
+        with state.db.transaction() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO blobs (vault_id, blob_id, size, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (vault_id, blob_id, len(data), state.now()),
+            )
+
     async with state.blob_lock(blob_id):
-        if state.db.one(
-            "SELECT 1 FROM blobs WHERE vault_id = ? AND blob_id = ?", vault_id, blob_id
-        ):
+        if await state.db.read(exists):
             return Response(
                 BlobInfo(id=blob_id, size=len(data)).model_dump_json(),
                 status_code=200,
@@ -73,17 +88,16 @@ async def put_blob(
             )
         # Store first, then record: a blob row always means the bytes are there.
         await state.store.put(blob_key(vault["user_id"], vault_id, blob_id), data)
-        with state.db.transaction() as db:
-            db.execute(
-                "INSERT OR IGNORE INTO blobs (vault_id, blob_id, size, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (vault_id, blob_id, len(data), state.now()),
-            )
+        await state.db.run(record)
     return BlobInfo(id=blob_id, size=len(data))
 
 
 @router.head("/{blob_id}")
 async def head_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: State) -> Response:
+    return await state.db.read(lambda: _head_blob(vault_id, blob_id, caller, state))
+
+
+def _head_blob(vault_id: str, blob_id: str, caller: Caller, state: AppState) -> Response:
     require_member(state, caller, vault_id)
     row = state.db.one(
         "SELECT size FROM blobs WHERE vault_id = ? AND blob_id = ?", vault_id, _blob_id(blob_id)
@@ -99,11 +113,15 @@ async def head_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: St
 
 @router.get("/{blob_id}")
 async def get_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: State) -> Response:
-    vault = require_member(state, caller, vault_id)
-    if not state.db.one(
-        "SELECT 1 FROM blobs WHERE vault_id = ? AND blob_id = ?", vault_id, _blob_id(blob_id)
-    ):
-        raise not_found("No such blob.")
+    def find() -> sqlite3.Row:
+        vault = require_member(state, caller, vault_id)
+        if not state.db.one(
+            "SELECT 1 FROM blobs WHERE vault_id = ? AND blob_id = ?", vault_id, _blob_id(blob_id)
+        ):
+            raise not_found("No such blob.")
+        return vault
+
+    vault = await state.db.read(find)
     try:
         data = await state.store.get(blob_key(vault["user_id"], vault_id, blob_id))
     except BlobNotFound as e:
@@ -115,6 +133,12 @@ async def get_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: Sta
 @router.post("/missing")
 async def missing_blobs(
     vault_id: str, body: MissingRequest, caller: ActiveCaller, state: State
+) -> MissingResponse:
+    return await state.db.read(lambda: _missing_blobs(vault_id, body, caller, state))
+
+
+def _missing_blobs(
+    vault_id: str, body: MissingRequest, caller: Caller, state: AppState
 ) -> MissingResponse:
     require_member(state, caller, vault_id)
     ids = [_blob_id(i) for i in body.ids]
@@ -132,25 +156,31 @@ async def missing_blobs(
 
 async def collect_garbage(state: AppState) -> int:
     """Delete blobs no revision references, once they are older than the grace period."""
-    rows = state.db.all(
-        "SELECT b.vault_id, b.blob_id, v.user_id FROM blobs b JOIN vaults v ON v.id = b.vault_id "
-        "WHERE b.created_at <= ? AND NOT EXISTS (SELECT 1 FROM revision_blobs r "
-        "WHERE r.vault_id = b.vault_id AND r.blob_id = b.blob_id)",
-        state.now() - GC_GRACE,
+    rows = await state.db.read(
+        lambda: state.db.all(
+            "SELECT b.vault_id, b.blob_id, v.user_id FROM blobs b "
+            "JOIN vaults v ON v.id = b.vault_id "
+            "WHERE b.created_at <= ? AND NOT EXISTS (SELECT 1 FROM revision_blobs r "
+            "WHERE r.vault_id = b.vault_id AND r.blob_id = b.blob_id)",
+            state.now() - GC_GRACE,
+        )
     )
+
+    def forget(row: sqlite3.Row) -> int:
+        with state.db.transaction() as db:
+            # Re-check: a commit may have referenced the blob since the query.
+            return db.execute(
+                "DELETE FROM blobs WHERE vault_id = ? AND blob_id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM revision_blobs r WHERE r.vault_id = ? AND r.blob_id = ?)",
+                (row["vault_id"], row["blob_id"], row["vault_id"], row["blob_id"]),
+            ).rowcount
+
     deleted = 0
     for row in rows:
         # The row goes first, so no commit can reference the blob any more. The lock keeps a
         # concurrent upload of the same blob from being deleted from the store.
         async with state.blob_lock(row["blob_id"]):
-            with state.db.transaction() as db:
-                # Re-check: a commit may have referenced the blob since the query.
-                gone = db.execute(
-                    "DELETE FROM blobs WHERE vault_id = ? AND blob_id = ? AND NOT EXISTS "
-                    "(SELECT 1 FROM revision_blobs r WHERE r.vault_id = ? AND r.blob_id = ?)",
-                    (row["vault_id"], row["blob_id"], row["vault_id"], row["blob_id"]),
-                ).rowcount
-            if gone:
+            if await state.db.run(lambda row=row: forget(row)):
                 key = blob_key(row["user_id"], row["vault_id"], row["blob_id"])
                 await state.store.delete(key)
                 deleted += 1

@@ -145,6 +145,10 @@ def _keyring_model(row: sqlite3.Row) -> Keyring:
 @router.post("/open")
 async def open_vault(body: OpenRequest, caller: AnyCaller, state: State) -> OpenResponse:
     """The caller's vault. 404 while the device still has to create it."""
+    return await state.db.read(lambda: _open_vault(body, caller, state))
+
+
+def _open_vault(body: OpenRequest, caller: Caller, state: AppState) -> OpenResponse:
     if vault_name(body.name) != caller.vault_name:
         raise forbidden("This device's key belongs to another vault.")
     if caller.vault_id is None:
@@ -156,6 +160,10 @@ async def open_vault(body: OpenRequest, caller: AnyCaller, state: State) -> Open
 
 @router.post("", status_code=201)
 async def create_vault(body: CreateRequest, caller: ActiveCaller, state: State) -> Vault:
+    return await state.db.run(lambda: _create_vault(body, caller, state))
+
+
+def _create_vault(body: CreateRequest, caller: Caller, state: AppState) -> Vault:
     name = vault_name(body.name)
     if caller.vault_id is not None:
         raise ApiError(409, "exists", "This device's key already belongs to a vault.")
@@ -201,6 +209,10 @@ async def get_keyring(
     state: State,
     version: Annotated[int | None, Query(ge=1)] = None,
 ) -> Keyring:
+    return await state.db.read(lambda: _get_keyring(vault_id, caller, state, version))
+
+
+def _get_keyring(vault_id: str, caller: Caller, state: AppState, version: int | None) -> Keyring:
     vault = require_member(state, caller, vault_id)
     row = state.db.one(
         "SELECT * FROM keyrings WHERE vault_id = ? AND version = ?",
@@ -216,12 +228,15 @@ async def get_keyring(
 async def put_keyring(
     vault_id: str, body: KeyringUpload, caller: ActiveCaller, state: State
 ) -> Keyring:
-    require_member(state, caller, vault_id)
-    data = _check_keyring(caller, body)
-    with state.db.transaction() as db:
-        _insert_next_keyring(db, state, vault_id, caller, body, data, by_recovery=False)
+    def store() -> None:
+        require_member(state, caller, vault_id)
+        data = _check_keyring(caller, body)
+        with state.db.transaction() as db:
+            _insert_next_keyring(db, state, vault_id, caller, body, data, by_recovery=False)
+
+    await state.db.run(store)
     await state.notifier.notify(vault_id)
-    return _keyring_model(_keyring_row(state, vault_id, body.version))
+    return await state.db.read(lambda: _keyring_model(_keyring_row(state, vault_id, body.version)))
 
 
 def _keyring_row(state: AppState, vault_id: str, version: int) -> sqlite3.Row:
@@ -287,6 +302,10 @@ def _no_recovery() -> ApiError:
 @router.get("/{vault_id}/recovery")
 async def get_recovery_keyring(vault_id: str, caller: AnyCaller, state: State) -> Keyring:
     """The current keyring, for a device that recovers the vault (crypto.md 9)."""
+    return await state.db.read(lambda: _get_recovery_keyring(vault_id, caller, state))
+
+
+def _get_recovery_keyring(vault_id: str, caller: Caller, state: AppState) -> Keyring:
     _require_membership(state, caller, vault_id)
     row = _current_keyring(state.db.conn, vault_id)
     if row["recovery_signer"] is None:
@@ -297,21 +316,27 @@ async def get_recovery_keyring(vault_id: str, caller: AnyCaller, state: State) -
 @router.post("/{vault_id}/recover", status_code=201)
 async def recover(vault_id: str, body: KeyringUpload, caller: AnyCaller, state: State) -> Keyring:
     """Upload the next keyring signed by the recovery key, and become an active device."""
-    _require_membership(state, caller, vault_id)
+    await state.db.read(lambda: _require_membership(state, caller, vault_id))
     state.limiter.check(f"recover:{caller.device_id}", *RECOVER_LIMIT)
-    current = _current_keyring(state.db.conn, vault_id)
-    if current["recovery_signer"] is None:
-        raise _no_recovery()
-    data = _check_keyring(caller, body, signed_by=current["recovery_signer"])
-    if body.recoverySigner != current["recovery_signer"]:
-        # crypto.md 6.4: only a device can change the recovery key.
-        raise bad_request("A recovery upload must keep the recovery key.")
-    with state.db.transaction() as db:
-        # Checked against `current`: a newer version (maybe another recovery key) fails here.
-        _insert_next_keyring(db, state, vault_id, caller, body, data, by_recovery=True)
-        db.execute(
-            "UPDATE devices SET status = 'active' WHERE id = ? AND status = 'pending'",
-            (caller.device_id,),
-        )
+
+    # One unit: the recovery signer checked is the one of the version the insert follows.
+    def store() -> None:
+        _require_membership(state, caller, vault_id)
+        current = _current_keyring(state.db.conn, vault_id)
+        if current["recovery_signer"] is None:
+            raise _no_recovery()
+        data = _check_keyring(caller, body, signed_by=current["recovery_signer"])
+        if body.recoverySigner != current["recovery_signer"]:
+            # crypto.md 6.4: only a device can change the recovery key.
+            raise bad_request("A recovery upload must keep the recovery key.")
+        with state.db.transaction() as db:
+            # Checked against `current`: a newer version (maybe another recovery key) fails.
+            _insert_next_keyring(db, state, vault_id, caller, body, data, by_recovery=True)
+            db.execute(
+                "UPDATE devices SET status = 'active' WHERE id = ? AND status = 'pending'",
+                (caller.device_id,),
+            )
+
+    await state.db.run(store)
     await state.notifier.notify(vault_id)
-    return _keyring_model(_keyring_row(state, vault_id, body.version))
+    return await state.db.read(lambda: _keyring_model(_keyring_row(state, vault_id, body.version)))

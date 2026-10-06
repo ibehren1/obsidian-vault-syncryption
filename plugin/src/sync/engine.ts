@@ -47,7 +47,18 @@ export interface EngineOptions {
 	now?: () => Date;
 	/** Called for problems that skip one file but don't stop the sync. Never gets plaintext. */
 	onWarning?: (message: string) => void;
+	/** Called as a sync goes through the change feed, the local files and the outbox. */
+	onProgress?: (progress: SyncProgress) => void;
 }
+
+/**
+ * How far a sync is. `pull`: `done` revisions of the change feed read since cursor `since`,
+ * the last one `rev` (revisions are numbered by the vault's `seq`). `scan`: local files checked. `push`:
+ * queued paths committed in this round.
+ */
+export type SyncProgress =
+	| { phase: "pull"; done: number; since: number; rev: number }
+	| { phase: "scan" | "push"; done: number; total: number };
 
 export interface SyncReport {
 	pulled: number;
@@ -137,6 +148,11 @@ export class SyncEngine {
 		return count;
 	}
 
+	/** How many local files are synced, before any sync has run. */
+	async localFileCount(): Promise<number> {
+		return (await this.opts.fs.list()).filter((file) => this.opts.include(file.path)).length;
+	}
+
 	/** Note a local change from a vault event. The next sync pushes it. */
 	async noteChange(path: string): Promise<void> {
 		if (this.opts.include(path)) await this.opts.store.enqueue(path);
@@ -212,11 +228,16 @@ export class SyncEngine {
 		const deferred = (await store.getMeta<Revision[]>(DEFERRED)) ?? [];
 		const earlier = (await store.getMeta<Revision[]>(FAILED)) ?? [];
 		const failed: Revision[] = [];
+		const since = cursor;
+		let done = 0;
 		for (;;) {
 			const page = await api.changes(vaultId, cursor);
 			const keyring = this.opts.keyring;
 			if (keyring && page.keyringVersion > keyring.version()) await keyring.refresh();
-			for (const revision of page.changes) await this.applyOrKeep(revision, failed, deferred);
+			for (const revision of page.changes) {
+				await this.applyOrKeep(revision, failed, deferred);
+				this.progress({ phase: "pull", done: ++done, since, rev: revision.rev });
+			}
 			// Saved before the cursor moves past them, so they aren't lost if the sync stops here.
 			await store.setMeta(DEFERRED, deferred);
 			await store.setMeta(FAILED, [...earlier, ...failed]);
@@ -268,8 +289,10 @@ export class SyncEngine {
 		const { fs, store, include } = this.opts;
 		const synced = await store.files();
 		const present = new Set<string>();
-		for (const file of await fs.list()) {
-			if (!include(file.path)) continue;
+		const files = (await fs.list()).filter((file) => include(file.path));
+		let done = 0;
+		for (const file of files) {
+			this.progress({ phase: "scan", done: done++, total: files.length });
 			present.add(file.path);
 			const s = synced.get(file.path);
 			if (s && !s.deleted && s.size === file.size && s.mtime === file.mtime) continue;
@@ -292,7 +315,9 @@ export class SyncEngine {
 		for (let round = 0; round < MAX_PUSH_ROUNDS; round++) {
 			const entries = await store.outbox();
 			if (entries.length === 0) return;
+			let done = 0;
 			for (const entry of entries) {
+				this.progress({ phase: "push", done: done++, total: entries.length });
 				try {
 					await this.pushPath(entry.path);
 				} catch (e) {
@@ -566,5 +591,9 @@ export class SyncEngine {
 
 	private warn(message: string): void {
 		this.opts.onWarning?.(message);
+	}
+
+	private progress(progress: SyncProgress): void {
+		this.opts.onProgress?.(progress);
 	}
 }

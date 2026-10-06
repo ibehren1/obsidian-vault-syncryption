@@ -45,7 +45,9 @@ which retention keeps bounded.
 
 ## 4. The single-container model
 - One process serves everything: FastAPI on one asyncio event loop, with one SQLite
-  connection in WAL mode. Transactions are `BEGIN IMMEDIATE` and never wait on anything
+  connection for writes in WAL mode, on one dedicated database thread, and five read-only
+  connections, each on its own thread, for work that only reads. The event loop doesn't
+  wait for queries, and reads don't wait for the writer. Transactions are `BEGIN IMMEDIATE` and never wait on anything
   inside, so there is exactly one writer at a time and no lock contention.
 - Long-polls (`/wait`) don't hold the database. Many idle devices cost a little memory
   each, not queries.
@@ -55,9 +57,10 @@ which retention keeps bounded.
 
 ## 5. What limits it first
 In the order they would show up:
-1. **Queries on the event loop.** SQLite calls are synchronous, so a slow one (a big
-   history page, the admin page's totals, a large prune batch) briefly delays every
-   other request. Retention prunes in batches of 500 and yields between them.
+1. **Five readers and one writer thread.** A slow read (a big history page, the admin
+   page's totals) holds one of the five readers; the others, the writer and the event loop
+   carry on. Writes run one at a time, so a large prune batch delays other writes, not
+   reads. Retention prunes in batches of 500, and other requests' writes run between them.
 2. **One writer.** Commits are short, so this matters only with many devices writing at
    the same moment, such as several large vaults syncing for the first time or
    re-encrypting after a rotation.
@@ -77,8 +80,9 @@ In the order they would show up:
   in-process.
 
 ## 7. If it needs to go further
-1. **Run SQLite queries on a worker thread.** This is the cheapest step: the event loop stays
-   responsive while a query runs. SQLite, the schema and backups stay as they are.
+1. **Run SQLite queries on worker threads.** Done in server 0.1.6 and 0.1.7: the event
+   loop stays responsive while a query runs, and five read-only connections serve the
+   handlers that only read. SQLite, the schema and backups stay as they are.
 2. **Postgres.** It would allow concurrent writers and, together with shared
    notifications and locks, more than one app process. It is a large change:
    - about 110 query sites rewritten for an async driver, with row locks where

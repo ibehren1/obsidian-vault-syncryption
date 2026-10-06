@@ -10,7 +10,7 @@ import sqlite3
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from syncryption_server.auth import ActiveCaller, AnyCaller, State, sweep_expired
+from syncryption_server.auth import ActiveCaller, AnyCaller, Caller, State, sweep_expired
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found
 from syncryption_server.sshkeys import fingerprint, pairing_code, parse_public_key
@@ -68,6 +68,10 @@ def _vault_device(state: AppState, vault_id: str, device_id: str) -> sqlite3.Row
 
 @router.get("/devices/self")
 async def self_device(caller: AnyCaller, state: State) -> SelfDevice:
+    return await state.db.read(lambda: _self_device(caller, state))
+
+
+def _self_device(caller: Caller, state: AppState) -> SelfDevice:
     row = state.db.one("SELECT * FROM devices WHERE id = ?", caller.device_id)
     return SelfDevice(
         **_fields(row),
@@ -79,6 +83,10 @@ async def self_device(caller: AnyCaller, state: State) -> SelfDevice:
 
 @router.get("/vaults/{vault_id}/devices")
 async def list_devices(vault_id: str, caller: ActiveCaller, state: State) -> DeviceList:
+    return await state.db.run(lambda: _list_devices(vault_id, caller, state))
+
+
+def _list_devices(vault_id: str, caller: Caller, state: AppState) -> DeviceList:
     require_member(state, caller, vault_id)
     sweep_expired(state)
     rows = state.db.all(
@@ -91,6 +99,10 @@ async def list_devices(vault_id: str, caller: ActiveCaller, state: State) -> Dev
 async def approve_device(
     vault_id: str, device_id: str, caller: ActiveCaller, state: State
 ) -> Device:
+    return await state.db.run(lambda: _approve_device(vault_id, device_id, caller, state))
+
+
+def _approve_device(vault_id: str, device_id: str, caller: Caller, state: AppState) -> Device:
     require_member(state, caller, vault_id)
     row = _vault_device(state, vault_id, device_id)
     if row["status"] == "revoked":
@@ -108,22 +120,27 @@ async def remove_device(
     vault_id: str, device_id: str, caller: ActiveCaller, state: State
 ) -> Device:
     """Revoke a device of the vault, the caller included (to replace its key)."""
-    require_member(state, caller, vault_id)
-    row = _vault_device(state, vault_id, device_id)
-    with state.db.transaction() as db:
-        others = db.execute(
-            "SELECT COUNT(*) FROM devices WHERE vault_id = ? AND status = 'active' AND id != ?",
-            (vault_id, device_id),
-        ).fetchone()[0]
-        if row["status"] == "active" and others == 0:
-            raise ApiError(409, "exists", "The last active device of a vault can't be removed.")
-        db.execute("UPDATE devices SET status = 'revoked' WHERE id = ?", (device_id,))
-        db.execute("DELETE FROM sessions WHERE device_id = ?", (device_id,))
-        released = db.execute(
-            "DELETE FROM locks WHERE vault_id = ? AND device_id = ?", (vault_id, device_id)
-        ).rowcount
-        if released:
-            db.execute("UPDATE vaults SET locks_seq = locks_seq + 1 WHERE id = ?", (vault_id,))
+
+    def revoke() -> tuple[bool, Device]:
+        require_member(state, caller, vault_id)
+        row = _vault_device(state, vault_id, device_id)
+        with state.db.transaction() as db:
+            others = db.execute(
+                "SELECT COUNT(*) FROM devices WHERE vault_id = ? AND status = 'active' AND id != ?",
+                (vault_id, device_id),
+            ).fetchone()[0]
+            if row["status"] == "active" and others == 0:
+                raise ApiError(409, "exists", "The last active device of a vault can't be removed.")
+            db.execute("UPDATE devices SET status = 'revoked' WHERE id = ?", (device_id,))
+            db.execute("DELETE FROM sessions WHERE device_id = ?", (device_id,))
+            released = db.execute(
+                "DELETE FROM locks WHERE vault_id = ? AND device_id = ?", (vault_id, device_id)
+            ).rowcount
+            if released:
+                db.execute("UPDATE vaults SET locks_seq = locks_seq + 1 WHERE id = ?", (vault_id,))
+        return bool(released), device_model(_vault_device(state, vault_id, device_id))
+
+    released, device = await state.db.run(revoke)
     if released:
         await state.notifier.notify(vault_id)
-    return device_model(_vault_device(state, vault_id, device_id))
+    return device

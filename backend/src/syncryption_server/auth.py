@@ -179,12 +179,16 @@ async def challenge(
         f"nonce: {b64u(secrets.token_bytes(32))}\n"
         f"expires: {rfc3339(expires)}\n"
     )
-    with state.db.transaction() as db:
-        db.execute(
-            "INSERT INTO challenges (id, username, vault_name, public_key, message, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (challenge_id, body.username, vault, public_key_text(pk), message, expires),
-        )
+
+    def store() -> None:
+        with state.db.transaction() as db:
+            db.execute(
+                "INSERT INTO challenges (id, username, vault_name, public_key, message, "
+                "expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (challenge_id, body.username, vault, public_key_text(pk), message, expires),
+            )
+
+    await state.db.run(store)
     return ChallengeResponse(challengeId=challenge_id, message=message, expiresAt=rfc3339(expires))
 
 
@@ -255,6 +259,10 @@ async def verify(
 ) -> VerifyResponse:
     ip = limit_key(client_ip(request, state))
     limit_auth(state, ip)
+    return await state.db.run(lambda: _verify(body, ip, state))
+
+
+def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
     sweep_expired(state)
     now = state.now()
 
@@ -383,7 +391,8 @@ class Caller:
     vault_name: str
 
 
-def _caller(request: Request, state: AppState) -> Caller:
+def _caller(request: Request, state: AppState) -> tuple[Caller, bool]:
+    """The device of the session token, and whether its `last_seen_at` is due an update."""
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not token:
@@ -408,9 +417,7 @@ def _caller(request: Request, state: AppState) -> Caller:
         raise ApiError(403, "device_revoked", "This device has been revoked.")
     if row["disabled_at"] is not None:
         raise user_disabled(state.settings.admin_contact)
-    if (row["last_seen_at"] or 0) + LAST_SEEN_RESOLUTION <= now:
-        with state.db.transaction() as db:
-            db.execute("UPDATE devices SET last_seen_at = ? WHERE id = ?", (now, row["id"]))
+    seen = (row["last_seen_at"] or 0) + LAST_SEEN_RESOLUTION <= now
     return Caller(
         device_id=row["id"],
         user_id=row["user_id"],
@@ -419,16 +426,31 @@ def _caller(request: Request, state: AppState) -> Caller:
         status=row["status"],
         vault_id=row["vault_id"],
         vault_name=row["vault_name"],
-    )
+    ), seen
+
+
+async def _authenticate(request: Request, state: AppState) -> Caller:
+    caller, seen = await state.db.read(lambda: _caller(request, state))
+    if seen:
+
+        def touch() -> None:
+            with state.db.transaction() as db:
+                db.execute(
+                    "UPDATE devices SET last_seen_at = ? WHERE id = ?",
+                    (state.now(), caller.device_id),
+                )
+
+        await state.db.run(touch)
+    return caller
 
 
 async def any_caller(request: Request, state: Annotated[AppState, Depends(get_state)]) -> Caller:
     """A logged-in device, pending or active."""
-    return _caller(request, state)
+    return await _authenticate(request, state)
 
 
 async def active_caller(request: Request, state: Annotated[AppState, Depends(get_state)]) -> Caller:
-    caller = _caller(request, state)
+    caller = await _authenticate(request, state)
     if caller.status != "active":
         raise ApiError(403, "device_pending", "This device is waiting for approval.")
     return caller

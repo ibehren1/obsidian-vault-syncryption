@@ -103,7 +103,7 @@ def _bearer(request: Request) -> str | None:
     return token.strip() if scheme.lower() == "bearer" and token.strip() else None
 
 
-def _admin(request: Request, state: AppState) -> Admin | None:
+async def _admin(request: Request, state: AppState) -> Admin | None:
     """The Bearer token, else the session cookie. None when neither is valid."""
     token = _bearer(request)
     if token is not None:
@@ -111,10 +111,12 @@ def _admin(request: Request, state: AppState) -> Admin | None:
     cookie = request.cookies.get(COOKIE)
     if not cookie:
         return None
-    row = state.db.one(
-        "SELECT csrf FROM admin_sessions WHERE token_hash = ? AND expires_at >= ?",
-        _hash(cookie),
-        state.now(),
+    row = await state.db.read(
+        lambda: state.db.one(
+            "SELECT csrf FROM admin_sessions WHERE token_hash = ? AND expires_at >= ?",
+            _hash(cookie),
+            state.now(),
+        )
     )
     return Admin(csrf=row["csrf"], session_hash=_hash(cookie)) if row else None
 
@@ -228,11 +230,15 @@ async def _purge_vault(state: AppState, user_id: str, vault_id: str) -> None:
     keys = [key async for key in state.store.iter_keys(prefix)]
     for key in keys:
         await state.store.delete(key)
-    with state.db.transaction() as db:
-        for table in ("locks", "revision_blobs", "revisions", "files", "blobs", "keyrings"):
-            db.execute(f"DELETE FROM {table} WHERE vault_id = ?", (vault_id,))  # noqa: S608
-        _delete_devices(db, "vault_id = ?", vault_id)
-        db.execute("DELETE FROM vaults WHERE id = ?", (vault_id,))
+
+    def forget() -> None:
+        with state.db.transaction() as db:
+            for table in ("locks", "revision_blobs", "revisions", "files", "blobs", "keyrings"):
+                db.execute(f"DELETE FROM {table} WHERE vault_id = ?", (vault_id,))  # noqa: S608
+            _delete_devices(db, "vault_id = ?", vault_id)
+            db.execute("DELETE FROM vaults WHERE id = ?", (vault_id,))
+
+    await state.db.run(forget)
 
 
 def _delete_devices(db: sqlite3.Connection, where: str, value: str) -> None:
@@ -247,15 +253,19 @@ def _delete_devices(db: sqlite3.Connection, where: str, value: str) -> None:
 
 async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm: str) -> str:
     """Run `action` and return the message code. Raises AdminError."""
-    row = _row(state, kind, item_id)
+    row = await state.db.read(lambda: _row(state, kind, item_id))
     label = f"user {row['name']}" if kind == "users" else f"vault {row['username']}/{row['name']}"
     table = "users" if kind == "users" else "vaults"
     if action in ("disable", "enable"):
         value = state.now() if action == "disable" else None
-        with state.db.transaction() as db:
-            db.execute(f"UPDATE {table} SET disabled_at = ? WHERE id = ?", (value, item_id))  # noqa: S608
+
+        def switch() -> list[str]:
+            with state.db.transaction() as db:
+                db.execute(f"UPDATE {table} SET disabled_at = ? WHERE id = ?", (value, item_id))  # noqa: S608
+            return _vault_ids(state, kind, item_id)
+
         # Wake the long-polls, so devices see the change now rather than at their timeout.
-        for vault_id in _vault_ids(state, kind, item_id):
+        for vault_id in await state.db.run(switch):
             await state.notifier.notify(vault_id)
         log.info("admin: %sd %s", action, label)
         return f"{action}d"
@@ -267,13 +277,17 @@ async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm
     if kind == "vaults":
         await _purge_vault(state, row["user_id"], item_id)
     else:
-        for vault_id in _vault_ids(state, kind, item_id):
+        for vault_id in await state.db.read(lambda: _vault_ids(state, kind, item_id)):
             await _purge_vault(state, item_id, vault_id)
-        with state.db.transaction() as db:
-            # Keys that were creating a vault, the only devices left.
-            _delete_devices(db, "user_id = ?", item_id)
-            db.execute("DELETE FROM challenges WHERE username = ?", (row["name"],))
-            db.execute("DELETE FROM users WHERE id = ?", (item_id,))
+
+        def forget() -> None:
+            with state.db.transaction() as db:
+                # Keys that were creating a vault, the only devices left.
+                _delete_devices(db, "user_id = ?", item_id)
+                db.execute("DELETE FROM challenges WHERE username = ?", (row["name"],))
+                db.execute("DELETE FROM users WHERE id = ?", (item_id,))
+
+        await state.db.run(forget)
     log.info("admin: purged %s", label)
     return "purged"
 
@@ -281,8 +295,12 @@ async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm
 async def set_maintenance(state: AppState, on: bool, message: str | None = None) -> str:
     """Turn maintenance on (or update its message) or off. Returns the message code."""
     if not on:
-        with state.db.transaction() as db:
-            db.execute("DELETE FROM maintenance")
+
+        def clear() -> None:
+            with state.db.transaction() as db:
+                db.execute("DELETE FROM maintenance")
+
+        await state.db.run(clear)
         if state.maintenance is not None:
             log.info("admin: maintenance off")
         state.maintenance = None
@@ -291,11 +309,15 @@ async def set_maintenance(state: AppState, on: bool, message: str | None = None)
     if message is not None and note_problem(message):
         raise AdminError("bad_message")
     since = state.maintenance.since if state.maintenance else state.now()
-    with state.db.transaction() as db:
-        db.execute(
-            "INSERT OR REPLACE INTO maintenance (id, since, message) VALUES (1, ?, ?)",
-            (since, message),
-        )
+
+    def store() -> None:
+        with state.db.transaction() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO maintenance (id, since, message) VALUES (1, ?, ?)",
+                (since, message),
+            )
+
+    await state.db.run(store)
     state.maintenance = Maintenance(since, message)
     # Wake every long-poll: each answers with the maintenance 503.
     await state.notifier.notify_all()
@@ -322,7 +344,7 @@ class PurgeRequest(BaseModel):
 
 @router.get("/api/users")
 async def api_users(admin: ApiAdmin, state: State) -> dict:
-    return {"users": overview(state)}
+    return {"users": await state.db.read(lambda: overview(state))}
 
 
 class MaintenanceRequest(BaseModel):
@@ -499,8 +521,9 @@ def _maintenance_section(admin: Admin, state: AppState) -> str:
     )
 
 
-def _dashboard(admin: Admin, state: AppState, message: str | None, error: bool) -> HTMLResponse:
-    users = overview(state)
+def _dashboard(
+    admin: Admin, state: AppState, users: list[dict], message: str | None, error: bool
+) -> HTMLResponse:
     total = sum(v["size"] for u in users for v in u["vaults"])
     logout = (
         '<form method="post" action="/admin/logout">'
@@ -583,14 +606,15 @@ def _back(code: str) -> RedirectResponse:
 
 @router.get("")
 async def page(request: Request, state: State, done: str = "") -> Response:
-    admin = _admin(request, state)
+    admin = await _admin(request, state)
     if admin is None:
         if done == "logged_out":
             return _login_page(MESSAGES[done], error=False)
         return _login_page(status=401 if _bearer(request) else 200)
     message = MESSAGES.get(done)
     error = done not in SUCCESS
-    return _dashboard(admin, state, message, error)
+    users = await state.db.read(lambda: overview(state))
+    return _dashboard(admin, state, users, message, error)
 
 
 @router.post("/login")
@@ -600,12 +624,16 @@ async def login(request: Request, state: State) -> Response:
         return _login_page("Wrong token.", status=401)
     session = secrets.token_urlsafe(32)
     now = state.now()
-    with state.db.transaction() as db:
-        db.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (now,))
-        db.execute(
-            "INSERT INTO admin_sessions (token_hash, csrf, expires_at) VALUES (?, ?, ?)",
-            (_hash(session), secrets.token_urlsafe(32), now + SESSION_TTL),
-        )
+
+    def store() -> None:
+        with state.db.transaction() as db:
+            db.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (now,))
+            db.execute(
+                "INSERT INTO admin_sessions (token_hash, csrf, expires_at) VALUES (?, ?, ?)",
+                (_hash(session), secrets.token_urlsafe(32), now + SESSION_TTL),
+            )
+
+    await state.db.run(store)
     log.info("admin: logged in from %s", client_ip(request, state))
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie(
@@ -620,9 +648,9 @@ async def login(request: Request, state: State) -> Response:
     return response
 
 
-def _form_admin(request: Request, state: AppState, form: dict[str, str]) -> Admin | None:
+async def _form_admin(request: Request, state: AppState, form: dict[str, str]) -> Admin | None:
     """Bearer, or the session cookie with the session's CSRF token."""
-    admin = _admin(request, state)
+    admin = await _admin(request, state)
     if admin is None:
         return None
     if admin.csrf is not None and not hmac.compare_digest(
@@ -635,12 +663,17 @@ def _form_admin(request: Request, state: AppState, form: dict[str, str]) -> Admi
 @router.post("/logout")
 async def logout(request: Request, state: State) -> Response:
     try:
-        admin = _form_admin(request, state, await _form(request))
+        admin = await _form_admin(request, state, await _form(request))
     except AdminError:
         return _back("csrf")
     if admin is not None and admin.session_hash is not None:
-        with state.db.transaction() as db:
-            db.execute("DELETE FROM admin_sessions WHERE token_hash = ?", (admin.session_hash,))
+        session_hash = admin.session_hash
+
+        def forget() -> None:
+            with state.db.transaction() as db:
+                db.execute("DELETE FROM admin_sessions WHERE token_hash = ?", (session_hash,))
+
+        await state.db.run(forget)
     response = _back("logged_out")
     response.delete_cookie(COOKIE, path="/admin")
     return response
@@ -652,7 +685,7 @@ async def form_maintenance(
 ) -> Response:
     form = await _form(request)
     try:
-        if _form_admin(request, state, form) is None:
+        if await _form_admin(request, state, form) is None:
             return _login_page("Log in first.", status=401)
         code = await set_maintenance(state, switch == "on", form.get("message"))
     except AdminError as e:
@@ -666,7 +699,7 @@ async def form_action(
 ) -> Response:
     form = await _form(request)
     try:
-        if _form_admin(request, state, form) is None:
+        if await _form_admin(request, state, form) is None:
             return _login_page("Log in first.", status=401)
         code = await act(state, kind, item_id, action, form.get("confirm", "").strip())
     except AdminError as e:

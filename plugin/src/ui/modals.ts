@@ -248,6 +248,73 @@ export class ConfirmModal extends Modal {
 	}
 }
 
+export interface FirstSync {
+	endpoint: string;
+	/** `username / vault name` */
+	vault: string;
+	deviceName: string;
+	/** `SHA256:…` of this device's key. */
+	fingerprint: string;
+	/** The vault's `seq`: 0 when nothing was ever committed to it. */
+	serverRevisions: number;
+	localFiles: number;
+	configDir: string;
+}
+
+/**
+ * Shown before a device's first sync of a vault, so the user checks the setup and knows
+ * what the sync does before it starts. Resolves with whether to start it.
+ */
+export function confirmFirstSync(app: App, info: FirstSync): Promise<boolean> {
+	return new Promise((resolve) => new FirstSyncModal(app, info, resolve).open());
+}
+
+class FirstSyncModal extends Modal {
+	private started = false;
+
+	constructor(
+		app: App,
+		private readonly info: FirstSync,
+		private readonly done: (start: boolean) => void,
+	) {
+		super(app);
+	}
+
+	override onOpen(): void {
+		const { info } = this;
+		this.setTitle("Start the first sync?");
+		this.contentEl.createEl("p", { text: "Connected. Check the setup before this device syncs the vault." });
+		new Setting(this.contentEl).setName("Server").setDesc(info.endpoint);
+		new Setting(this.contentEl).setName("Vault").setDesc(info.vault);
+		new Setting(this.contentEl).setName("This device").setDesc(`${info.deviceName} · ${info.fingerprint}`);
+		const local = info.localFiles === 1 ? "1 file" : `${info.localFiles} files`;
+		const text =
+			info.serverRevisions === 0
+				? `The vault on the server is empty. This device uploads its ${local}, encrypted.`
+				: `The vault on the server already has files. They are downloaded and combined with this device's ${local}. Nothing is deleted: notes changed on both sides are merged, or kept as a conflict copy, and the vault's settings in ${info.configDir} replace this device's.`;
+		this.contentEl.createEl("p", { text });
+		this.contentEl.createEl("p", {
+			text: "A large vault can take a while. A notice shows the progress, and you can keep using Obsidian meanwhile.",
+		});
+		new Setting(this.contentEl)
+			.addButton((b) => b.setButtonText("Not now").onClick(() => this.close()))
+			.addButton((b) =>
+				b
+					.setButtonText("Start sync")
+					.setCta()
+					.onClick(() => {
+						this.started = true;
+						this.close();
+					}),
+			);
+	}
+
+	override onClose(): void {
+		this.contentEl.empty();
+		this.done(this.started);
+	}
+}
+
 /** Asks to reload Obsidian after another device changed the settings, plugins or themes. */
 export class ReloadModal extends Modal {
 	constructor(
