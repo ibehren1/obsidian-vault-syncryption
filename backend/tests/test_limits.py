@@ -28,7 +28,7 @@ def from_ip(client: TestClient, ip: str) -> TestClient:
 def challenge(client: TestClient, username: str, device: Device) -> int:
     r = client.post(
         "/api/v1/auth/challenge",
-        json={"username": username, "publicKey": device.public_key_text},
+        json={"username": username, "vaultName": "V", "publicKey": device.public_key_text},
     )
     return r.status_code
 
@@ -74,7 +74,7 @@ def test_wrong_secrets_from_many_addresses_pause_joining(proxied, clock):
 
 
 def test_recover_is_rate_limited(client, alice):
-    vault_id = alice.create_vault()
+    vault_id = alice.vault_id
     phone = new_pending(client, vault_id)
     path = f"/api/v1/vaults/{vault_id}/recover"
     statuses = [phone.post(path, json=phone.keyring(2)).status_code for _ in range(11)]

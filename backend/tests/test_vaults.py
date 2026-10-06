@@ -5,20 +5,22 @@ from syncryption_server.sshkeys import NAMESPACE_AUTH
 from tests.helpers import SECRET, Device, sign_sshsig
 
 
-def pending_phone(client) -> Device:
-    phone = Device(client, "alice", name="Pixel")
-    phone.login(SECRET)
-    return phone
+def creator(client, vault_name: str = "A", username: str = "alice") -> Device:
+    """A key that has registered to create `vault_name` and hasn't yet."""
+    d = Device(client, username, vault_name=vault_name)
+    d.login(SECRET)
+    return d
 
 
-def test_create_and_open(client, alice):
-    r = alice.post("/api/v1/vaults/open", json={"name": "Personal"})
+def test_create_and_open(client):
+    d = creator(client, "Personal")
+    r = d.post("/api/v1/vaults/open", json={"name": "Personal"})
     assert (r.status_code, r.json()["error"]) == (404, "not_found")
-    vault_id = alice.create_vault()
-    r = alice.post("/api/v1/vaults/open", json={"name": " Personal "})
+    vault_id = d.create_vault()
+    r = d.post("/api/v1/vaults/open", json={"name": " Personal "})
     assert r.status_code == 200
     body = r.json()
-    assert body["membership"] == "active"
+    assert (body["status"], body["membership"]) == ("active", "active")
     assert body["vault"] == {
         "id": vault_id,
         "name": "Personal",
@@ -26,37 +28,41 @@ def test_create_and_open(client, alice):
         "seq": 0,
         "createdAt": body["vault"]["createdAt"],
     }
-    vaults = alice.get("/api/v1/vaults").json()["vaults"]
-    assert [(v["vault"]["id"], v["membership"]) for v in vaults] == [(vault_id, "active")]
+    assert d.get("/api/v1/devices/self").json()["vaultId"] == vault_id
 
 
-def test_names_are_unique_per_user(client, alice):
-    alice.create_vault("Personal")
-    r = alice.post(
-        "/api/v1/vaults",
-        json={"id": str(uuid.uuid4()), "name": "Personal", "keyring": alice.keyring(1)},
-    )
-    assert (r.status_code, r.json()["error"]) == (409, "exists")
-    bob = Device(client, "bob")
-    bob.login(SECRET)
-    bob.create_vault("Personal")
+def test_open_only_the_devices_vault(client, alice):
+    work = creator(client, "Work")
+    work.create_vault()
+    for name in ("Work", "personal", "Other"):
+        r = alice.post("/api/v1/vaults/open", json={"name": name})
+        assert (r.status_code, r.json()["error"]) == (403, "forbidden"), name
+
+
+def test_names_are_per_user(client, alice):
+    bob = creator(client, "Personal", "bob")
+    bob.create_vault()
     r = bob.post("/api/v1/vaults/open", json={"name": "Personal"})
-    assert r.json()["membership"] == "active"
+    assert r.json()["vault"]["id"] == bob.vault_id != alice.vault_id
 
 
-def test_vault_names_are_nfc(client, alice):
-    alice.create_vault("Café")
-    r = alice.post("/api/v1/vaults/open", json={"name": "Café"})
+def test_vault_names_are_nfc(client):
+    d = creator(client, "Café")
+    d.create_vault()
+    r = d.post("/api/v1/vaults/open", json={"name": "Café"})
     assert r.status_code == 200
+    assert r.json()["vault"]["name"] == "Café"
 
 
-def test_create_validation(client, alice):
-    kr = alice.keyring(1)
+def test_create_validation(client):
+    d = creator(client, "A")
+    kr = d.keyring(1)
     cases = [
         ({"id": "not-a-uuid", "name": "A", "keyring": kr}, 400, "bad_request"),
         ({"id": str(uuid.uuid4()), "name": "", "keyring": kr}, 400, "bad_request"),
+        ({"id": str(uuid.uuid4()), "name": "B", "keyring": kr}, 403, "forbidden"),
         (
-            {"id": str(uuid.uuid4()), "name": "A", "keyring": alice.keyring(2)},
+            {"id": str(uuid.uuid4()), "name": "A", "keyring": d.keyring(2)},
             409,
             "keyring_version",
         ),
@@ -72,74 +78,82 @@ def test_create_validation(client, alice):
         ),
     ]
     for body, status, error in cases:
-        r = alice.post("/api/v1/vaults", json=body)
+        r = d.post("/api/v1/vaults", json=body)
         assert (r.status_code, r.json()["error"]) == (status, error), body
 
 
-def test_keyring_signed_in_auth_namespace_is_rejected(client, alice):
+def test_a_vaults_device_cant_create_another(client, alice):
+    body = {"id": str(uuid.uuid4()), "name": "Personal", "keyring": alice.keyring(1)}
+    r = alice.post("/api/v1/vaults", json=body)
+    assert (r.status_code, r.json()["error"]) == (409, "exists")
+
+
+def test_vault_ids_are_unique(client, alice):
+    d = creator(client, "Other")
+    body = {"id": alice.vault_id, "name": "Other", "keyring": d.keyring(1)}
+    r = d.post("/api/v1/vaults", json=body)
+    assert (r.status_code, r.json()["error"]) == (409, "exists")
+
+
+def test_keyring_signed_in_auth_namespace_is_rejected(client):
+    d = creator(client)
     data = secrets.token_bytes(64)
-    kr = {**alice.keyring(1, data), "signature": sign_sshsig(alice.seed, NAMESPACE_AUTH, data)}
-    r = alice.post("/api/v1/vaults", json={"id": str(uuid.uuid4()), "name": "A", "keyring": kr})
+    kr = {**d.keyring(1, data), "signature": sign_sshsig(d.seed, NAMESPACE_AUTH, data)}
+    r = d.post("/api/v1/vaults", json={"id": str(uuid.uuid4()), "name": "A", "keyring": kr})
     assert r.json()["error"] == "bad_signature_format"
 
 
-def test_keyring_signed_by_another_key_is_rejected(client, alice):
+def test_keyring_signed_by_another_key_is_rejected(client):
+    d = creator(client)
     other = Device(client, "alice")
-    other.device_id = alice.device_id
-    r = alice.post(
+    other.device_id = d.device_id
+    r = d.post(
         "/api/v1/vaults", json={"id": str(uuid.uuid4()), "name": "A", "keyring": other.keyring(1)}
     )
     assert r.json()["error"] == "bad_signature_format"
 
 
 def test_pairing_flow(client, alice):
-    vault_id = alice.create_vault()
-    phone = pending_phone(client)
+    vault_id = alice.vault_id
+    phone = Device(client, "alice", name="Pixel")
+    phone.login()
 
     r = phone.post("/api/v1/vaults/open", json={"name": "Personal"})
-    assert r.json()["membership"] == "pending"
+    assert (r.json()["vault"]["id"], r.json()["status"]) == (vault_id, "pending")
     assert phone.get(f"/api/v1/vaults/{vault_id}/keyring").json()["error"] == "device_pending"
 
-    members = alice.get(f"/api/v1/vaults/{vault_id}/members").json()["members"]
-    pending = [m for m in members if m["status"] == "pending"]
-    assert [m["device"]["id"] for m in pending] == [phone.device_id]
-    assert pending[0]["device"]["pairingCode"]
+    listed = alice.get(f"/api/v1/vaults/{vault_id}/devices").json()["devices"]
+    pending = [d for d in listed if d["status"] == "pending"]
+    assert [d["id"] for d in pending] == [phone.device_id]
+    assert pending[0]["pairingCode"]
 
     assert alice.put(f"/api/v1/vaults/{vault_id}/keyring", json=alice.keyring(2)).status_code == 201
-    r = alice.post(f"/api/v1/vaults/{vault_id}/members/{phone.device_id}/approve")
+    r = alice.post(f"/api/v1/vaults/{vault_id}/devices/{phone.device_id}/approve")
     assert r.status_code == 200 and r.json()["status"] == "active"
 
-    assert phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["membership"] == (
+    assert phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["status"] == (
         "active"
     )
     assert phone.get("/api/v1/devices/self").json()["status"] == "active"
     assert phone.get(f"/api/v1/vaults/{vault_id}/keyring").json()["version"] == 2
 
 
-def test_known_key_opening_another_vault_needs_pairing(client, alice):
-    alice.create_vault("Personal")
-    laptop = Device(client, "alice")
-    laptop.login(SECRET)
-    alice.post(f"/api/v1/devices/{laptop.device_id}/approve")
-    laptop.create_vault("Work")
-    work = alice.post("/api/v1/vaults/open", json={"name": "Work"}).json()
-    assert work["membership"] == "pending"
-    r = alice.get(f"/api/v1/vaults/{work['vault']['id']}/keyring")
+def test_other_users_cannot_see_a_vault(client, alice):
+    bob = creator(client, "Personal", "bob")
+    bob.create_vault()
+    for path in ("keyring", "devices", "changes", "locks", "recovery"):
+        r = bob.get(f"/api/v1/vaults/{alice.vault_id}/{path}")
+        assert (r.status_code, r.json()["error"]) == (403, "forbidden"), path
+
+
+def test_creating_key_has_no_vault_access(client, alice):
+    d = creator(client, "Work")
+    r = d.get(f"/api/v1/vaults/{alice.vault_id}/keyring")
     assert (r.status_code, r.json()["error"]) == (403, "forbidden")
 
 
-def test_other_users_cannot_see_a_vault(client, alice):
-    vault_id = alice.create_vault()
-    bob = Device(client, "bob")
-    bob.login(SECRET)
-    assert bob.post("/api/v1/vaults/open", json={"name": "Personal"}).status_code == 404
-    for path in ("keyring", "members", "changes"):
-        r = bob.get(f"/api/v1/vaults/{vault_id}/{path}")
-        assert (r.status_code, r.json()["error"]) == (403, "forbidden")
-
-
 def test_keyring_versions(client, alice):
-    vault_id = alice.create_vault()
+    vault_id = alice.vault_id
     first = alice.get(f"/api/v1/vaults/{vault_id}/keyring").json()
     assert first["version"] == 1 and first["signer"] == alice.device_id
 
@@ -164,22 +178,27 @@ def test_keyring_versions(client, alice):
 
 
 def test_keyring_size_limit(client, alice):
-    vault_id = alice.create_vault()
     r = alice.put(
-        f"/api/v1/vaults/{vault_id}/keyring", json=alice.keyring(2, b"\0" * (1024 * 1024 + 1))
+        f"/api/v1/vaults/{alice.vault_id}/keyring",
+        json=alice.keyring(2, b"\0" * (1024 * 1024 + 1)),
     )
     assert (r.status_code, r.json()["error"]) == (413, "too_large")
 
 
-def test_remove_member(client, alice):
-    vault_id = alice.create_vault()
-    phone = pending_phone(client)
-    phone.post("/api/v1/vaults/open", json={"name": "Personal"})
-    alice.post(f"/api/v1/vaults/{vault_id}/members/{phone.device_id}/approve")
-
-    r = alice.delete(f"/api/v1/vaults/{vault_id}/members/{phone.device_id}")
-    assert r.status_code == 204
-    assert phone.get(f"/api/v1/vaults/{vault_id}/keyring").status_code == 403
-    r = alice.delete(f"/api/v1/vaults/{vault_id}/members/{alice.device_id}")
+def test_removed_device_loses_access(client, alice):
+    vault_id = alice.vault_id
+    phone = Device(client, "alice", name="Pixel")
+    phone.join(alice)
+    assert phone.get(f"/api/v1/vaults/{vault_id}/keyring").status_code == 200
+    r = alice.delete(f"/api/v1/vaults/{vault_id}/devices/{phone.device_id}")
+    assert r.status_code == 200
+    assert phone.get(f"/api/v1/vaults/{vault_id}/keyring").status_code == 401
+    r = alice.delete(f"/api/v1/vaults/{vault_id}/devices/{alice.device_id}")
     assert (r.status_code, r.json()["error"]) == (409, "exists")
-    assert alice.delete(f"/api/v1/vaults/{vault_id}/members/{phone.device_id}").status_code == 404
+
+
+def test_removed_endpoints_are_gone(client, alice):
+    vault_id = alice.vault_id
+    assert alice.get("/api/v1/vaults").status_code == 405
+    assert alice.get("/api/v1/devices").status_code == 404
+    assert alice.get(f"/api/v1/vaults/{vault_id}/members").status_code == 404

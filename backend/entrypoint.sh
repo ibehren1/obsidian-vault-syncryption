@@ -3,11 +3,12 @@
 #
 #   1. Validate the environment and stop with a clear message if it is wrong.
 #   2. With S3: restore meta.db from the bucket if this host has none yet.
-#   3. With MIGRATE_TO_S3=TRUE: copy local blobs to S3, and stop if that fails.
-#   4. Serve: uvicorn alone behind your proxy, or uvicorn plus Caddy. With S3 everything
+#   3. Stop if meta.db was written by a server before 0.1.4 (it has to be deleted).
+#   4. With MIGRATE_TO_S3=TRUE: copy local blobs to S3, and stop if that fails.
+#   5. Serve: uvicorn alone behind your proxy, or uvicorn plus Caddy. With S3 everything
 #      runs under `litestream replicate -exec`, so the database is replicated while the
 #      app runs.
-#   5. If any process exits, stop the others, so the container stops and restarts.
+#   6. If any process exits, stop the others, so the container stops and restarts.
 set -euo pipefail
 
 RUN_DIR=/run/syncryption
@@ -55,6 +56,8 @@ eval "$settings"
 if [ "$s3_enabled" = TRUE ]; then
 	litestream restore -config "$RUN_DIR/litestream.yml" -if-db-not-exists -if-replica-exists "$db_path"
 fi
+
+python -m syncryption_server check-data
 
 if [ "$migrate" = TRUE ]; then
 	python -m syncryption_server migrate

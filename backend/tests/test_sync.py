@@ -3,12 +3,12 @@ import time
 
 import pytest
 
-from tests.helpers import SECRET, Device, blob, file_id
+from tests.helpers import Device, blob, file_id
 
 
 @pytest.fixture
 def vault(alice) -> str:
-    return alice.create_vault()
+    return alice.vault_id
 
 
 def upload(dev: Device, vault_id: str, data: bytes) -> str:
@@ -127,9 +127,7 @@ def test_change_feed_is_ordered_and_paged(alice, vault):
 
 def test_concurrent_commits_get_one_winner(client, alice, vault):
     phone = Device(client, "alice")
-    phone.login(SECRET)
-    phone.post("/api/v1/vaults/open", json={"name": "Personal"})
-    alice.post(f"/api/v1/vaults/{vault}/members/{phone.device_id}/approve")
+    phone.join(alice)
     base = commit(alice, vault, file_id(), None).json()["rev"]
 
     results = []

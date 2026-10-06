@@ -2,6 +2,7 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 
 import { fromUtf8, utf8 } from "../crypto/bytes";
+import { normalizeVaultName } from "../keys";
 import { fingerprint, publicKeyText } from "../crypto/openssh";
 import { NAMESPACE_AUTH, signSshsig } from "../crypto/sshsig";
 import { ApiError, NetworkError, type HttpResponse, type Transport } from "./http";
@@ -10,7 +11,8 @@ import type { components } from "./schema";
 export type Schemas = components["schemas"];
 export type Device = Schemas["Device"];
 export type Vault = Schemas["Vault"];
-export type Member = Schemas["Member"];
+/** `GET /devices/self`: this key, and the vault and user it belongs to. */
+export type SelfDevice = Schemas["SelfDevice"];
 export type KeyringObject = Schemas["Keyring"];
 export type KeyringUpload = Schemas["KeyringUpload"];
 export type Revision = Schemas["Revision"];
@@ -38,6 +40,8 @@ export interface ClientOptions {
 	endpoint: string;
 	identity: Identity;
 	deviceName: string;
+	/** The vault this key belongs to (a key is one device in one vault). */
+	vaultName: string;
 	transport: Transport;
 	/** Give up on a request after this long (default 60 s, above the 25 s long-poll). */
 	timeoutMs?: number;
@@ -73,17 +77,24 @@ export function normalizeEndpoint(endpoint: string): string {
  * Check a login challenge before signing it (protocol.md 5.1), so a malicious server
  * can't get a signature it could replay against another server.
  */
-export function checkChallenge(message: string, origin: string, username: string, publicKey: Uint8Array): void {
+export function checkChallenge(
+	message: string,
+	origin: string,
+	username: string,
+	vaultName: string,
+	publicKey: Uint8Array,
+): void {
 	const lines = message.split("\n");
 	const ok =
-		lines.length === 7 &&
+		lines.length === 8 &&
 		lines[0] === NAMESPACE_AUTH &&
 		lines[1] === `origin: ${origin}` &&
 		lines[2] === `username: ${username}` &&
-		lines[3] === `key: ${fingerprint(publicKey)}` &&
-		/^nonce: [A-Za-z0-9_-]{43}$/.test(lines[4] ?? "") &&
-		/^expires: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(lines[5] ?? "") &&
-		lines[6] === "";
+		lines[3] === `vault: ${normalizeVaultName(vaultName)}` &&
+		lines[4] === `key: ${fingerprint(publicKey)}` &&
+		/^nonce: [A-Za-z0-9_-]{43}$/.test(lines[5] ?? "") &&
+		/^expires: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(lines[6] ?? "") &&
+		lines[7] === "";
 	if (!ok) throw new ApiError(0, "bad_challenge", "The server sent an unexpected login challenge.");
 }
 
@@ -96,9 +107,12 @@ export class ApiClient {
 	/** Set after login. */
 	deviceId: string | null = null;
 	deviceStatus: "active" | "pending" | null = null;
+	/** The vault named at login (protocol.md 5), NFC and trimmed. */
+	readonly vaultName: string;
 
 	constructor(private readonly opts: ClientOptions) {
 		this.origin = normalizeEndpoint(opts.endpoint);
+		this.vaultName = normalizeVaultName(opts.vaultName);
 		this.publicKey = ed25519.getPublicKey(opts.identity.seed);
 	}
 
@@ -107,15 +121,17 @@ export class ApiClient {
 	}
 
 	/**
-	 * Log in, or join the server with `sharedSecret` (protocol.md 5). Without a secret, an
-	 * unknown key gets `403 join_required`: the caller then asks the user for it.
+	 * Log in to `vaultName` (protocol.md 5). A new key of an existing vault joins it as
+	 * pending, without the shared secret. A new key for a vault that doesn't exist yet gets
+	 * `403 join_required` until `sharedSecret` is sent; it is then active and creates the
+	 * vault. `409 vault_being_created`: another key is creating that vault.
 	 */
 	async login(sharedSecret?: string): Promise<VerifyResponse> {
 		const publicKey = publicKeyText(this.publicKey);
 		const challenge = await this.send<Schemas["ChallengeResponse"]>("POST", "/api/v1/auth/challenge", {
-			json: { username: this.username, publicKey },
+			json: { username: this.username, vaultName: this.vaultName, publicKey },
 		});
-		checkChallenge(challenge.message, this.origin, this.username, this.publicKey);
+		checkChallenge(challenge.message, this.origin, this.username, this.vaultName, this.publicKey);
 		const signature = signSshsig(this.opts.identity.seed, NAMESPACE_AUTH, utf8(challenge.message));
 		const body: Schemas["VerifyRequest"] = {
 			challengeId: challenge.challengeId,
@@ -130,19 +146,9 @@ export class ApiClient {
 		return result;
 	}
 
-	// Devices (protocol.md 6)
-	selfDevice(): Promise<Device> {
+	// Devices: a device is one key in one vault (protocol.md 6)
+	selfDevice(): Promise<SelfDevice> {
 		return this.call("GET", "/api/v1/devices/self");
-	}
-	async devices(): Promise<Device[]> {
-		return (await this.call<Schemas["DeviceList"]>("GET", "/api/v1/devices")).devices;
-	}
-	approveDevice(deviceId: string): Promise<Device> {
-		return this.call("POST", `/api/v1/devices/${enc(deviceId)}/approve`);
-	}
-	/** Revoke a device of this user: it loses every vault membership and its sessions. */
-	revokeDevice(deviceId: string): Promise<Device> {
-		return this.call("DELETE", `/api/v1/devices/${enc(deviceId)}`);
 	}
 
 	// Vaults (protocol.md 7)
@@ -152,14 +158,16 @@ export class ApiClient {
 	createVault(id: string, name: string, keyring: KeyringUpload): Promise<Vault> {
 		return this.call("POST", "/api/v1/vaults", { json: { id, name, keyring } });
 	}
-	async members(vaultId: string): Promise<Member[]> {
-		return (await this.call<Schemas["MemberList"]>("GET", `${vaultPath(vaultId)}/members`)).members;
+	/** Every key of the vault, revoked ones included. */
+	async devices(vaultId: string): Promise<Device[]> {
+		return (await this.call<Schemas["DeviceList"]>("GET", `${vaultPath(vaultId)}/devices`)).devices;
 	}
-	approveMember(vaultId: string, deviceId: string): Promise<Member> {
-		return this.call("POST", `${vaultPath(vaultId)}/members/${enc(deviceId)}/approve`);
+	approveDevice(vaultId: string, deviceId: string): Promise<Device> {
+		return this.call("POST", `${vaultPath(vaultId)}/devices/${enc(deviceId)}/approve`);
 	}
-	async removeMember(vaultId: string, deviceId: string): Promise<void> {
-		await this.call("DELETE", `${vaultPath(vaultId)}/members/${enc(deviceId)}`);
+	/** Revoke a key of the vault (it may be this one) and end its sessions. 409 for the last active key. */
+	async removeDevice(vaultId: string, deviceId: string): Promise<void> {
+		await this.call("DELETE", `${vaultPath(vaultId)}/devices/${enc(deviceId)}`);
 	}
 	keyring(vaultId: string, version?: number): Promise<KeyringObject> {
 		const query = version === undefined ? "" : `?version=${version}`;

@@ -61,14 +61,16 @@ def sign_sshsig(seed: bytes, namespace: str, message: bytes) -> str:
 
 @dataclass
 class Device:
-    """One installation: a key, and a session once logged in."""
+    """One key of one installation in one vault, and a session once logged in."""
 
     client: "TestClient"
     username: str
+    vault_name: str = "Personal"
     seed: bytes = field(default_factory=lambda: secrets.token_bytes(32))
     name: str = "Laptop"
     token: str | None = None
     device_id: str | None = None
+    vault_id: str | None = None
 
     @property
     def public_key(self) -> bytes:
@@ -82,7 +84,11 @@ class Device:
     def challenge(self) -> dict:
         r = self.client.post(
             "/api/v1/auth/challenge",
-            json={"username": self.username, "publicKey": self.public_key_text + " comment"},
+            json={
+                "username": self.username,
+                "vaultName": self.vault_name,
+                "publicKey": self.public_key_text + " comment",
+            },
         )
         assert r.status_code == 200, r.text
         return r.json()
@@ -102,6 +108,7 @@ class Device:
         if expect == 200:
             self.token = data["token"]
             self.device_id = data["deviceId"]
+            self.vault_id = data["vaultId"]
         return data
 
     @property
@@ -140,13 +147,20 @@ class Device:
             "recoverySigner": recovery_signer,
         }
 
-    def create_vault(self, name: str = "Personal") -> str:
+    def create_vault(self, **keyring: Any) -> str:
+        """Create this key's vault (after a login with the shared secret)."""
         vault_id = str(uuid.uuid4())
-        r = self.post(
-            "/api/v1/vaults", json={"id": vault_id, "name": name, "keyring": self.keyring(1)}
-        )
+        body = {"id": vault_id, "name": self.vault_name, "keyring": self.keyring(1, **keyring)}
+        r = self.post("/api/v1/vaults", json=body)
         assert r.status_code == 201, r.text
+        self.vault_id = vault_id
         return vault_id
+
+    def join(self, approver: "Device") -> None:
+        """Join `approver`'s vault as a new key, and have it approved."""
+        assert self.login()["status"] == "pending"
+        r = approver.post(f"/api/v1/vaults/{self.vault_id}/devices/{self.device_id}/approve")
+        assert r.status_code == 200, r.text
 
 
 def blob(data: bytes) -> tuple[str, bytes]:

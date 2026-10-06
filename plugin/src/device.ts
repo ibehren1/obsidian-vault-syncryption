@@ -41,3 +41,9 @@ export function defaultDeviceName(platform: DevicePlatform, hostname: string): s
 	if (platform.isLinux) return "Linux";
 	return "Obsidian";
 }
+
+/** The comment of a new device key: `syncryption alice@Isaacs-MacBook`, whitespace as `-`. */
+export function keyComment(username: string, deviceName: string): string {
+	const device = cleanDeviceName(deviceName).replace(/\s+/g, "-");
+	return device === "" ? `syncryption ${username}` : `syncryption ${username}@${device}`;
+}

@@ -1,4 +1,4 @@
-/** Dialogs for joining, unlocking the key, pairing and approving devices. */
+/** Dialogs for joining, unlocking the key, pairing and approving keys. */
 import { App, ButtonComponent, Modal, Setting, TextAreaComponent } from "obsidian";
 
 interface PromptOptions {
@@ -8,6 +8,10 @@ interface PromptOptions {
 	password?: boolean;
 	multiline?: boolean;
 	submit?: string;
+	/** Prefills the field. */
+	value?: string;
+	/** Adds a cancel button with this text. */
+	cancel?: string;
 }
 
 /** Ask for one value. Resolves with null if the dialog is closed without submitting. */
@@ -18,7 +22,7 @@ export function prompt(app: App, opts: PromptOptions): Promise<string | null> {
 }
 
 class PromptModal extends Modal {
-	private value = "";
+	private value: string;
 	private submitted = false;
 
 	constructor(
@@ -27,6 +31,7 @@ class PromptModal extends Modal {
 		private readonly done: (value: string | null) => void,
 	) {
 		super(app);
+		this.value = opts.value ?? "";
 	}
 
 	override onOpen(): void {
@@ -35,7 +40,7 @@ class PromptModal extends Modal {
 		const setting = new Setting(this.contentEl).setName(this.opts.label);
 		if (this.opts.multiline) {
 			setting.settingEl.addClass("syncryption-stacked");
-			const area = new TextAreaComponent(setting.controlEl).onChange((v) => (this.value = v));
+			const area = new TextAreaComponent(setting.controlEl).setValue(this.value).onChange((v) => (this.value = v));
 			area.inputEl.rows = 8;
 			noAutocorrect(area.inputEl);
 			area.inputEl.addClass("syncryption-wide");
@@ -44,14 +49,18 @@ class PromptModal extends Modal {
 			setting.addText((text) => {
 				if (this.opts.password) text.inputEl.type = "password";
 				noAutocorrect(text.inputEl);
-				text.onChange((v) => (this.value = v));
+				text.setValue(this.value).onChange((v) => (this.value = v));
 				text.inputEl.addEventListener("keydown", (e) => {
 					if (e.key === "Enter") this.submit();
 				});
 				text.inputEl.focus();
+				text.inputEl.select();
 			});
 		}
-		new Setting(this.contentEl).addButton((b) =>
+		const buttons = new Setting(this.contentEl);
+		const cancel = this.opts.cancel;
+		if (cancel) buttons.addButton((b) => b.setButtonText(cancel).onClick(() => this.close()));
+		buttons.addButton((b) =>
 			b
 				.setButtonText(this.opts.submit ?? "Continue")
 				.setCta()
@@ -88,12 +97,13 @@ export class PairingModal extends Modal {
 	}
 
 	override onOpen(): void {
-		this.setTitle("Approve this device");
+		this.setTitle("Approve this key");
 		this.contentEl.createEl("p", {
-			text: "On a device that already syncs this vault, approve this device in the sync settings, and check that it shows this code:",
+			text: "This key is new to the vault. Approve it on a device that already syncs the vault.",
 		});
+		this.contentEl.createEl("p", { text: "In its sync settings, check that it shows this code:" });
 		this.contentEl.createEl("p", { text: this.code, cls: "syncryption-code" });
-		this.contentEl.createEl("p", { text: "This dialog closes by itself once the device is approved." });
+		this.contentEl.createEl("p", { text: "This dialog closes by itself once the key is approved." });
 		const status = this.contentEl.createEl("p");
 		const buttons = new Setting(this.contentEl);
 		const recover = this.recover;
@@ -104,7 +114,7 @@ export class PairingModal extends Modal {
 					const identity = await prompt(this.app, {
 						title: "Use a recovery key",
 						description:
-							"Enter the vault's recovery key (AGE-SECRET-KEY-1…). This device is then added to the vault without an approval. The key is not stored.",
+							"Enter the vault's recovery key (AGE-SECRET-KEY-1…). This device's key is then added to the vault without an approval. The recovery key is not stored.",
 						label: "Recovery key",
 						password: true,
 						submit: "Recover",
@@ -147,12 +157,15 @@ function recoveryError(e: unknown): string {
 }
 
 export interface PendingApproval {
+	/** The device name. */
 	name: string;
+	/** `SHA256:…` */
+	fingerprint: string;
 	code: string;
 	approve(): Promise<void>;
 }
 
-/** Lists the devices waiting for approval, each with its pairing code. */
+/** Lists the keys waiting for approval, each with its pairing code. */
 export class ApproveModal extends Modal {
 	constructor(
 		app: App,
@@ -162,16 +175,17 @@ export class ApproveModal extends Modal {
 	}
 
 	override onOpen(): void {
-		this.setTitle("Approve devices");
+		this.setTitle("Approve new keys");
 		if (this.pending.length === 0) {
-			this.contentEl.createEl("p", { text: "No device is waiting for approval." });
+			this.contentEl.createEl("p", { text: "No key is waiting for approval." });
 			return;
 		}
 		this.contentEl.createEl("p", {
-			text: "Approve a device only if it shows exactly the same code. An approved device can read the whole vault.",
+			text: "Approve a key only if its device shows exactly the same code. An approved key can read the whole vault.",
 		});
 		for (const item of this.pending) {
 			const setting = new Setting(this.contentEl).setName(item.name).setDesc(item.code);
+			setting.nameEl.createDiv({ text: item.fingerprint, cls: "setting-item-description" });
 			setting.addButton((b: ButtonComponent) =>
 				b
 					.setButtonText("Codes match, approve")
@@ -202,9 +216,7 @@ interface ConfirmOptions {
 	confirm: string;
 	cancel?: string;
 	warning?: boolean;
-	/** A toggle shown above the buttons; its value is passed to `onConfirm`. */
-	option?: string;
-	onConfirm(option: boolean): void | Promise<void>;
+	onConfirm(): void | Promise<void>;
 }
 
 /** A question with a confirm and a cancel button. */
@@ -219,16 +231,12 @@ export class ConfirmModal extends Modal {
 	override onOpen(): void {
 		this.setTitle(this.opts.title);
 		this.contentEl.createEl("p", { text: this.opts.text });
-		let option = false;
-		if (this.opts.option) {
-			new Setting(this.contentEl).setName(this.opts.option).addToggle((t) => t.onChange((v) => (option = v)));
-		}
 		new Setting(this.contentEl)
 			.addButton((b) => b.setButtonText(this.opts.cancel ?? "Cancel").onClick(() => this.close()))
 			.addButton((b) => {
 				b.setButtonText(this.opts.confirm).onClick(() => {
 					this.close();
-					void this.opts.onConfirm(option);
+					void this.opts.onConfirm();
 				});
 				if (this.opts.warning) b.setDestructive();
 				else b.setCta();

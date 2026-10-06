@@ -97,7 +97,7 @@ def test_maintenance():
     r = client.post("/admin/api/maintenance/on", admin, json={"message": "container check"})
     assert r.status_code == 204, r.text
     try:
-        r = client.get("/api/v1/vaults")
+        r = client.get("/api/v1/devices/self")
         assert (r.status_code, r.json()["error"]) == (503, "maintenance")
         health = client.get("/health")
         assert (health.status_code, health.json()["status"]) == (200, "maintenance")

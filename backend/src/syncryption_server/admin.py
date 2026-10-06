@@ -2,8 +2,9 @@
 
 Everything needs `ADMIN_TOKEN`: as `Authorization: Bearer <token>`, or entered once in the
 login form, which starts a browser session (an HttpOnly cookie, plus a CSRF token in every
-form). The page lists users, their vaults with stored sizes, and their devices. Users and
-vaults can be disabled (no access, data kept), enabled again, and purged once disabled.
+form). The page lists users, their vaults with stored sizes, and each vault's devices (one
+encryption key each). Users and vaults can be disabled (no access, data kept), enabled
+again, and purged once disabled. Purging a vault also deletes its devices.
 Maintenance mode pauses the whole sync API until it is turned off (protocol.md 14.1).
 """
 
@@ -26,6 +27,7 @@ from syncryption_server.auth import client_ip, limit_key, request_origin
 from syncryption_server.config import MAX_NOTE, note_problem
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found
+from syncryption_server.sshkeys import fingerprint, parse_public_key
 from syncryption_server.state import AppState, Maintenance, get_state
 
 log = logging.getLogger(__name__)
@@ -54,7 +56,7 @@ class AdminError(Exception):
 MESSAGES = {
     "disabled": "Disabled. Its devices can no longer sync; the data is kept.",
     "enabled": "Enabled again.",
-    "purged": "Purged. The data is deleted.",
+    "purged": "Purged. The data is deleted, and so are its devices' encryption keys.",
     "logged_out": "Logged out.",
     "not_found": "It no longer exists.",
     "not_disabled": "Disable it before purging.",
@@ -140,10 +142,20 @@ def overview(state: AppState) -> list[dict]:
         "(SELECT MAX(created_at) FROM revisions r WHERE r.vault_id = v.id) AS last_change "
         "FROM vaults v ORDER BY v.name"
     )
-    devices = state.db.all("SELECT * FROM devices ORDER BY created_at")
+    devices = state.db.all("SELECT * FROM devices ORDER BY created_at, rowid")
 
     def time(t: int | None) -> str | None:
         return rfc3339(t) if t is not None else None
+
+    def device(d: sqlite3.Row) -> dict:
+        return {
+            "id": d["id"],
+            "name": d["name"],
+            "fingerprint": fingerprint(parse_public_key(d["public_key"])),
+            "status": d["status"],
+            "createdAt": time(d["created_at"]),
+            "lastSeenAt": time(d["last_seen_at"]),
+        }
 
     out = []
     for u in users:
@@ -165,19 +177,16 @@ def overview(state: AppState) -> list[dict]:
                         "createdAt": time(v["created_at"]),
                         "lastChangeAt": time(v["last_change"]),
                         "disabled": v["disabled_at"] is not None,
+                        "devices": [device(d) for d in mine if d["vault_id"] == v["id"]],
                     }
                     for v in vaults
                     if v["user_id"] == u["id"]
                 ],
-                "devices": [
-                    {
-                        "id": d["id"],
-                        "name": d["name"],
-                        "status": d["status"],
-                        "createdAt": time(d["created_at"]),
-                        "lastSeenAt": time(d["last_seen_at"]),
-                    }
+                # Keys that registered to create a vault and haven't yet (swept after 24 h).
+                "creating": [
+                    {"vaultName": d["vault_name"], "device": device(d)}
                     for d in mine
+                    if d["vault_id"] is None
                 ],
             }
         )
@@ -210,6 +219,7 @@ def _vault_ids(state: AppState, kind: Kind, item_id: str) -> list[str]:
 
 
 async def _purge_vault(state: AppState, user_id: str, vault_id: str) -> None:
+    """Delete the vault's data and all its devices (their keys can then join anew)."""
     # Blobs first: if the store fails, the rows stay and the purge can be run again.
     prefix = f"blobs/{user_id}/{vault_id}/"
     keys = [key async for key in state.store.iter_keys(prefix)]
@@ -218,8 +228,18 @@ async def _purge_vault(state: AppState, user_id: str, vault_id: str) -> None:
     with state.db.transaction() as db:
         for table in ("locks", "revision_blobs", "revisions", "files", "blobs", "keyrings"):
             db.execute(f"DELETE FROM {table} WHERE vault_id = ?", (vault_id,))  # noqa: S608
-        db.execute("DELETE FROM memberships WHERE vault_id = ?", (vault_id,))
+        _delete_devices(db, "vault_id = ?", vault_id)
         db.execute("DELETE FROM vaults WHERE id = ?", (vault_id,))
+
+
+def _delete_devices(db: sqlite3.Connection, where: str, value: str) -> None:
+    """Delete devices, their sessions (ON DELETE CASCADE) and their open challenges."""
+    db.execute(
+        "DELETE FROM challenges WHERE public_key IN "  # noqa: S608
+        f"(SELECT public_key FROM devices WHERE {where})",
+        (value,),
+    )
+    db.execute(f"DELETE FROM devices WHERE {where}", (value,))  # noqa: S608
 
 
 async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm: str) -> str:
@@ -247,8 +267,8 @@ async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm
         for vault_id in _vault_ids(state, kind, item_id):
             await _purge_vault(state, item_id, vault_id)
         with state.db.transaction() as db:
-            # Sessions and memberships go with the devices (ON DELETE CASCADE).
-            db.execute("DELETE FROM devices WHERE user_id = ?", (item_id,))
+            # Keys that were creating a vault, the only devices left.
+            _delete_devices(db, "user_id = ?", item_id)
             db.execute("DELETE FROM challenges WHERE username = ?", (row["name"],))
             db.execute("DELETE FROM users WHERE id = ?", (item_id,))
     log.info("admin: purged %s", label)
@@ -492,7 +512,9 @@ def _dashboard(admin: Admin, state: AppState, message: str | None, error: bool) 
     parts.append(_maintenance_section(admin, state))
     parts.append(
         f'<p class="muted">{len(users)} users, {sum(len(u["vaults"]) for u in users)} vaults, '
-        f"{_size(total)} stored. Stored size counts history and deleted files still kept.</p>"
+        f"{_size(total)} stored. Stored size counts history and deleted files still kept. "
+        "Each device is one encryption key in one vault; purging a vault deletes its devices."
+        "</p>"
     )
     for u in users:
         name = u["username"]
@@ -520,15 +542,22 @@ def _dashboard(admin: Admin, state: AppState, message: str | None, error: bool) 
             parts.append("</table>")
         else:
             parts.append('<p class="muted">No vaults.</p>')
-        parts.append(
-            "<table><tr><th>Device</th><th>Status</th><th>Joined</th><th>Last seen</th></tr>"
-        )
-        for d in u["devices"]:
+        rows = [(v["name"], d) for v in u["vaults"] for d in v["devices"]]
+        rows += [(f"{c['vaultName']} (being created)", c["device"]) for c in u["creating"]]
+        if rows:
             parts.append(
-                f"<tr><td>{html.escape(d['name'])}</td><td>{html.escape(d['status'])}</td>"
-                f"<td>{_when(d['createdAt'])}</td><td>{_when(d['lastSeenAt'])}</td></tr>"
+                "<table><tr><th>Device</th><th>Vault</th><th>Key</th><th>Status</th>"
+                "<th>Joined</th><th>Last seen</th></tr>"
             )
-        parts.append("</table></section>")
+            for vault, d in rows:
+                parts.append(
+                    f"<tr><td>{html.escape(d['name'])}</td><td>{html.escape(vault)}</td>"
+                    f'<td class="muted">{html.escape(d["fingerprint"])}</td>'
+                    f"<td>{html.escape(d['status'])}</td>"
+                    f"<td>{_when(d['createdAt'])}</td><td>{_when(d['lastSeenAt'])}</td></tr>"
+                )
+            parts.append("</table>")
+        parts.append("</section>")
     if not users:
         parts.append('<p class="muted">No users yet.</p>')
     return html_page("".join(parts))

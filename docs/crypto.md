@@ -162,8 +162,10 @@ base64( "openssh-key-v1\0"
 - The plugin requires `SecretStorage` (`minAppVersion` 1.13.0 in `manifest.json`, which also brings the declarative settings API). There
   is no fallback: if the API is missing, the plugin refuses to set up a key and asks the
   user to update Obsidian.
-- Secret id: `syncryption-key-` + `hex(SHA-256(utf8(origin + "\n" + username))[0:8])`,
-  so several vaults or servers on one device don't overwrite each other's keys. `data.json`
+- One key per device per vault (protocol.md 3): a key is bound to one user and one vault
+  when it first logs in, and a public key can be registered only once per server.
+- Secret id: `syncryption-key-` + `hex(SHA-256(utf8(origin + "\n" + username + "\n" + vaultName))[0:8])`
+  (`vaultName` NFC-normalised and trimmed), so each vault on a device has its own key. `data.json`
   keeps only the public key and this id.
 - Optional local passphrase, as an extra layer on top of `SecretStorage`:
   `ciphername = aes256-ctr`, `kdfname = bcrypt`, `salt = RAND(16)`, `rounds = 16` (the
@@ -346,18 +348,16 @@ flowchart LR
 ```
 
 ### 6.5 Adding a device to a vault (pairing)
-Pairing is per vault. It is needed when a key that isn't in a vault's keyring opens that
-vault: either a new key, or a known key opening another of the user's vaults for the first
-time. A key that is already in the keyring (for example one shared between installations)
-needs no pairing.
+Every new key of an existing vault pairs: a key belongs to one vault, so a new device, or a
+new vault on a known device, always brings a new key.
 1. The joining device shows its pairing code: the first 50 bits of `SHA-256(pubWire)`, in
    Crockford base32, grouped `XXXXX-XXXXX`.
-2. The server lists the pending membership to the vault's active members.
+2. The server lists the pending key to the vault's active devices.
 3. The user compares the codes on both screens and approves on an active member, which
    recomputes the code from the public key itself.
 4. The approving device decrypts the keyring, adds the new device to `devices`, increments
    `version`, re-encrypts to all `devices` (+ `recovery`), uploads it signed, and approves
-   the membership on the server.
+   the key on the server.
 
 The new device trusts the first keyring that is signed by an existing member and contains
 its own key. That trust rests on the user having compared pairing codes.
@@ -368,15 +368,15 @@ sequenceDiagram
     participant New as New device
     participant S as Server
     participant Old as Active device
-    New->>S: POST /vaults/open (pending membership)
+    New->>S: login and POST /vaults/open (pending key)
     New->>User: shows pairing code of its own key
-    Old->>S: list pending members
+    Old->>S: list the vault's devices
     S-->>Old: new device's public key
     Old->>User: shows pairing code computed from that key
     User->>Old: codes match, approve
     Old->>Old: decrypt keyring, add device,<br/>version + 1, encrypt to all devices, sign
     Old->>S: PUT keyring (version, signature)
-    Old->>S: approve membership
+    Old->>S: approve the key
     New->>S: poll, then GET keyring
     New->>New: check signature and signer,<br/>decrypt with own key, pin
 ```
@@ -501,9 +501,9 @@ flowchart TD
    someone else already wrote it, so the device moves on. Files with local changes aren't
    re-encrypted; their next upload uses the new epoch anyway.
 
-If step 2 doesn't happen (the device that revoked went offline, or the device was revoked
-from the whole account in another vault), every device removes keyring devices that are no
-longer members of the vault on the server when it connects, with the same rotation.
+If step 2 doesn't happen (the device that revoked went offline), every device removes
+keyring devices that are no longer active on the server when it connects, with the same
+rotation.
 
 Because `indexKey` doesn't rotate, `fileId`s stay stable and rotation is ordinary commits.
 The trade-off: a revoked device that later obtains server data can still test path
@@ -546,14 +546,13 @@ the revocation flow and background re-encryption against the real backend
   because the old key can still open the older keyring versions on the server.
 - Manual recovery: `age -d -i recovery.txt keyring.age` gives the keyring JSON.
 - Recovery in the plugin, when no device is left to approve a new one:
-  1. The new device opens the vault (joining the server first if its key is new), which
-     gives it a pending membership.
+  1. The new device logs in to the vault with a new key, which joins as a pending key.
   2. It fetches the current keyring (`GET /vaults/{id}/recovery`), decrypts it with the
      recovery identity, and checks `vaultId`, `name`, the signer (first-use rule, 6.3),
      and that the derived `recoverySigner` equals the keyring's.
   3. It adds itself to `devices`, increments `version`, sets `updatedBy` to its own `id`,
      re-encrypts to all `devices` and `recovery`, and signs with `recoverySeed`.
-  4. `POST /vaults/{id}/recover` stores the version and activates the membership. The
+  4. `POST /vaults/{id}/recover` stores the version and activates the key. The
      device then pins that version as any other first use.
 - The recovery signer can only add versions that keep the recovery fields as they are. A
   device that set the recovery key and is later revoked takes it with it (8.4).

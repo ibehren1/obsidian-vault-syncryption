@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cleanDeviceName, defaultDeviceName, desktopHostname, MAX_DEVICE_NAME, type DevicePlatform } from "../src/device";
+import { cleanDeviceName, defaultDeviceName, desktopHostname, keyComment, MAX_DEVICE_NAME, type DevicePlatform } from "../src/device";
 
 const none: DevicePlatform = {
 	isDesktopApp: false,
@@ -47,5 +47,11 @@ describe("device name", () => {
 	it("cleans user input", () => {
 		expect(cleanDeviceName("  Work laptop  ")).toBe("Work laptop");
 		expect(cleanDeviceName("   ")).toBe("");
+	});
+
+	it("names the key after the user and device", () => {
+		expect(keyComment("alice", " Work laptop ")).toBe("syncryption alice@Work-laptop");
+		expect(keyComment("alice", "   ")).toBe("syncryption alice");
+		expect(keyComment("alice", "x".repeat(100))).toBe(`syncryption alice@${"x".repeat(MAX_DEVICE_NAME)}`);
 	});
 });

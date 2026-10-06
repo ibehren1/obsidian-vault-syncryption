@@ -3,6 +3,7 @@
 - `check`: validate the environment and print what will run. Exits 1 with the reason.
 - `render DIR`: write `Caddyfile` (unless `BEHIND_PROXY=TRUE`) and `litestream.yml` (when S3
   is enabled) into DIR, and print the shell assignments the entrypoint needs.
+- `check-data`: exit 1 if `meta.db` was written by a server before 0.1.4 (delete it).
 - `migrate`: the `MIGRATE_TO_S3` copy.
 - `health`: the container healthcheck, a GET of `/health` on the local app port.
 - `openapi`: print the OpenAPI schema, from which the plugin's API types are generated.
@@ -20,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from syncryption_server.config import ConfigError, Settings, load_settings
+from syncryption_server.db import OldDataError, check_file
 from syncryption_server.migrate import MigrationError, migrate_to_s3
 from syncryption_server.storage import S3BlobStore
 
@@ -84,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="syncryption_server")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
+    commands.add_parser("check-data")
     render = commands.add_parser("render")
     render.add_argument("directory", type=Path)
     commands.add_parser("migrate")
@@ -105,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "check":
         print(describe(settings))
+    elif args.command == "check-data":
+        try:
+            check_file(settings.db_path)
+        except OldDataError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     elif args.command == "render":
         args.directory.mkdir(parents=True, exist_ok=True)
         if not settings.behind_proxy:

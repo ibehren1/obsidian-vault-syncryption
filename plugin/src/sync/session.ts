@@ -1,12 +1,13 @@
 /**
  * Connecting to a vault (docs/protocol.md 5 and 7, crypto.md 6): log in or join, open or
  * create the vault, wait for pairing or recover with the recovery key, and fetch and verify
- * the keyring. Also approving other devices (the active side of pairing) and setting the
- * recovery key.
+ * the keyring. Also approving other keys (the active side of pairing), removing keys,
+ * replacing this device's key and setting the recovery key. A key (a "device" in the API)
+ * is one device in one vault.
  */
 import { ed25519 } from "@noble/curves/ed25519.js";
 
-import type { ApiClient, Device, KeyringObject, Member, Vault } from "../api/client";
+import type { ApiClient, Device, KeyringObject, Vault } from "../api/client";
 import { ApiError } from "../api/http";
 import { fromB64u, toB64u } from "../crypto/bytes";
 import {
@@ -30,6 +31,8 @@ import type { SyncStore } from "../store/state";
 
 export const PIN = "keyringPin";
 export const VAULT_ID = "vaultId";
+/** Store meta: the device whose key this device replaced, until it is removed (`handOver`). */
+export const REPLACED = "replacedDevice";
 const PAIRING_POLL_MS = 5000;
 
 export interface ConnectCallbacks {
@@ -45,8 +48,8 @@ export interface ConnectCallbacks {
 }
 
 export interface ConnectOptions {
+	/** Logged in, or to log in, to the vault named by `api.vaultName`. */
 	api: ApiClient;
-	vaultName: string;
 	deviceName: string;
 	seed: Uint8Array;
 	/** Opens the local state for a vault id (one store per remote vault). */
@@ -87,46 +90,41 @@ export class VaultSession {
 		await this.store.setMeta(PIN, this.trusted.pin);
 	}
 
-	/** Pending members of this vault, with the pairing code computed here, not by the server. */
-	async pendingMembers(): Promise<Array<{ member: Member; code: string }>> {
-		const members = await this.api.members(this.vault.id);
-		return members
-			.filter((m) => m.status === "pending")
-			.map((member) => ({ member, code: pairingCode(parsePublicKeyText(member.device.publicKey)) }));
+	/** Every key of this vault on the server, revoked ones included. */
+	devices(): Promise<Device[]> {
+		return this.api.devices(this.vault.id);
 	}
 
-	/** This user's devices that wait for approval but haven't asked for a vault (protocol.md 6). */
+	/** Keys waiting for approval, with the pairing code computed here, not by the server. */
 	async pendingDevices(): Promise<Array<{ device: Device; code: string }>> {
-		const devices = await this.api.devices();
+		const devices = await this.devices();
 		return devices
 			.filter((d) => d.status === "pending")
 			.map((device) => ({ device, code: pairingCode(parsePublicKeyText(device.publicKey)) }));
 	}
 
 	/**
-	 * Pairing, active side (crypto.md 6.5): add the device to the keyring, upload it signed,
-	 * then approve the membership. The user must have compared the pairing codes.
+	 * Pairing, active side (crypto.md 6.5): add the key to the keyring, upload it signed,
+	 * then approve it. The user must have compared the pairing codes.
 	 */
-	async approve(member: Member): Promise<void> {
-		const key = publicKeyText(parsePublicKeyText(member.device.publicKey));
+	async approve(device: Pick<Device, "id" | "name" | "publicKey">): Promise<void> {
+		const key = publicKeyText(parsePublicKeyText(device.publicKey));
 		await this.update((k) =>
 			k.devices.some((d) => d.publicKey === key)
 				? null
-				: addKeyringDevice(k, { id: member.device.id, name: member.device.name, publicKey: key }, this.deviceId),
+				: addKeyringDevice(k, { id: device.id, name: device.name, publicKey: key }, this.deviceId),
 		);
-		await this.api.approveMember(this.vault.id, member.device.id);
+		await this.api.approveDevice(this.vault.id, device.id);
 	}
 
 	/**
-	 * Revocation (crypto.md 8.4): end the device's access on the server first, from this
-	 * vault or (`everywhere`) from the whole account, then remove it from the keyring with a
-	 * new epoch. Other devices re-encrypt their files in the background.
+	 * Revocation (crypto.md 8.4): revoke the key on the server first, then remove it from
+	 * the keyring with a new epoch. Other devices re-encrypt their files in the background.
 	 */
-	async removeDevice(deviceId: string, everywhere = false): Promise<void> {
-		if (deviceId === this.deviceId) throw new Error("This device can't remove itself.");
+	async removeDevice(deviceId: string): Promise<void> {
+		if (deviceId === this.deviceId) throw new Error("This device can't remove its own key.");
 		try {
-			if (everywhere) await this.api.revokeDevice(deviceId);
-			else await this.api.removeMember(this.vault.id, deviceId);
+			await this.api.removeDevice(this.vault.id, deviceId);
 		} catch (e) {
 			// Already gone from the server: the keyring still has to follow.
 			if (!(e instanceof ApiError && e.status === 404)) throw e;
@@ -135,16 +133,31 @@ export class VaultSession {
 	}
 
 	/**
-	 * Finish revocations done elsewhere: remove keyring devices that are no longer members
-	 * of the vault on the server (revoked from another vault, or a rotation that didn't
-	 * finish). Returns their names.
+	 * Finish revocations done elsewhere: remove keyring devices whose key is revoked or gone
+	 * on the server (a rotation that didn't finish). Returns their names.
 	 */
 	async removeStaleDevices(): Promise<string[]> {
-		const members = new Set((await this.api.members(this.vault.id)).map((m) => m.device.id));
-		const stale = this.keyring.devices.filter((d) => !members.has(d.id) && d.id !== this.deviceId);
+		const status = new Map((await this.devices()).map((d) => [d.id, d.status]));
+		await this.refreshKeyring();
+		const stale = this.keyring.devices.filter(
+			(d) => d.id !== this.deviceId && (status.get(d.id) ?? "revoked") === "revoked",
+		);
 		if (stale.length === 0) return [];
 		await this.rotateOut(stale.map((d) => d.id));
 		return stale.map((d) => d.name);
+	}
+
+	/**
+	 * After a key change (`handOver`): remove the replaced key, if this is the new one.
+	 * Returns whether it removed one. Kept in the store until done, so it is retried.
+	 */
+	async finishReplace(): Promise<boolean> {
+		const old = await this.store.getMeta<string | null>(REPLACED);
+		if (!old) return false;
+		const removed = old !== this.deviceId;
+		if (removed) await this.removeDevice(old);
+		await this.store.setMeta(REPLACED, null);
+		return removed;
 	}
 
 	private async rotateOut(ids: string[]): Promise<void> {
@@ -238,7 +251,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export async function connect(opts: ConnectOptions): Promise<VaultSession> {
 	const { api, seed, callbacks, signal } = opts;
 	// The server stores names like this, and the keyring must name the vault the same way.
-	const vaultName = opts.vaultName.normalize("NFC").trim();
+	const vaultName = api.vaultName;
 	const pollMs = opts.pollMs ?? PAIRING_POLL_MS;
 	if (api.deviceId === null) await login(api, callbacks);
 	const myKey = publicKeyText(ed25519.getPublicKey(seed));
@@ -260,13 +273,9 @@ export async function connect(opts: ConnectOptions): Promise<VaultSession> {
 		} catch (e) {
 			if (e instanceof ApiError && e.code === "not_found") {
 				try {
+					// Only the key that joined with the shared secret gets here (protocol.md 5).
 					vault = await create(api, vaultName, myKey, opts.deviceName, seed);
 				} catch (err) {
-					if (err instanceof ApiError && err.code === "device_pending") {
-						// A new key of an existing user, and no vault yet: approve the device first.
-						await pair();
-						continue;
-					}
 					if (err instanceof ApiError && err.code === "exists") continue; // created meanwhile
 					throw err;
 				}
@@ -328,6 +337,29 @@ async function create(
 	const keyring = createKeyring({ vaultId, name, device: { id: api.deviceId!, name: deviceName, publicKey } });
 	const sealed = await sealKeyring(keyring, seed);
 	return api.createVault(vaultId, name, upload(sealed, keyring, api.deviceId!));
+}
+
+/**
+ * Replace this device's key, active side (PLAN, Rules: Replace). `old` is the connected
+ * session of the current key, `api` a client for the new key, which isn't saved yet.
+ *
+ * 1. The new key logs in once, so the server knows it as a pending key of the vault.
+ * 2. The old key adds it to the keyring and approves it. Both keys now work, and the
+ *    store's keyring pin is a version the new key can open.
+ * 3. The store records the old key as replaced. The caller then saves the new key, and
+ *    the new key's session removes the old one (`finishReplace`) and rotates the vault key.
+ *
+ * Until the caller saves the new key, the old one keeps working; after, the new one does.
+ * A failure in between leaves an extra key in the vault, removable from any device.
+ */
+export async function handOver(old: VaultSession, api: ApiClient, deviceName: string): Promise<void> {
+	if (api.origin !== old.api.origin || api.username !== old.api.username || api.vaultName !== old.api.vaultName) {
+		throw new Error("The new key must be for the same vault.");
+	}
+	const joined = await api.login();
+	if (joined.vaultId !== null && joined.vaultId !== old.vault.id) throw new Error("The new key joined another vault.");
+	await old.approve({ id: joined.deviceId, name: deviceName, publicKey: publicKeyText(api.publicKey) });
+	await old.store.setMeta(REPLACED, old.deviceId);
 }
 
 /**

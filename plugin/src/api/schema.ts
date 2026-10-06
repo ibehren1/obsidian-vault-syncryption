@@ -35,57 +35,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/devices": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Devices */
-        get: operations["list_devices_api_v1_devices_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/devices/{device_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Revoke Device */
-        delete: operations["revoke_device_api_v1_devices__device_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/devices/{device_id}/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Approve Device */
-        post: operations["approve_device_api_v1_devices__device_id__approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/devices/self": {
         parameters: {
             query?: never;
@@ -110,8 +59,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Vaults */
-        get: operations["list_vaults_api_v1_vaults_get"];
+        get?: never;
         put?: never;
         /** Create Vault */
         post: operations["create_vault_api_v1_vaults_post"];
@@ -168,6 +116,60 @@ export interface paths {
         get: operations["changes_api_v1_vaults__vault_id__changes_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vaults/{vault_id}/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Devices */
+        get: operations["list_devices_api_v1_vaults__vault_id__devices_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vaults/{vault_id}/devices/{device_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Device
+         * @description Revoke a device of the vault, the caller included (to replace its key).
+         */
+        delete: operations["remove_device_api_v1_vaults__vault_id__devices__device_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vaults/{vault_id}/devices/{device_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve Device */
+        post: operations["approve_device_api_v1_vaults__vault_id__devices__device_id__approve_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -279,57 +281,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/vaults/{vault_id}/members": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Members */
-        get: operations["list_members_api_v1_vaults__vault_id__members_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/vaults/{vault_id}/members/{device_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Remove Member */
-        delete: operations["remove_member_api_v1_vaults__vault_id__members__device_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/vaults/{vault_id}/members/{device_id}/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Approve Member */
-        post: operations["approve_member_api_v1_vaults__vault_id__members__device_id__approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/vaults/{vault_id}/recover": {
         parameters: {
             query?: never;
@@ -341,7 +292,7 @@ export interface paths {
         put?: never;
         /**
          * Recover
-         * @description Upload the next keyring signed by the recovery key, and become an active member.
+         * @description Upload the next keyring signed by the recovery key, and become an active device.
          */
         post: operations["recover_api_v1_vaults__vault_id__recover_post"];
         delete?: never;
@@ -396,7 +347,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Open Vault */
+        /**
+         * Open Vault
+         * @description The caller's vault. 404 while the device still has to create it.
+         */
         post: operations["open_vault_api_v1_vaults_open_post"];
         delete?: never;
         options?: never;
@@ -448,6 +402,8 @@ export interface components {
             publicKey: string;
             /** Username */
             username: string;
+            /** Vaultname */
+            vaultName: string;
         };
         /** ChallengeResponse */
         ChallengeResponse: {
@@ -577,22 +533,6 @@ export interface components {
             /** Locksseq */
             locksSeq: number;
         };
-        /** Member */
-        Member: {
-            /** Createdat */
-            createdAt: string;
-            device: components["schemas"]["Device"];
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "active" | "pending";
-        };
-        /** MemberList */
-        MemberList: {
-            /** Members */
-            members: components["schemas"]["Member"][];
-        };
         /** MissingRequest */
         MissingRequest: {
             /** Ids */
@@ -612,9 +552,16 @@ export interface components {
         OpenResponse: {
             /**
              * Membership
+             * @description The same as `status`.
              * @enum {string}
              */
             membership: "active" | "pending";
+            /**
+             * Status
+             * @description The calling device's status.
+             * @enum {string}
+             */
+            status: "active" | "pending";
             vault: components["schemas"]["Vault"];
         };
         /** Revision */
@@ -637,6 +584,31 @@ export interface components {
             rev: number;
             /** Size */
             size: number;
+        };
+        /** SelfDevice */
+        SelfDevice: {
+            /** Createdat */
+            createdAt: string;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Id */
+            id: string;
+            /** Lastseenat */
+            lastSeenAt: string | null;
+            /** Name */
+            name: string;
+            /** Pairingcode */
+            pairingCode: string;
+            /** Publickey */
+            publicKey: string;
+            /** Status */
+            status: string;
+            /** Username */
+            username: string;
+            /** Vaultid */
+            vaultId: string | null;
+            /** Vaultname */
+            vaultName: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -664,17 +636,6 @@ export interface components {
             /** Seq */
             seq: number;
         };
-        /** VaultEntry */
-        VaultEntry: {
-            /** Membership */
-            membership: ("active" | "pending") | null;
-            vault: components["schemas"]["Vault"];
-        };
-        /** VaultList */
-        VaultList: {
-            /** Vaults */
-            vaults: components["schemas"]["VaultEntry"][];
-        };
         /** VerifyRequest */
         VerifyRequest: {
             /** Challengeid */
@@ -684,7 +645,10 @@ export interface components {
              * @default Device
              */
             deviceName: string;
-            /** Sharedsecret */
+            /**
+             * Sharedsecret
+             * @description Needed only by a new key whose vault doesn't exist yet (protocol.md 5.2).
+             */
             sharedSecret?: string | null;
             /** Signature */
             signature: string;
@@ -704,6 +668,11 @@ export interface components {
             status: "active" | "pending";
             /** Token */
             token: string;
+            /**
+             * Vaultid
+             * @description The device's vault; null until a key that creates its vault has done so.
+             */
+            vaultId: string | null;
         };
         /** WaitResponse */
         WaitResponse: {
@@ -791,88 +760,6 @@ export interface operations {
             };
         };
     };
-    list_devices_api_v1_devices_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DeviceList"];
-                };
-            };
-        };
-    };
-    revoke_device_api_v1_devices__device_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                device_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Device"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    approve_device_api_v1_devices__device_id__approve_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                device_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Device"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     self_device_api_v1_devices_self_get: {
         parameters: {
             query?: never;
@@ -888,27 +775,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Device"];
-                };
-            };
-        };
-    };
-    list_vaults_api_v1_vaults_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["VaultList"];
+                    "application/json": components["schemas"]["SelfDevice"];
                 };
             };
         };
@@ -1098,6 +965,101 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Changes"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_devices_api_v1_vaults__vault_id__devices_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                vault_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_device_api_v1_vaults__vault_id__devices__device_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_id: string;
+                vault_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Device"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_device_api_v1_vaults__vault_id__devices__device_id__approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_id: string;
+                vault_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Device"];
                 };
             };
             /** @description Validation Error */
@@ -1402,99 +1364,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_members_api_v1_vaults__vault_id__members_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                vault_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MemberList"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    remove_member_api_v1_vaults__vault_id__members__device_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                device_id: string;
-                vault_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    approve_member_api_v1_vaults__vault_id__members__device_id__approve_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                device_id: string;
-                vault_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Member"];
-                };
             };
             /** @description Validation Error */
             422: {

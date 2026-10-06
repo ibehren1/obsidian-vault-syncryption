@@ -49,7 +49,7 @@ healthcheck, so it stays `200` during maintenance (section 14.1):
 ```json
 {
   "status": "ok",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "protocol": 1,
   "maintenance": null,
   "adminContact": "ops@example.com"
@@ -70,27 +70,35 @@ works during maintenance.
 ## 3. Model: users, devices, vaults
 The server tracks identity and data separately:
 - **User:** a `username`, unique on the server (`[a-z0-9._-]{1,32}`, lowercase).
-- **Device:** one registered encryption key belonging to a user (the public half of an
-  Ed25519 key, sent in OpenSSH `ssh-ed25519 AAAA...` form). The same key can be
-  used for any number of that user's vaults. Several installations that share one key are a
-  single device to the server. People who share a vault should each use their own key
-  (pairing and approval, section 7), so each can be revoked on its own. Each installation also sends a random `clientId` (kept in the
-  app's local storage, so it is never synced), used only to tell installations apart in locks (section 11).
 - **Vault:** belongs to one user and is identified by `(username, vault name)`. The vault
   name is unique per user (1 to 64 characters, NFC, trimmed, compared exactly). The server
   stores the name in clear, because it needs it to look the vault up.
-- **Membership:** a device's access to a vault, `pending` or `active`. Membership on the
-  server is the access-control list. The keyring ([crypto.md](crypto.md) section 6) is
-  what actually grants the ability to decrypt, and the two are kept in step by clients.
+- **Device:** one encryption key (the public half of an Ed25519 key, sent in OpenSSH
+  `ssh-ed25519 AAAA...` form) in **one vault** of one user. A public key is unique on the
+  server: it belongs to exactly one user and one vault name, and another vault needs
+  another key. Several installations that share one key are a single device to the
+  server. People who share a vault should each use their own key (pairing and approval,
+  section 6), so each can be removed on its own. Each installation also sends a random
+  `clientId` (kept in the app's local storage, so it is never synced), used only to tell
+  installations apart in locks (section 11).
+- **Status:** a device's `status` is its membership of its vault: `pending` until a device
+  of the vault approves it, `active`, or `revoked` once removed. The devices of a vault
+  are its access-control list. The keyring ([crypto.md](crypto.md) section 6) is what
+  actually grants the ability to decrypt, and the two are kept in step by clients.
+- **Creating device:** a new key whose vault doesn't exist yet. It is `active`, has no
+  vault id and only reserves its vault name until it creates the vault (section 7.2).
 
-Every vault endpoint (`/api/v1/vaults/{vaultId}/...`) requires an active membership of
-the caller's device in that vault, otherwise `403 forbidden`.
+Every vault endpoint (`/api/v1/vaults/{vaultId}/...`) requires the caller's device to
+belong to that vault (otherwise `403 forbidden`) and to be active (otherwise
+`403 device_pending`).
 
 ## 4. Joining the server (shared secret)
 The server is configured with a `SHARED_SECRET` environment variable. It is handed out by
 whoever runs the server, through whatever channel the organisation uses. The secret is
-needed only the **first time an encryption key connects** to the server: to create a user, or to add a
-new key to an existing user. Logging in later with a known key never needs it.
+needed only to **create a vault**: the first time a new key connects for a vault that
+doesn't exist yet (and so possibly a new user). A new key for a vault that already exists
+joins without it, as a pending device that an existing device of the vault approves.
+Logging in later with a known key never needs it.
 
 The plugin asks for it only when the server says it is needed (`join_required`), and
 doesn't store it.
@@ -100,25 +108,27 @@ doesn't store it.
 ### 5.1 Challenge
 `POST /api/v1/auth/challenge` (*public*)
 ```json
-{ "username": "alice", "publicKey": "ssh-ed25519 AAAA..." }
+{ "username": "alice", "vaultName": "Personal", "publicKey": "ssh-ed25519 AAAA..." }
 ```
 Response `200`:
 ```json
 {
   "challengeId": "<b64u 16 bytes>",
-  "message": "syncryption-auth@v1\norigin: https://notes.example.com\nusername: alice\nkey: SHA256:...\nnonce: <b64u 32 bytes>\nexpires: 2026-10-02T12:01:00Z\n",
+  "message": "syncryption-auth@v1\norigin: https://notes.example.com\nusername: alice\nvault: Personal\nkey: SHA256:...\nnonce: <b64u 32 bytes>\nexpires: 2026-10-02T12:01:00Z\n",
   "expiresAt": "2026-10-02T12:01:00Z"
 }
 ```
-- A challenge is issued for any well-formed Ed25519 key and any valid username, whether or
-  not they are registered.
+- A challenge is issued for any well-formed Ed25519 key, any valid username and any valid
+  vault name, whether or not they are registered.
+- `vaultName` is required and normalised like `POST /vaults/open` (section 7.1); an
+  invalid name returns `400 bad_request`. The `vault` line carries the normalised name.
 - `origin` is `URL` if it is set, otherwise the scheme and host the request arrived on
   (honouring `X-Forwarded-Proto`/`X-Forwarded-Host` when `BEHIND_PROXY=TRUE`).
 - The challenge is single-use and expires after 60 s.
 
 The client must check, before signing, that `origin` equals its configured endpoint's
-origin, `username` and `key` are its own, and the message has exactly these lines in this
-order. That stops a malicious server from relaying a challenge from another server.
+origin, `username`, `vault` and `key` are its own, and the message has exactly these lines
+in this order. That stops a malicious server from relaying a challenge from another server.
 
 ### 5.2 Verify (log in or join)
 `POST /api/v1/auth/verify` (*public*)
@@ -127,9 +137,10 @@ order. That stops a malicious server from relaying a challenge from another serv
   "challengeId": "...",
   "signature": "-----BEGIN SSH SIGNATURE-----\n...",
   "deviceName": "Isaacs-MacBook",
-  "sharedSecret": "only when joining"
+  "sharedSecret": "only when creating a vault"
 }
 ```
+The username and vault name come from the challenge.
 The signature is an sshsig over `message` (UTF-8) with namespace `syncryption-auth@v1`
 ([crypto.md](crypto.md) section 7). The server checks, in order:
 1. The challenge exists, hasn't expired and hasn't been used. It is then marked used,
@@ -138,47 +149,68 @@ The signature is an sshsig over `message` (UTF-8) with namespace `syncryption-au
    the challenge's key.
 3. The signature verifies. Failures in steps 1 to 3 return `401 challenge_invalid`, with
    no further detail.
-4. It then looks up the key and username:
+4. It then looks up the key, then the username and vault name:
 
 | Situation | `sharedSecret` | Result |
 |---|---|---|
-| Key is an active device of `username` | ignored | log in, `status: "active"` |
-| Key is a pending device of `username` | ignored | log in, `status: "pending"` |
-| Key is a revoked device of `username` | ignored | `403 device_revoked` |
-| `username` doesn't exist | required | create the user and the key as an **active** device |
-| `username` exists, key unknown | required | add the key as a **pending** device |
-| Secret missing or wrong in the two cases above | | `403 join_required` |
+| Key is a device of another user or another vault name | ignored | `401 challenge_invalid` |
+| Key is an active device of this user and vault | ignored | log in, `status: "active"` |
+| Key is a pending device of this user and vault | ignored | log in, `status: "pending"` |
+| Key is a revoked device | ignored | `403 device_revoked` |
+| Key unknown, the vault exists and is enabled | not needed | add the key as a **pending** device of the vault |
+| Key unknown, the vault exists and is disabled | | `403 vault_disabled` |
+| Key unknown, the vault doesn't exist, another new key is creating it | | `409 vault_being_created` |
+| Key unknown, the vault doesn't exist | required | create the user if needed, and the key as an **active creating** device |
+| Secret missing or wrong where it is required | | `403 join_required` |
+
+The first matching row applies. A secret that is sent is always checked, even when it
+isn't needed, so a wrong one returns `join_required`. A creating device has no vault yet:
+it creates it with `POST /vaults` (section 7.2). Until then the vault name is reserved for
+it, and another new key for the same name gets `409 vault_being_created`. A creating
+device that hasn't created its vault within 24 hours is deleted, and the name is free
+again.
 
 The secret is compared in constant time. The `join_required` message is generic: "This
 server needs an access secret to join. Contact your administrator." Its rate limit is
 strict (section 12): only a secret that was sent and is wrong counts as a failure, so a
 client that first tries without one (and then asks the user) isn't penalised. Adding a
-pending device when the user already has 5 returns `429 rate_limited`.
+pending device when the vault already has 5 returns `429 rate_limited`.
+
+Anyone who knows a username and one of its vault names can add pending devices to that
+vault without the secret. They get no access until a device of the vault approves them
+(and approval shows the pairing code), and they are bounded by the auth rate limit, the 5
+pending devices per vault and their 24-hour expiry. While 5 such requests are pending,
+other new keys for that vault wait too (`429`) until a device removes them. The answer
+also tells whether such a vault exists.
 
 Response `200`:
 ```json
-{ "token": "<b64u 32 bytes>", "expiresAt": "...", "deviceId": "d_...", "status": "active", "created": true }
+{ "token": "<b64u 32 bytes>", "expiresAt": "...", "deviceId": "d_...", "vaultId": "<uuid>", "status": "active", "created": true }
 ```
 - `created` is true when this request created the user or the device.
-- A pending device is approved by an active device of the same user, either directly
-  (section 6) or by approving its vault membership (section 7.3). Until then its token only
-  works for `GET /api/v1/devices/self`, `POST /api/v1/vaults/open` and the recovery
-  endpoints (section 7.4), and everything else
-  returns `403 device_pending`. Status is checked on every request, so the same token gains
-  access as soon as it is approved.
+- `vaultId` is the device's vault, or `null` for a creating device.
+- A pending device is approved by an active device of the same vault (section 6). Until
+  then its token only works for `GET /api/v1/devices/self`, `POST /api/v1/vaults/open`
+  and the recovery endpoints (section 7.4), and everything else returns
+  `403 device_pending`. Status is checked on every request, so the same token gains access
+  as soon as it is approved.
 - Tokens are random, stored as `SHA-256(token)`, and expire after 1 hour. The client logs
   in again on `401 token_expired`.
 
 ## 6. Devices
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/v1/devices` | the user's devices |
-| `GET` | `/api/v1/devices/self` | pending tokens allowed |
-| `POST` | `/api/v1/devices/{deviceId}/approve` | pending to active, without a vault |
-| `DELETE` | `/api/v1/devices/{deviceId}` | revoke |
+| `GET` | `/api/v1/devices/self` | the caller's device, pending tokens allowed |
+| `GET` | `/api/v1/vaults/{id}/devices` | the vault's devices |
+| `POST` | `/api/v1/vaults/{id}/devices/{deviceId}/approve` | pending to active |
+| `DELETE` | `/api/v1/vaults/{id}/devices/{deviceId}` | remove (revoke) |
 
-`GET /devices` returns `{"devices": [<device object>, ...]}`, oldest first. The other
-three return the device object. Approving a revoked device returns `400 bad_request`.
+The vault routes need an active device of that vault. `GET .../devices` returns
+`{"devices": [<device object>, ...]}`, oldest first, removed devices included. Approve and
+remove return `200` with the device object; a device that isn't in the vault returns
+`404 not_found`, and approving a removed device returns `400 bad_request`.
+`GET /devices/self` returns the device object plus `vaultId` (`null` for a creating
+device), `vaultName` and `username`.
 
 **Device object:**
 ```json
@@ -193,16 +225,21 @@ three return the device object. Approving a revoked device returns `400 bad_requ
   "lastSeenAt": "..."
 }
 ```
-- `status` is `pending`, `active` or `revoked`. A user has at most 5 pending devices, and
+- `status` is `pending`, `active` or `revoked`. A vault has at most 5 pending devices, and
   a pending device that isn't approved expires after 24 h.
 - `pairingCode` is computed from the public key ([crypto.md](crypto.md) section 6.5). The
   approving client recomputes it from `publicKey` and never trusts the server's value.
-- **Revoke** sets `revoked`, removes all its vault memberships, deletes its sessions and
-  releases its locks. Clients then rotate the keyring of every affected vault
-  ([crypto.md](crypto.md) section 8.4). The last active device of a user can't be revoked
+- **Approving** is the server half of pairing. The approving client must also add the
+  device to the keyring ([crypto.md](crypto.md) section 6.5). Approval can't grant
+  decryption by itself, since the server never changes a keyring.
+- **Removing** sets `revoked`, deletes the device's sessions and releases its locks. Any
+  active device of the vault can remove any device, itself included (to replace its key),
+  and rejecting a pending device is removing it. Clients then rotate the vault's keyring
+  ([crypto.md](crypto.md) section 8.4). The row stays, so the key can't log in or join
+  again (`403 device_revoked`). The last active device of a vault can't be removed
   (`409 exists`).
 
-## 7. Vaults, members and keyring
+## 7. Vaults and keyring
 
 ### 7.1 Opening a vault
 `POST /api/v1/vaults/open` (pending tokens allowed)
@@ -211,13 +248,14 @@ three return the device object. Approving a revoked device returns `400 bad_requ
 ```
 | Situation | Result |
 |---|---|
-| Vault exists, caller is an active member | `200 {"vault": <vault object>, "membership": "active"}` |
-| Vault exists, caller isn't a member yet | create a pending membership, `200 {"vault": ..., "membership": "pending"}` |
-| Vault doesn't exist | `404 not_found`, the client then creates it (7.2) |
+| `name` is the device's vault | `200 {"vault": <vault object>, "status": "active" \| "pending", "membership": <same as status>}` |
+| The device is creating its vault (no vault id yet) | `404 not_found`, the client then creates it (7.2) |
+| Any other name | `403 forbidden` |
 
-The pending case is how a device joins a vault, whether it is a new key or an existing
-key opening one of the user's other vaults. The plugin shows its pairing code and polls
-`/vaults/open` (or long-polls `/devices/self`) until the membership is active.
+A device only ever opens its own vault, named in its login (section 5). A new key joining
+an existing vault is already pending after verify. The plugin shows its pairing code and
+polls `/vaults/open` (or `/devices/self`) until the status is `active`. `membership` is
+kept for older clients and may be dropped later.
 
 **Vault object:**
 ```json
@@ -227,28 +265,16 @@ key opening one of the user's other vaults. The plugin shows its pairing code an
 ### 7.2 Endpoints
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/v1/vaults` | the user's vaults, with the caller's membership in each |
-| `POST` | `/api/v1/vaults` | create: `{"id", "name", "keyring": <keyring object>}`, caller must be active |
-| `GET` | `/api/v1/vaults/{id}/members` | members and their status |
-| `POST` | `/api/v1/vaults/{id}/members/{deviceId}/approve` | activates the membership (and the device, if pending) |
-| `DELETE` | `/api/v1/vaults/{id}/members/{deviceId}` | remove from this vault only |
+| `POST` | `/api/v1/vaults` | create: `{"id", "name", "keyring": <keyring object>}`, by a creating device |
 | `GET` | `/api/v1/vaults/{id}/keyring[?version=N]` | latest, or a specific version |
 | `PUT` | `/api/v1/vaults/{id}/keyring` | upload the next version |
 
-- `POST /vaults` returns `201` with the vault object, or `409 exists` if the name is
-  taken. The `vaultId` is chosen by the client (UUIDv4, also inside the keyring plaintext)
-  so the first keyring can be built before the request.
-- Approving a membership is the server half of pairing. The approving client must also
-  add the device to the keyring ([crypto.md](crypto.md) section 6.5). Approval can't
-  grant decryption by itself, since the server never changes a keyring.
-- Removing a member is followed by a keyring rotation, as with revocation. It returns
-  `204` and releases the device's locks in that vault. The last active member can't be
-  removed (`409 exists`).
-
-Response shapes:
-- `GET /vaults`: `{"vaults": [{"vault": <vault object>, "membership": "active" | "pending" | null}]}`.
-- `GET .../members`: `{"members": [{"device": <device object>, "status": "active" | "pending", "createdAt": "..."}]}`.
-  Approving a member returns one such entry.
+- `POST /vaults` returns `201` with the vault object. The caller must be a creating
+  device, and `name` must be the vault name it registered with (otherwise
+  `403 forbidden`). A device that already has a vault, or a vault id or name that is
+  taken, gets `409 exists`. On success the device belongs to the new vault. The `vaultId`
+  is chosen by the client (UUIDv4, also inside the keyring plaintext) so the first keyring
+  can be built before the request.
 
 ### 7.3 Keyring object
 GET response, PUT body, and the `keyring` field of `POST /vaults`:
@@ -266,7 +292,7 @@ GET response, PUT body, and the `keyring` field of `POST /vaults`:
 - `POST /vaults` takes `version: 1`. `PUT` must have `version` = current + 1, otherwise
   `409 keyring_version` with the current version in `details`.
 - The server checks that `signer` is the caller's device (otherwise `403 forbidden`), that
-  it is an active member, and that the signature verifies with namespace
+  it is active, and that the signature verifies with namespace
   `syncryption-keyring@v1` under the caller's key (otherwise `400 bad_signature_format`).
   It doesn't (and can't) check the plaintext.
 - `recoverySigner` is a copy of the keyring's recovery signing key
@@ -280,8 +306,8 @@ GET response, PUT body, and the `keyring` field of `POST /vaults`:
 
 ### 7.4 Recovery
 A device that holds the vault's recovery key adds itself when no device is left to
-approve it ([crypto.md](crypto.md) section 9). Both endpoints need a pending or active
-membership (from `/vaults/open`, otherwise `403 forbidden`), and pending tokens are allowed.
+approve it ([crypto.md](crypto.md) section 9). Both endpoints need a device of the vault
+(otherwise `403 forbidden`), and pending tokens are allowed.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -295,8 +321,7 @@ membership (from `/vaults/open`, otherwise `403 forbidden`), and pending tokens 
   `recoverySigner` (otherwise `400 bad_request`). `version` must be current + 1
   (otherwise `409 keyring_version`).
 - On success the server stores the version with `byRecovery: true`, activates the caller's
-  membership and the device itself if it is pending, and returns `201` with the keyring
-  object.
+  device if it is pending, and returns `201` with the keyring object.
 
 ## 8. Blobs
 Blobs are encrypted chunks ([crypto.md](crypto.md) section 8.2), at most
@@ -446,7 +471,8 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 | Other request bodies | 2 MiB, checked before the body is read (`413 too_large`) |
 | `/auth/*` | 10 requests/min per client address |
 | Wrong shared secrets | 5 per hour per client address, and 50 per hour from all addresses together, then `429`, to stop guessing `SHARED_SECRET`. The server logs a warning when joining pauses. |
-| Pending devices | 5 per user; they expire after 24 hours |
+| Pending devices | 5 per vault; they expire after 24 hours |
+| Creating devices | 1 per vault name; deleted after 24 hours if the vault wasn't created |
 | `POST /vaults/{id}/recover` | 10 requests/min per device |
 | Concurrent `/wait` per device | 2. The oldest is answered with `changed: false`. |
 
@@ -490,9 +516,11 @@ API. Every route needs `ADMIN_TOKEN`.
   - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
     with the same values as `/health`.
   - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
-    `createdAt`, `lastSeenAt`, `disabled`, `devices` (`id`, `name`, `status`,
-    `createdAt`, `lastSeenAt`) and `vaults` (`id`, `name`, `size` in stored bytes,
-    `files`, `createdAt`, `lastChangeAt`, `disabled`). Times are RFC 3339 or `null`.
+    `createdAt`, `lastSeenAt`, `disabled`, `vaults` (`id`, `name`, `size` in stored
+    bytes, `files`, `createdAt`, `lastChangeAt`, `disabled`, and `devices`: `id`, `name`,
+    `fingerprint`, `status`, `createdAt`, `lastSeenAt`) and `creating`
+    (`[{"vaultName", "device"}]`, keys that haven't created their vault yet). Times are
+    RFC 3339 or `null`.
   - `POST /admin/api/{users|vaults}/{id}/{disable|enable}` returns `204`.
   - `POST /admin/api/{users|vaults}/{id}/purge` with `{"confirm": "<username or vault
     name>"}` returns `204`. It returns `409 not_disabled` unless the item is disabled
@@ -501,6 +529,11 @@ API. Every route needs `ADMIN_TOKEN`.
   request; a disabled vault gets `403 vault_disabled` on open and on every vault request.
   Waiting long-polls return at once. Purging deletes the blobs first, then the rows, so a
   failed purge can be run again.
+- **Purging removes keys:** purging a vault also deletes all its devices (encryption keys),
+  whatever their status, with their sessions, locks and challenges. The keys are unknown
+  again, so they need the shared secret to create a vault (section 5.2). Purging a user
+  purges each of its vaults, deletes its remaining devices (such as creating ones), then
+  the user.
 
 ### 14.1 Maintenance
 The administrator can pause sync for the whole server, for example to move it or restore a

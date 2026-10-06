@@ -56,7 +56,7 @@ services:
   - Caddy isn't started, and uvicorn serves plain HTTP on `:8080`.
   - Trusted `X-Forwarded-*` headers are honoured.
   - `URL` is optional.
-- **`SHARED_SECRET`:** required. The entrypoint exits with a clear error if it is empty. Anyone with the endpoint URL, a username and this secret can join the server. The secret is only checked the first time a key connects (creating a user, or adding a new key to an existing user). Without it, the plugin tells the user to contact their administrator. How the secret is handed out is up to the organisation running the server. Changing it doesn't affect keys that are already registered.
+- **`SHARED_SECRET`:** required. The entrypoint exits with a clear error if it is empty. Anyone with the endpoint URL, a username and this secret can join the server. The secret is only checked when a new key creates something: a new user, or a new vault name (a new key that names an existing vault of an existing user joins as a pending device without it, and an existing member approves it; protocol.md 5.2). Without it, the plugin tells the user to contact their administrator. How the secret is handed out is up to the organisation running the server. Changing it doesn't affect keys that are already registered.
 - **`ADMIN_TOKEN`:** required, at least 32 characters; the entrypoint exits otherwise. It opens the admin page `/admin` (see the M8 admin item), either as `Authorization: Bearer` or typed into the page's login form.
 - **`ADMIN_CONTACT`:** optional, free-form single-line text (at most 500 characters) telling users how to reach the admin: email, Slack, phone, ... It is shown on the `/` page and in `/health`, and passed to the plugin in the maintenance and disabled-account errors so the plugin can show it.
 - **Storage selection:**
@@ -86,14 +86,15 @@ services:
   - Paths are encrypted inside the file metadata. The server sees only `fileId = HMAC(VDK, path)`, size, timestamps and lock state.
   - Refined in `docs/crypto.md`: the HMAC key is `indexKey = HKDF(VDK of epoch 1)`, kept in the keyring and unchanged by rotation, so `fileId`s stay stable and revocation is ordinary re-encrypting commits. Every keyring upload is signed (sshsig, namespace `syncryption-keyring@v1`) by a device already in the keyring, because age alone doesn't authenticate the sender.
 - **Users, devices and vaults:**
-  - A user is a username on the server. A device is one registered Ed25519 key of that user, and the same key can be used for all of the user's vaults.
-  - A vault belongs to a user and is found by `(username, vault name)`. The server stores vault names in clear for that lookup.
-  - The server keeps vault membership (which keys may access which vault) separately from the user's devices. Blob storage is partitioned as `blobs/<userId>/<vaultId>/...`.
-  - The first key of a new username becomes active immediately (with `SHARED_SECRET`). The first device to open a new vault name creates it.
-  - Sharing a vault: each person uses the same username and vault name with their own encryption key. A new key shows a pairing code and an existing member approves it, so each person can be revoked separately. (Sharing one key also works, but then the server sees one device and can't revoke one person.)
-- **Adding a device to a vault:** a key that isn't in a vault's keyring shows its public key and a pairing code. An active member of the vault approves it and rewraps the VDK to the new key. This covers both new keys and known keys opening another vault.
-- **Recovery key:** an optional offline age X25519 identity. The keyring is also encrypted to it, and an Ed25519 key derived from it (HKDF) may sign the next keyring version. So when every device is lost, a new device with the recovery key adds itself to the keyring and the server activates its membership (`POST /vaults/{id}/recover`). Only a device can set or change the recovery key, and the keyring records which device did; revoking that device removes the recovery key. Details in `docs/crypto.md` section 9.
-- **Revoking a device:** rotate the VDK and re-encrypt in the background. Settings list the vault's devices with a "Remove" button (this vault, or every vault of the account); the change feed carries the keyring version so other devices pick up the new epoch.
+  - A user is a username on the server. A vault belongs to a user and is found by `(username, vault name)`; the server stores vault names in clear for that lookup. Blob storage is partitioned as `blobs/<userId>/<vaultId>/...`.
+  - **One key per device per vault** (decided 2026-10-05): a key (a "device" on the server) is bound to one user and one vault at its first login, and a public key is registered only once per server. 1 user, 1 vault, 1 device = 1 key; 2 vaults on one device = 2 keys; 2 vaults with 2 devices each = 4 keys. The plugin keeps one key per server, username and vault on each device. Keys are shown by fingerprint (`SHA256:…`), with the device name, username and vault name as metadata. There is no separate membership: the key's status (`pending`, `active`, `revoked`) is its access to the vault.
+  - Login names the vault (the signed challenge has a `vault:` line). A new key for an existing vault joins as pending without the shared secret, and an active key of the vault approves it. A new key for a vault name that doesn't exist needs `SHARED_SECRET`: it creates the user if needed and becomes the vault's first active key. A new key can never create a vault whose name already exists.
+  - Replacing the key on a device that still has a working key hands over: the old key approves the new one, which then removes the old key. Without a working old key, the new key pairs like any new device.
+  - Purging a vault removes all its keys.
+  - Sharing a vault: each person uses the same username and vault name with their own key, approved by an existing member, so each person can be removed separately.
+- **Adding a device to a vault:** a new key shows its public key and a pairing code. An active key of the vault approves it and rewraps the VDK to the new key.
+- **Recovery key:** an optional offline age X25519 identity. The keyring is also encrypted to it, and an Ed25519 key derived from it (HKDF) may sign the next keyring version. So when every device is lost, a new key with the recovery key adds itself to the keyring and the server activates it (`POST /vaults/{id}/recover`). Only a device can set or change the recovery key, and the keyring records which device did; revoking that device removes the recovery key. Details in `docs/crypto.md` section 9.
+- **Removing a key:** rotate the VDK and re-encrypt in the background. Settings list every key in the vault's keyring (fingerprint, device name, date added, status and last seen), and any device can remove any other key; the last active key can't be removed. The change feed carries the keyring version so other devices pick up the new epoch. Files a removed device already has stay on it.
 - **Auth:** sshsig challenge–response.
   1. Client calls `POST /auth/challenge`.
   2. Server returns a single-use nonce that expires in 60s.
@@ -105,11 +106,11 @@ services:
   - Endpoint URL
   - username
   - vault name
-  - device name: a friendly label for lock warnings and the device lists. It starts as the OS hostname on desktop (without the domain) and as "iPhone", "iPad", "Android phone" or "Android tablet" on mobile, and the user can edit it. The server keeps the name a key had when it first joined; a key shared between installations is one device with one name.
-  - encryption key (setting "Encryption key"): generated on the device; the plugin offers a recovery key once per device while the vault has none
+  - device name: a friendly label for lock warnings and the device lists. It starts as the OS hostname on desktop (without the domain) and as "iPhone", "iPad", "Android phone" or "Android tablet" on mobile, and the user can edit it; Generate asks for it (prefilled) before creating the key. The server keeps the name a key had when it first joined.
+  - encryption key (setting "Encryption key"): generated on the device, one per vault, shown by fingerprint; the plugin offers a recovery key once per device while the vault has none
   - excluded paths (optional, per device)
   - an "Approve devices" button that opens the same dialog as the command, showing how many devices are waiting
-  - shared secret: asked for only when joining, never stored
+  - shared secret: asked for only when the vault doesn't exist on the server yet, never stored
 
 ## Sync Scope (research outcome: full vault in place)
 - **No nested pseudo-vault.** Obsidian advises against vaults inside vaults: links break and content is indexed twice. Mobile also can't open a nested vault from code.
@@ -153,8 +154,8 @@ All endpoints except `/`, `/health` and `/admin` sit under `/api/v1`. The full s
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /auth/challenge`, `POST /auth/verify` | sshsig login; joining with `SHARED_SECRET` the first time a key connects |
-| `POST /vaults/open`, `GET/POST /vaults`, `/vaults/{id}/members` | look up or create a vault by name, membership and pairing |
+| `POST /auth/challenge`, `POST /auth/verify` | sshsig login; joining; `SHARED_SECRET` only when a new key creates a user or vault |
+| `POST /vaults/open`, `POST /vaults`, `/vaults/{id}/devices`, `GET /devices/self` | open or create the key's vault; list, approve and remove the vault's keys |
 | `GET/PUT /vaults/{id}/keyring` | `keyring.age`, versioned and signed |
 | `GET /vaults/{id}/changes?since=N` | change feed |
 | `GET /vaults/{id}/wait?since=N` | long-poll |

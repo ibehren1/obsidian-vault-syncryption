@@ -17,7 +17,7 @@ def recovery_key() -> tuple[bytes, str]:
 
 def vault_with_recovery(client, alice) -> tuple[str, bytes, str]:
     seed, signer = recovery_key()
-    vault_id = alice.create_vault()
+    vault_id = alice.vault_id
     r = alice.put(
         f"/api/v1/vaults/{vault_id}/keyring", json=alice.keyring(2, recovery_signer=signer)
     )
@@ -29,7 +29,7 @@ def vault_with_recovery(client, alice) -> tuple[str, bytes, str]:
 
 def new_pending(client, vault_id: str) -> Device:
     phone = Device(client, "alice", name="New phone")
-    phone.login(SECRET)
+    assert phone.login()["status"] == "pending"
     assert phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["vault"]["id"] == (
         vault_id
     )
@@ -51,9 +51,11 @@ def test_recover_activates_the_device(client, alice):
     assert r.json()["signer"] == phone.device_id
 
     assert phone.get("/api/v1/devices/self").json()["status"] == "active"
-    assert phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["membership"] == (
+    assert phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["status"] == (
         "active"
     )
+    devices = alice.get(f"/api/v1/vaults/{vault_id}/devices").json()["devices"]
+    assert [d["status"] for d in devices] == ["active", "active"]
     latest = phone.get(f"/api/v1/vaults/{vault_id}/keyring").json()
     assert (latest["version"], latest["byRecovery"]) == (3, True)
     # Normal uploads go on from there, signed by the device again.
@@ -111,7 +113,7 @@ def test_a_replaced_recovery_key_no_longer_works(client, alice):
 
 
 def test_no_recovery_key(client, alice):
-    vault_id = alice.create_vault()
+    vault_id = alice.vault_id
     phone = new_pending(client, vault_id)
     for r in (
         phone.get(f"/api/v1/vaults/{vault_id}/recovery"),
@@ -120,20 +122,21 @@ def test_no_recovery_key(client, alice):
         assert (r.status_code, r.json()["error"]) == (404, "no_recovery")
 
 
-def test_recovery_needs_a_membership(client, alice):
+def test_recovery_needs_a_device_of_the_vault(client, alice):
     vault_id, seed, signer = vault_with_recovery(client, alice)
-    phone = Device(client, "alice", name="New phone")
-    phone.login(SECRET)
+    work = Device(client, "alice", vault_name="Work")  # this user's key for another vault
+    work.login(SECRET)
     bob = Device(client, "bob")
     bob.login(SECRET)
-    for who in (phone, bob):
+    bob.create_vault()
+    for who in (work, bob):
         assert who.get(f"/api/v1/vaults/{vault_id}/recovery").json()["error"] == "forbidden"
         upload = who.keyring(3, recovery_signer=signer, signing_seed=seed)
         assert who.post(f"/api/v1/vaults/{vault_id}/recover", json=upload).status_code == 403
 
 
 def test_recovery_signer_must_be_an_ed25519_key(client, alice):
-    vault_id = alice.create_vault()
+    vault_id = alice.vault_id
     r = alice.put(
         f"/api/v1/vaults/{vault_id}/keyring", json=alice.keyring(2, recovery_signer="ssh-rsa AAAA")
     )

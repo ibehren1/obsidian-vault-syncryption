@@ -23,7 +23,7 @@ from syncryption_server import (
     vaults,
 )
 from syncryption_server.config import Settings, load_settings
-from syncryption_server.db import Database
+from syncryption_server.db import Database, OldDataError
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import error_response, install_error_handlers, too_large
 from syncryption_server.state import AppState, load_maintenance
@@ -103,8 +103,9 @@ def home_page(state: AppState, origin: str) -> HTMLResponse:
         "<li>Install the Vault Syncryption plugin in Obsidian.</li>"
         f"<li>Enter this server's URL (<code>{html.escape(origin)}</code>), a username and "
         "a vault name, and create an encryption key.</li>"
-        "<li>The first time a device joins, you need the server's shared secret: ask the "
-        "server administrator for it.</li></ol>"
+        "<li>Creating a new vault needs the server's shared secret: ask the server "
+        "administrator for it. A device joining an existing vault doesn't need it; a device "
+        "that already syncs the vault approves it.</li></ol>"
         "<p>Administrator: "
         + (html.escape(contact) if contact else "contact the person who runs this server.")
         + "</p>"
@@ -141,7 +142,12 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         db = Database(settings.db_path)
-        db.migrate()
+        try:
+            db.migrate()
+        except OldDataError as e:
+            db.close()
+            log.error("%s", e)
+            raise
         blob_store = store or make_blob_store(settings)
         await blob_store.start()
         state = AppState(settings=settings, db=db, store=blob_store)

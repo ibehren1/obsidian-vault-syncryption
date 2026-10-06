@@ -60,12 +60,12 @@ def test_home_page_without_a_contact(tmp_path):
 
 
 def test_maintenance_blocks_the_sync_api(client, alice, clock):
-    vault = alice.create_vault()
+    vault = alice.vault_id
     assert maintenance(client, "on", NOTE).status_code == 204
 
     for r in (
         alice.get(f"/api/v1/vaults/{vault}/changes"),
-        alice.get("/api/v1/vaults"),
+        alice.get("/api/v1/devices/self"),
         client.post("/api/v1/auth/challenge", json={"username": "x", "publicKey": "y"}),
         client.get("/api/v1/nope"),
     ):
@@ -103,12 +103,12 @@ def test_maintenance_blocks_the_sync_api(client, alice, clock):
 
 def test_maintenance_without_a_message(client, alice):
     assert maintenance(client, "on").status_code == 204
-    details = alice.get("/api/v1/vaults").json()["details"]
+    details = alice.get("/api/v1/devices/self").json()["details"]
     assert details["note"] is None
     # Turning it on again updates the message and keeps the start time.
     since = details["since"]
     assert maintenance(client, "on", "later").status_code == 204
-    assert alice.get("/api/v1/vaults").json()["details"] == {
+    assert alice.get("/api/v1/devices/self").json()["details"] == {
         "adminContact": CONTACT,
         "note": "later",
         "since": since,
@@ -130,7 +130,7 @@ def test_maintenance_survives_a_restart(settings, clock):
     with TestClient(create_app(settings, clock=clock)) as c:
         assert maintenance(c, "on", NOTE).status_code == 204
     with TestClient(create_app(settings, clock=clock)) as c:
-        assert c.get("/api/v1/vaults").status_code == 503
+        assert c.get("/api/v1/devices/self").status_code == 503
         assert c.get("/health").json()["maintenance"]["message"] == NOTE
         assert maintenance(c, "off").status_code == 204
     with TestClient(create_app(settings, clock=clock)) as c:
@@ -138,7 +138,7 @@ def test_maintenance_survives_a_restart(settings, clock):
 
 
 def test_maintenance_wakes_long_polls(client, alice):
-    vault = alice.create_vault()
+    vault = alice.vault_id
     out = {}
 
     def waiter():
@@ -175,7 +175,7 @@ def test_maintenance_form(client, alice):
         follow_redirects=False,
     )
     assert r.headers["location"] == "/admin?done=maintenance_on"
-    assert alice.get("/api/v1/vaults").status_code == 503
+    assert alice.get("/api/v1/devices/self").status_code == 503
     page = client.get("/admin?done=maintenance_on", headers=cookie).text
     assert "Maintenance started." in page and "End maintenance" in page
     assert "&lt;b&gt;" + NOTE in page and "<b>" + NOTE not in page
@@ -184,7 +184,7 @@ def test_maintenance_form(client, alice):
         "/admin/maintenance/off", headers=cookie, data={"csrf": csrf}, follow_redirects=False
     )
     assert r.headers["location"] == "/admin?done=maintenance_off"
-    assert alice.get("/api/v1/vaults").status_code == 200
+    assert alice.get("/api/v1/devices/self").status_code == 200
     assert "Maintenance ended." in client.get("/admin?done=maintenance_off", headers=cookie).text
 
     r = client.post(
@@ -200,12 +200,12 @@ def test_maintenance_form(client, alice):
 
 
 def test_disabled_errors_carry_the_admin_contact(client, alice):
-    vault = alice.create_vault()
+    vault = alice.vault_id
     act(client, "vaults", vault, "disable")
     r = alice.get(f"/api/v1/vaults/{vault}/changes")
     assert r.json()["details"] == {"adminContact": CONTACT}
     act(client, "users", users(client)[0]["id"], "disable")
-    r = alice.get("/api/v1/vaults")
+    r = alice.get("/api/v1/devices/self")
     assert (r.json()["error"], r.json()["details"]) == ("user_disabled", {"adminContact": CONTACT})
     assert Device(client, "alice", seed=alice.seed).login(expect=403)["details"] == {
         "adminContact": CONTACT
@@ -214,6 +214,6 @@ def test_disabled_errors_carry_the_admin_contact(client, alice):
 
 def test_disabled_errors_without_a_contact(client, alice, settings):
     client.app.state.ctx.settings = dataclasses.replace(settings, admin_contact="")
-    vault = alice.create_vault()
+    vault = alice.vault_id
     act(client, "vaults", vault, "disable")
     assert alice.get(f"/api/v1/vaults/{vault}/changes").json()["details"] == {}

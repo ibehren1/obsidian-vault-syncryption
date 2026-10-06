@@ -5,7 +5,7 @@ import { generateRecoveryKey } from "../src/crypto/keyring";
 import { objectEpoch } from "../src/crypto/objects";
 import { VaultCipher } from "../src/sync/cipher";
 import { LiveLoop } from "../src/sync/live";
-import { newSeed, noBackend, uniqueName } from "./harness";
+import { noBackend, uniqueName } from "./harness";
 import { device, pairedDevice, type Device } from "./sync-fixture";
 
 async function headEpoch(d: Device, path: string): Promise<number> {
@@ -78,21 +78,30 @@ describe.skipIf(noBackend)("revocation", () => {
 		expect(b.session.keyring.recoverySetBy).toBeUndefined();
 	});
 
-	it("finishes a revocation done for the whole account in another vault", async () => {
-		const username = uniqueName("stale");
-		const first = uniqueName("Vault ");
-		const second = uniqueName("Vault ");
-		const [laptop, phone] = [newSeed(), newSeed()];
-		const a = await device(username, first, "Laptop", laptop);
-		const b = await pairedDevice(a, username, first, "Phone", phone);
-		const a2 = await device(username, second, "Laptop", laptop);
-		await pairedDevice(a2, username, second, "Phone", phone);
-		expect(a2.session.keyring.devices).toHaveLength(2);
+	it("finishes a revocation whose key rotation didn't happen", async () => {
+		const [a, b, c] = await threeDevices();
+		// Revoked on the server, but the device that did it stopped before rotating.
+		await a.session.api.removeDevice(a.session.vault.id, c.session.deviceId);
+		expect(await a.session.removeStaleDevices()).toEqual(["Tablet"]);
+		expect(a.session.keyring).toMatchObject({ currentEpoch: 2, version: 4 });
+		expect(await b.session.removeStaleDevices()).toEqual([]);
+		expect(b.session.keyring.devices.map((d) => d.name)).toEqual(["Laptop", "Phone"]);
+	});
 
-		await a.session.removeDevice(b.session.deviceId, true);
-		expect(await a.session.removeStaleDevices()).toEqual([]);
-		expect(await a2.session.removeStaleDevices()).toEqual(["Phone"]);
-		expect(a2.session.keyring).toMatchObject({ currentEpoch: 2, version: 3 });
+	it("lets any device remove another device's key", async () => {
+		const [a, b, c] = await threeDevices();
+		await c.session.removeDevice(a.session.deviceId);
+		expect(c.session.keyring.devices.map((d) => d.name)).toEqual(["Phone", "Tablet"]);
+		await expect(a.engine.sync()).rejects.toMatchObject({ status: 403 });
+		await b.session.refreshKeyring();
+		expect(b.session.keyring.currentEpoch).toBe(2);
+		const status = new Map((await b.session.devices()).map((d) => [d.id, d.status]));
+		expect(status.get(a.session.deviceId)).toBe("revoked");
+	});
+
+	it("never removes the last active key", async () => {
+		const a = await device(uniqueName("last"), uniqueName("Vault "), "Laptop");
+		await expect(a.session.api.removeDevice(a.session.vault.id, a.session.deviceId)).rejects.toMatchObject({ status: 409 });
 	});
 
 	it("wakes the live loop of the other devices on a new keyring", async () => {
@@ -123,6 +132,6 @@ describe.skipIf(noBackend)("revocation", () => {
 
 	it("can't remove this device", async () => {
 		const [a] = await threeDevices();
-		await expect(a.session.removeDevice(a.session.deviceId)).rejects.toThrow("can't remove itself");
+		await expect(a.session.removeDevice(a.session.deviceId)).rejects.toThrow("can't remove its own key");
 	});
 });

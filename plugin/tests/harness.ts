@@ -51,11 +51,12 @@ export function newSeed(): Uint8Array {
 	return crypto.getRandomValues(new Uint8Array(32));
 }
 
-export function client(username: string, seed: Uint8Array, deviceName = "Test device"): ApiClient {
+export function client(username: string, vaultName: string, seed: Uint8Array, deviceName = "Test device"): ApiClient {
 	return new ApiClient({
 		endpoint: backendUrl,
 		identity: { username, seed },
 		deviceName,
+		vaultName,
 		transport: testTransport(),
 	});
 }

@@ -1,14 +1,22 @@
 import { debounce, Notice, Plugin, requireApiVersion, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
 
-import { ApiClient } from "./api/client";
-import { disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError } from "./api/http";
+import { ApiClient, type Device } from "./api/client";
+import { ApiError, disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError } from "./api/http";
 import { hasSecretStorage, MIN_APP_VERSION } from "./compat";
 import { generateRecoveryKey } from "./crypto/keyring";
-import type { OpenSshKey } from "./crypto/openssh";
-import { loadKeyText, unlockKey } from "./keys";
+import { publicKeyText, writeOpenSshPrivateKey, type OpenSshKey } from "./crypto/openssh";
+import { loadKeyText, saveKeyText, unlockKey } from "./keys";
 import { requestUrlTransport } from "./obsidian/transport";
 import { ObsidianFs } from "./obsidian/fs";
-import { DEFAULT_SETTINGS, initialDeviceName, isConfigured, SyncryptionSettingTab, type SyncryptionSettings } from "./settings";
+import {
+	currentKeySlot,
+	DEFAULT_SETTINGS,
+	initialDeviceName,
+	isConfigured,
+	syncKeySlot,
+	SyncryptionSettingTab,
+	type SyncryptionSettings,
+} from "./settings";
 import { IndexedDbStore } from "./store/idb";
 import { AdapterFs, isHiddenPath, SplitFs } from "./sync/adapter-fs";
 import { VaultCipher } from "./sync/cipher";
@@ -17,7 +25,7 @@ import { parseExcludes, pathFilter, type PathFilter } from "./sync/filter";
 import { LiveLoop } from "./sync/live";
 import { LockManager, newClientId } from "./sync/locks";
 import { isMergeable } from "./sync/merge";
-import { connect, SetupCancelled, type VaultSession } from "./sync/session";
+import { connect, handOver, SetupCancelled, type VaultSession } from "./sync/session";
 import { DeletedFilesModal, HistoryModal, type HistorySource } from "./ui/history";
 import { ApproveModal, ConfirmModal, PairingModal, prompt, ReloadModal, type PendingApproval } from "./ui/modals";
 import { showRecoveryKey } from "./ui/recovery";
@@ -29,6 +37,8 @@ const INSTALL_ID = "syncryption-install-id";
 const CLIENT_ID = "syncryption-client-id";
 /** Store meta: the recovery key was offered after creating the vault. */
 const RECOVERY_OFFERED = "recoveryOffered";
+/** The vault keys on the server, for the settings tab, are fetched again after this long. */
+const DEVICES_CACHE_MS = 10_000;
 /** Maintenance: retry after the server's `Retry-After`, within these bounds (seconds). */
 const MAINTENANCE_RETRY_S = { default: 60, min: 5, max: 600 };
 
@@ -48,6 +58,9 @@ export default class SyncryptionPlugin extends Plugin {
 	override settings: SyncryptionSettings = { ...DEFAULT_SETTINGS };
 	private key: OpenSshKey | null = null;
 	private session: VaultSession | null = null;
+	/** The key slot (`SecretStorage` id) the session logged in with. */
+	private sessionSlot: string | null = null;
+	private serverDevices: { at: number; devices: Promise<Map<string, Device>> } | null = null;
 	private engine: SyncEngine | null = null;
 	private abort: AbortController | null = null;
 	private state: State = "off";
@@ -94,7 +107,7 @@ export default class SyncryptionPlugin extends Plugin {
 		this.addCommand({ id: "connect", name: "Connect again", callback: () => void this.restart() });
 		// The status bar isn't shown on mobile.
 		this.addCommand({ id: "status", name: "Show sync status", callback: () => new Notice(this.statusText(), 8000) });
-		this.addCommand({ id: "approve-devices", name: "Approve devices", callback: () => void this.openApprovals() });
+		this.addCommand({ id: "approve-devices", name: "Approve new keys", callback: () => void this.openApprovals() });
 		this.addCommand({
 			id: "file-history",
 			name: "Show file history",
@@ -165,10 +178,12 @@ export default class SyncryptionPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		this.settings = { ...DEFAULT_SETTINGS, ...((await this.loadData()) as Partial<SyncryptionSettings> | null) };
+		let changed = syncKeySlot(this.app, this.settings);
 		if (this.settings.deviceName === "") {
 			this.settings.deviceName = initialDeviceName();
-			await this.saveSettings();
+			changed = true;
 		}
+		if (changed) await this.saveSettings();
 	}
 
 	async saveSettings(): Promise<void> {
@@ -243,6 +258,8 @@ export default class SyncryptionPlugin extends Plugin {
 		this.renderLock();
 		this.session?.store.close();
 		this.session = null;
+		this.sessionSlot = null;
+		this.serverDevices = null;
 		this.engine = null;
 		this.setState("off");
 	}
@@ -254,30 +271,25 @@ export default class SyncryptionPlugin extends Plugin {
 		this.abort = abort;
 		let pairing: PairingModal | null = null;
 		try {
+			const slot = this.settings.keyId;
 			const key = await this.unlock();
 			if (key === null) throw new SetupCancelled();
 			const deviceName = this.settings.deviceName;
-			const api = new ApiClient({
-				endpoint: this.settings.endpoint,
-				identity: { username: this.settings.username, seed: key.seed },
-				deviceName,
-				transport: requestUrlTransport,
-			});
+			const api = this.client(key.seed);
 			const session = await connect({
 				api,
-				vaultName: this.settings.vaultName,
 				deviceName,
 				seed: key.seed,
 				openStore: (vaultId) => IndexedDbStore.open(`syncryption-${this.installId()}-${vaultId}`),
 				callbacks: {
 					askSharedSecret: () =>
 						prompt(this.app, {
-							title: "Join the server",
+							title: "Create the vault",
 							description:
-								"This key is new to the server. Enter the server's shared secret to join. It is used once and not stored.",
+								"This vault doesn't exist on the server yet. Creating it needs the server's shared secret. It is used once and not stored.",
 							label: "Shared secret",
 							password: true,
-							submit: "Join",
+							submit: "Create",
 						}),
 					showPairing: (code, recover) => {
 						pairing = new PairingModal(this.app, code, () => abort.abort(), recover);
@@ -292,6 +304,7 @@ export default class SyncryptionPlugin extends Plugin {
 				return;
 			}
 			this.session = session;
+			this.sessionSlot = slot;
 			this.engine = new SyncEngine({
 				api,
 				vaultId: session.vault.id,
@@ -321,6 +334,15 @@ export default class SyncryptionPlugin extends Plugin {
 			if (this.abort !== abort) return; // stopped or restarted meanwhile
 			if (e instanceof SetupCancelled) {
 				this.setState("off");
+				return;
+			}
+			if (e instanceof ApiError && e.code === "vault_being_created") {
+				this.fail(
+					new Error(
+						"Another encryption key is creating this vault right now. Connect again once it is done: this key then waits for approval.",
+					),
+					true,
+				);
 				return;
 			}
 			this.fail(e);
@@ -395,8 +417,22 @@ export default class SyncryptionPlugin extends Plugin {
 		return id;
 	}
 
+	/** A client for this vault's settings, logging in with `seed`. */
+	private client(seed: Uint8Array): ApiClient {
+		return new ApiClient({
+			endpoint: this.settings.endpoint,
+			identity: { username: this.settings.username, seed },
+			deviceName: this.settings.deviceName,
+			vaultName: this.settings.vaultName,
+			transport: requestUrlTransport,
+		});
+	}
+
 	private async unlock(): Promise<OpenSshKey | null> {
 		if (this.key) return this.key;
+		if (currentKeySlot(this.settings) !== this.settings.keyId) {
+			throw new Error("This device has no encryption key for this vault yet. Generate one in the settings.");
+		}
 		const pem = loadKeyText(this.app, this.settings.keyId);
 		if (pem === null) throw new Error("The encryption key is missing from this device's secret storage. Generate a new one in the settings.");
 		this.key = await unlockKey(pem, (retry) => this.askPassphrase(retry));
@@ -494,22 +530,20 @@ export default class SyncryptionPlugin extends Plugin {
 		}
 	}
 
-	/** Tell the user once about each device that waits for approval. */
+	/** Tell the user once about each key that waits for approval. */
 	private async checkApprovals(): Promise<void> {
 		if (!this.session) return;
-		const pending = await this.session.pendingMembers();
-		const fresh = pending.filter((p) => !this.announced.has(p.member.device.id));
-		for (const p of fresh) this.announced.add(p.member.device.id);
-		if (fresh.length) new Notice("A device is waiting for approval. Approve it in the sync settings.", 10_000);
+		const pending = await this.session.pendingDevices();
+		const fresh = pending.filter((p) => !this.announced.has(p.device.id));
+		for (const p of fresh) this.announced.add(p.device.id);
+		if (fresh.length) new Notice("A new encryption key is waiting for approval. Approve it in the sync settings.", 10_000);
 	}
 
-	/** The devices waiting for this device's approval, for the settings tab. */
+	/** The keys waiting for this device's approval, for the settings tab. */
 	async pendingCount(): Promise<number | null> {
 		const session = this.session;
 		if (!session) return null;
-		const members = await session.pendingMembers();
-		const devices = await session.pendingDevices();
-		return members.length + devices.filter((d) => !members.some((m) => m.member.device.id === d.device.id)).length;
+		return (await session.pendingDevices()).length;
 	}
 
 	async openApprovals(): Promise<void> {
@@ -519,22 +553,16 @@ export default class SyncryptionPlugin extends Plugin {
 			return;
 		}
 		try {
-			const members = await session.pendingMembers();
-			const devices = await session.pendingDevices();
-			const items: PendingApproval[] = [
-				...members.map((p) => ({
-					name: `${p.member.device.name} (wants to sync this vault)`,
-					code: p.code,
-					approve: () => session.approve(p.member),
-				})),
-				...devices
-					.filter((d) => !members.some((m) => m.member.device.id === d.device.id))
-					.map((p) => ({
-						name: `${p.device.name} (new device of this account)`,
-						code: p.code,
-						approve: async () => void (await session.api.approveDevice(p.device.id)),
-					})),
-			];
+			const pending = await session.pendingDevices();
+			const items: PendingApproval[] = pending.map((p) => ({
+				name: p.device.name,
+				fingerprint: p.device.fingerprint,
+				code: p.code,
+				approve: async () => {
+					await session.approve(p.device);
+					this.serverDevices = null;
+				},
+			}));
 			new ApproveModal(this.app, items).open();
 		} catch (e) {
 			this.fail(e, true);
@@ -582,48 +610,93 @@ export default class SyncryptionPlugin extends Plugin {
 		return true;
 	}
 
-	/** The other devices in the keyring, for the settings tab, or null when not connected. */
-	keyringDevices(): { id: string; name: string }[] | null {
+	/** Every key in the vault's keyring, for the settings tab, or null when not connected. */
+	vaultKeys(): Array<{ id: string; name: string; publicKey: string; added: string; self: boolean }> | null {
 		const session = this.session;
 		if (!session) return null;
-		return session.keyring.devices.filter((d) => d.id !== session.deviceId).map(({ id, name }) => ({ id, name }));
+		return session.keyring.devices.map((d) => ({ ...d, self: d.id === session.deviceId }));
 	}
 
-	/**
-	 * Remove a device from this vault, or from every vault of the account, and rotate the
-	 * vault key (crypto.md 8.4).
-	 */
-	async removeDevice(id: string, everywhere: boolean): Promise<boolean> {
+	/** The vault's keys on the server by id (status, last seen), cached briefly. Null when not connected. */
+	vaultKeyStatus(): Promise<Map<string, Device>> | null {
+		const session = this.session;
+		if (!session) return null;
+		if (!this.serverDevices || Date.now() - this.serverDevices.at > DEVICES_CACHE_MS) {
+			const devices = session.devices().then((list) => new Map(list.map((d) => [d.id, d])));
+			devices.catch(() => (this.serverDevices = null));
+			this.serverDevices = { at: Date.now(), devices };
+		}
+		return this.serverDevices.devices;
+	}
+
+	/** Remove another key from this vault and rotate the vault key (crypto.md 8.4). */
+	async removeDevice(id: string): Promise<boolean> {
 		const session = this.session;
 		if (!session) {
 			new Notice("Not connected to the sync server.");
 			return false;
 		}
-		const name = session.keyring.devices.find((d) => d.id === id)?.name ?? "The device";
+		const name = session.keyring.devices.find((d) => d.id === id)?.name ?? "the device";
 		const hadRecovery = session.keyring.recovery !== undefined;
 		try {
-			await session.removeDevice(id, everywhere);
+			await session.removeDevice(id);
 		} catch (e) {
 			this.fail(e, true);
 			return false;
 		}
-		new Notice(`${name} was removed. Files are re-encrypted with a new key in the background.`);
+		this.serverDevices = null;
+		new Notice(`The key of ${name} was removed. Files are re-encrypted with a new vault key in the background.`);
 		if (hadRecovery && session.keyring.recovery === undefined) this.recoveryCleared();
 		void this.syncNow();
 		return true;
 	}
 
-	/** Finish revocations done from another vault or interrupted before the key rotation. */
+	/**
+	 * Whether `slot` has a working key with a connected session, so Replace can hand the
+	 * vault over to a new key (`replaceKey`) instead of joining as a new device.
+	 */
+	canHandOver(slot: string): boolean {
+		return this.session !== null && this.sessionSlot === slot && this.settings.keyId === slot;
+	}
+
+	/**
+	 * Replace this device's key (PLAN, Rules: Replace): the connected old key approves the
+	 * new one, the new key is saved, and after a restart the new key removes the old one and
+	 * rotates the vault key. The old key stays in the slot until the new one is approved.
+	 */
+	async replaceKey(slot: string, key: OpenSshKey): Promise<boolean> {
+		const session = this.session;
+		if (!session || !this.canHandOver(slot)) return false;
+		try {
+			await handOver(session, this.client(key.seed), this.settings.deviceName);
+		} catch (e) {
+			this.fail(e, true);
+			return false;
+		}
+		saveKeyText(this.app, slot, writeOpenSshPrivateKey(key.seed, { comment: key.comment }));
+		this.settings.keyId = slot;
+		this.settings.publicKey = publicKeyText(key.publicKey, key.comment);
+		await this.saveSettings();
+		this.forgetKey();
+		new Notice("Encryption key replaced. The old key is removed and the vault gets a new key.");
+		await this.restart();
+		return true;
+	}
+
+	/** Finish a key change and revocations that were interrupted before the key rotation. */
 	private async finishRevocations(session: VaultSession): Promise<void> {
 		const hadRecovery = session.keyring.recovery !== undefined;
+		let replaced: boolean;
 		let names: string[];
 		try {
+			replaced = await session.finishReplace();
 			names = await session.removeStaleDevices();
 		} catch {
 			return; // tried again on the next start
 		}
-		if (names.length === 0 || this.session !== session) return;
-		new Notice(`Removed ${names.join(", ")} from this vault's key, as they no longer have access.`);
+		if (this.session !== session || (!replaced && names.length === 0)) return;
+		this.serverDevices = null;
+		if (names.length) new Notice(`Removed the keys of ${names.join(", ")} from this vault, as they no longer have access.`);
 		if (hadRecovery && session.keyring.recovery === undefined) this.recoveryCleared();
 		void this.syncNow();
 	}

@@ -51,8 +51,8 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `sshkeys` | devices' encryption keys (Ed25519 public keys in OpenSSH format): parsing, fingerprints, pairing codes, sshsig verification |
 | `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag |
 | `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens |
-| `devices` | device list, approval, revocation |
-| `vaults` | open/create by name, membership and approval, keyring versions |
+| `devices` | the vault's keys (devices): list, approval, removal, `/devices/self` |
+| `vaults` | open/create the key's vault by name, keyring versions, recovery |
 | `storage` | `BlobStore` protocol, `LocalBlobStore`, `S3BlobStore` |
 | `blobs` | blob upload, download and `missing`, and the garbage collector |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
@@ -64,10 +64,9 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 ```mermaid
 erDiagram
     users ||--o{ devices : has
+    vaults ||--o{ devices : keys
     users ||--o{ vaults : owns
     devices ||--o{ sessions : has
-    devices ||--o{ memberships : joins
-    vaults ||--o{ memberships : grants
     vaults ||--o{ keyrings : versions
     devices ||--o{ keyrings : signs
     vaults ||--o{ files : contains
@@ -86,7 +85,9 @@ erDiagram
     devices {
         text id PK
         text user_id FK
-        text public_key "UNIQUE(user_id, public_key)"
+        text vault_id FK "null while the key creates its vault"
+        text vault_name
+        text public_key UK "one vault per key"
         text name
         text status
         int created_at
@@ -100,6 +101,7 @@ erDiagram
     challenges {
         text id PK
         text username
+        text vault_name
         text public_key
         text message
         int expires_at
@@ -114,12 +116,6 @@ erDiagram
         int keyring_version
         int created_at
         int disabled_at "set by the admin page"
-    }
-    memberships {
-        text vault_id PK, FK
-        text device_id PK, FK
-        text status
-        int created_at
     }
     keyrings {
         text vault_id PK, FK
@@ -179,8 +175,8 @@ erDiagram
         text message "shown to users, or null"
     }
 ```
-- Identity (`users`, `devices`, `sessions`) and data (`vaults`, `memberships` and below)
-  are separate. The only links are `vaults.user_id` and `memberships.device_id`.
+- A device row is one key in one vault (`devices.vault_id`); its `status` is its access to
+  the vault, so there is no separate membership table.
 - The `revisions` table is the change feed: `rev` is the vault `seq`, so
   `WHERE vault_id = ? AND rev > ? ORDER BY rev` is the feed query.
 - A commit is one `BEGIN IMMEDIATE` transaction: check the head, check the blobs, bump
@@ -353,22 +349,23 @@ flowchart TD
   the head; history is never rewritten. "Restore a deleted file" lists the synced paths
   whose last revision is a deletion and opens the same history.
 
-- **Pairing:** a device whose vault membership is pending shows its pairing code and
-  polls every 5 seconds. On an active device, "Approve devices" lists pending members
-  with codes computed locally from their public keys. Approving adds the device to the
+- **Pairing:** a new key of an existing vault is pending; it shows its pairing code and
+  polls every 5 seconds. On an active device, "Approve devices" lists the vault's pending
+  keys with codes computed locally from their public keys. Approving adds the key to the
   keyring, uploads the next version (retrying on `409 keyring_version`), then approves the
-  membership.
+  key on the server.
 - **Recovery key:** offered once after this device creates a vault, and in the settings
   (create, replace, remove). A new key is shown once and set only after the user confirms
   they stored it. The pairing dialog has "Use a recovery key": the device opens the
   current keyring with it, adds itself, and uploads the next version signed by the
-  recovery key; the server activates the membership and connect goes on at the next poll
+  recovery key; the server activates the key and connect goes on at the next poll
   (crypto.md 9).
-- **Removing a device:** the settings list the other devices of the keyring. "Remove" ends
-  the membership on the server (or revokes the device for the whole account), then uploads
+- **Removing a key:** the settings list every key of the keyring (fingerprint, device
+  name, date added, with status and last seen from the server), this device's marked.
+  "Remove" (on any key but this device's) revokes the key on the server, then uploads
   the next keyring without it under a new epoch. If the removed device set the recovery
   key, that goes too and the user is asked to create a new one. On connect, keyring
-  devices that are no longer members are removed the same way (crypto.md 8.4).
+  keys that are no longer active on the server are removed the same way (crypto.md 8.4).
 - **Re-encryption:** each sync ends by committing again, under the current epoch, the
   unchanged live files whose last synced revision used an older one (`SyncedFile.epoch`).
   The engine fetches the keyring when the change feed reports a newer version, or once

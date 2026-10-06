@@ -1,6 +1,6 @@
 [project]
 name = "syncryption-server"
-version = "0.1.2"
+version = "0.1.4"
 description = "Vault Syncryption sync server: stores and relays end-to-end encrypted Obsidian vault data"
 readme = "README.md"
 authors = [

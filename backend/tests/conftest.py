@@ -44,9 +44,10 @@ def client(settings, clock):
 
 @pytest.fixture
 def alice(client) -> Device:
-    """The first device of a new user, logged in and active."""
+    """The first device of a new user, logged in and active in its new vault "Personal"."""
     d = Device(client, "alice", name="MacBook")
     d.login(SECRET)
+    d.create_vault()
     return d
 
 

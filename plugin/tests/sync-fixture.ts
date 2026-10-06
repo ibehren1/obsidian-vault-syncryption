@@ -1,4 +1,4 @@
-/** Two devices of one user syncing one vault against the real backend. */
+/** Devices (one key each) of one user syncing one vault against the real backend. */
 import { MemoryStore } from "../src/store/state";
 import { VaultCipher } from "../src/sync/cipher";
 import { SyncEngine } from "../src/sync/engine";
@@ -34,17 +34,14 @@ export function engineFor(session: VaultSession, fs: MemoryFs, name: string, war
 
 export async function device(username: string, vaultName: string, name: string, seed = newSeed()): Promise<Device> {
 	const store = new MemoryStore();
-	// Join directly, without the join_required round trip.
-	const api = client(username, seed, name);
-	await api.login(SHARED_SECRET);
 	const session = await connect({
-		api,
-		vaultName,
+		api: client(username, vaultName, seed, name),
 		deviceName: name,
 		seed,
 		openStore: async () => store,
 		callbacks: {
-			askSharedSecret: async () => null,
+			// Asked only by the key that creates the vault.
+			askSharedSecret: async () => SHARED_SECRET,
 			showPairing: () => {},
 		},
 		pollMs: 20,
@@ -67,9 +64,9 @@ export async function pairedDevice(
 	second.catch((e: unknown) => (failed = e ?? new Error("device setup failed")));
 	for (;;) {
 		if (failed) throw failed;
-		const pending = await first.session.pendingMembers();
+		const pending = await first.session.pendingDevices();
 		if (pending.length) {
-			await first.session.approve(pending[0]!.member);
+			await first.session.approve(pending[0]!.device);
 			break;
 		}
 		await new Promise((r) => setTimeout(r, 20));

@@ -97,17 +97,18 @@ and includes `ADMIN_CONTACT` as `adminContact`.
 Opening `https://notes.example.com/` in a browser shows a short page for your users:
 what the service is (self-hosted, end-to-end encrypted Obsidian sync; the server holds
 only ciphertext), how to connect (install the plugin, enter this URL, a username and a
-vault name, and create an encryption key), that joining needs the shared secret from you,
+vault name, and create an encryption key), that creating a vault needs the shared secret from you,
 your `ADMIN_CONTACT`, and whether the server is in maintenance.
 
 ## 4. Giving people access
 Anyone who has the **endpoint URL**, chooses a **username**, and knows the
-**shared secret** can join. How you hand out the secret is up to you and your
+**shared secret** can create vaults. How you hand out the secret is up to you and your
 organisation. Without it, the plugin tells people to contact their administrator
 (set `ADMIN_CONTACT` so they know how).
 
-- The secret is only needed the first time a key connects to the server. After that,
-  people log in with their encryption key alone.
+- The secret is only needed to create a vault (or a new username). A new device joining
+  an existing vault doesn't need it: it waits until a device that already syncs the
+  vault approves it. After that, people log in with their encryption key alone.
 - Changing `SHARED_SECRET` (and restarting) stops new people from joining. It doesn't
   lock out anyone who has already joined.
 - The secret controls who may use the server. It doesn't give access to anyone's notes:
@@ -117,20 +118,23 @@ In the plugin, each person sets:
 - the endpoint URL
 - their username
 - a vault name (a new name creates the vault)
-- an encryption key: the plugin generates one for each device
+- an encryption key: the plugin generates one for each device and vault (a key opens
+  exactly one vault, so two vaults on one device use two keys)
 
 People should create a recovery key when the plugin offers it. Device keys never leave
 their device, so the recovery key is the only way back into a vault when every device is
 lost.
 
 Adding another device to a vault: open the vault with the same username and vault name.
-If the device uses a new key, it shows a pairing code, and someone approves it from a
-device that already syncs that vault.
+The device generates a new key, shows a pairing code, and someone approves it from a
+device that already syncs that vault. Any device of the vault can see every key (by
+fingerprint and device name) and remove one; files a removed device already has stay on
+it.
 
 ## 5. Admin page
-`https://notes.example.com/admin` lists every user with their devices and vaults: the
-stored (encrypted) size of each vault, its number of files, when it was created and last
-changed, and when each device was last seen. File names and contents stay encrypted, so
+`https://notes.example.com/admin` lists every user with their vaults and each vault's
+keys: the stored (encrypted) size of each vault, its number of files, when it was created
+and last changed, and each key's fingerprint, device name and when it was last seen. File names and contents stay encrypted, so
 the page can't show them.
 
 - **Logging in:** the page asks for `ADMIN_TOKEN` and keeps you logged in for 12 hours

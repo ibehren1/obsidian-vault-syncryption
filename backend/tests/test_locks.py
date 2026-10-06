@@ -10,15 +10,13 @@ OTHER = "B" * 22
 
 @pytest.fixture
 def vault(alice) -> str:
-    return alice.create_vault()
+    return alice.vault_id
 
 
 @pytest.fixture
 def phone(client, alice, vault) -> Device:
     phone = Device(client, "alice", name="Pixel")
-    phone.login(SECRET)
-    phone.post("/api/v1/vaults/open", json={"name": "Personal"})
-    alice.post(f"/api/v1/vaults/{vault}/members/{phone.device_id}/approve")
+    phone.join(alice)
     return phone
 
 
@@ -101,8 +99,9 @@ def test_bad_requests(alice, vault):
 def test_outsiders_see_nothing(client, alice, vault):
     bob = Device(client, "bob")
     bob.login(SECRET)
-    assert bob.get(f"/api/v1/vaults/{vault}/locks").status_code in (403, 404)
-    assert lock(bob, vault).status_code in (403, 404)
+    bob.create_vault()
+    assert bob.get(f"/api/v1/vaults/{vault}/locks").status_code == 403
+    assert lock(bob, vault).status_code == 403
 
 
 def test_wait_wakes_on_lock_changes(alice, phone, vault):
@@ -123,8 +122,8 @@ def test_wait_wakes_on_lock_changes(alice, phone, vault):
     assert out["body"]["locksSeq"] == seq + 1
 
 
-def test_revoking_a_member_releases_its_locks(alice, phone, vault):
+def test_removing_a_device_releases_its_locks(alice, phone, vault):
     lock(phone, vault)
     seq = locks(alice, vault)["locksSeq"]
-    assert alice.delete(f"/api/v1/devices/{phone.device_id}").status_code in (200, 204)
+    assert alice.delete(f"/api/v1/vaults/{vault}/devices/{phone.device_id}").status_code == 200
     assert locks(alice, vault) == {"locks": [], "locksSeq": seq + 1}

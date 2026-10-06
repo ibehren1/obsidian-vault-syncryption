@@ -18,6 +18,7 @@ function fake(handler: (url: string) => HttpResponse): ApiClient {
 		endpoint: "https://sync.example.com",
 		identity: { username: "alice", seed: newSeed() },
 		deviceName: "Test",
+		vaultName: "Notes",
 		transport,
 	});
 }
@@ -43,31 +44,38 @@ describe("checkChallenge", () => {
 			overrides.first ?? "syncryption-auth@v1",
 			`origin: ${overrides.origin ?? "https://sync.example.com"}`,
 			`username: ${overrides.username ?? "alice"}`,
+			`vault: ${overrides.vault ?? "Notes"}`,
 			`key: ${overrides.key ?? fingerprint(key)}`,
 			`nonce: ${overrides.nonce ?? "A".repeat(43)}`,
 			`expires: ${overrides.expires ?? "2026-10-02T12:00:00Z"}`,
 			"",
 		].join("\n");
 
-	it("accepts a challenge for this server, user and key", () => {
-		expect(() => checkChallenge(message(), "https://sync.example.com", "alice", key)).not.toThrow();
+	it("accepts a challenge for this server, user, vault and key", () => {
+		expect(() => checkChallenge(message(), "https://sync.example.com", "alice", "Notes", key)).not.toThrow();
+		// The vault name as the server stores it: NFC, trimmed.
+		const cafe = message({ vault: "Caf\u00e9" });
+		expect(() => checkChallenge(cafe, "https://sync.example.com", "alice", " Cafe\u0301 ", key)).not.toThrow();
 	});
 
 	it.each([
 		["first", "other-namespace"],
 		["origin", "https://evil.example.com"],
 		["username", "bob"],
+		["vault", "Work"],
 		["key", "SHA256:AAAA"],
 		["nonce", "short"],
 	])("rejects a wrong %s", (field, value) => {
-		expect(() => checkChallenge(message({ [field]: value }), "https://sync.example.com", "alice", key)).toThrow(
+		expect(() => checkChallenge(message({ [field]: value }), "https://sync.example.com", "alice", "Notes", key)).toThrow(
 			expect.objectContaining({ code: "bad_challenge" }),
 		);
 	});
 
-	it("rejects a message with extra lines", () => {
+	it("rejects a message with extra or missing lines", () => {
 		const extra = message() + "sign: this too\n";
-		expect(() => checkChallenge(extra, "https://sync.example.com", "alice", key)).toThrow(ApiError);
+		expect(() => checkChallenge(extra, "https://sync.example.com", "alice", "Notes", key)).toThrow(ApiError);
+		const noVault = message().replace("vault: Notes\n", "");
+		expect(() => checkChallenge(noVault, "https://sync.example.com", "alice", "Notes", key)).toThrow(ApiError);
 	});
 });
 
@@ -83,6 +91,43 @@ describe("ApiClient without a server", () => {
 				: json(500, {}),
 		);
 		await expect(api.login()).rejects.toMatchObject({ code: "bad_challenge" });
+	});
+
+	it("names the vault in the challenge, and sends the shared secret only when given", async () => {
+		const seed = newSeed();
+		const bodies: Record<string, unknown>[] = [];
+		const challenges: Record<string, unknown>[] = [];
+		const transport: Transport = async (request) => {
+			if (request.url.endsWith("/challenge")) {
+				challenges.push(JSON.parse(request.body as string) as Record<string, unknown>);
+				const message = [
+					"syncryption-auth@v1",
+					"origin: https://sync.example.com",
+					"username: alice",
+					"vault: Notes",
+					`key: ${fingerprint(ed25519.getPublicKey(seed))}`,
+					`nonce: ${"A".repeat(43)}`,
+					"expires: 2026-10-02T12:00:00Z",
+					"",
+				].join("\n");
+				return json(200, { challengeId: "c", message, expiresAt: "2026-10-02T12:00:00Z" });
+			}
+			bodies.push(JSON.parse(request.body as string) as Record<string, unknown>);
+			return json(200, { token: "t", deviceId: "d", vaultId: null, status: "active", created: true, expiresAt: "2026-10-02T13:00:00Z" });
+		};
+		const api = new ApiClient({
+			endpoint: "https://sync.example.com",
+			identity: { username: "alice", seed },
+			deviceName: "Test",
+			vaultName: " Notes ",
+			transport,
+		});
+		await api.login();
+		await api.login("secret");
+		expect(challenges[0]).toMatchObject({ username: "alice", vaultName: "Notes" });
+		expect(bodies[0]).not.toHaveProperty("sharedSecret");
+		expect(bodies[1]).toMatchObject({ challengeId: "c", deviceName: "Test", sharedSecret: "secret" });
+		expect(bodies[1]).not.toHaveProperty("vaultName");
 	});
 
 	it("checks the protocol version, not the server version", async () => {
@@ -126,6 +171,7 @@ describe("ApiClient without a server", () => {
 			endpoint: "https://sync.example.com",
 			identity: { username: "alice", seed: newSeed() },
 			deviceName: "Test",
+			vaultName: "Notes",
 			transport: () => Promise.reject(new Error("offline")),
 		});
 		await expect(api.login()).rejects.toBeInstanceOf(NetworkError);
@@ -136,6 +182,7 @@ describe("ApiClient without a server", () => {
 			endpoint: "https://sync.example.com",
 			identity: { username: "alice", seed: newSeed() },
 			deviceName: "Test",
+			vaultName: "Notes",
 			transport: () => new Promise(() => {}),
 			timeoutMs: 20,
 		});
@@ -180,38 +227,41 @@ describe("maintenance and disabled texts", () => {
 });
 
 describe.skipIf(noBackend)("ApiClient against the backend", () => {
-	it("joins with the shared secret, then logs in without it", async () => {
+	it("needs the shared secret for a new vault, then logs in without it", async () => {
 		const username = uniqueName("join");
+		const vaultName = uniqueName("Vault ");
 		const seed = newSeed();
-		const api = client(username, seed);
+		const api = client(username, vaultName, seed);
 		await expect(api.login()).rejects.toMatchObject({ status: 403, code: "join_required" });
 		await expect(api.login("wrong")).rejects.toBeInstanceOf(ApiError);
 		const joined = await api.login(SHARED_SECRET);
-		expect(joined.status).toBe("active");
-		expect((await api.selfDevice()).id).toBe(joined.deviceId);
+		expect(joined).toMatchObject({ status: "active", vaultId: null });
+		expect(await api.selfDevice()).toMatchObject({ id: joined.deviceId, username, vaultName });
 
-		const again = client(username, seed);
+		const again = client(username, vaultName, seed);
 		const result = await again.login();
 		expect(result.deviceId).toBe(joined.deviceId);
 	});
 
-	it("makes a second key of the same user wait for approval", async () => {
-		const username = uniqueName("second");
-		const first = client(username, newSeed());
-		await first.login(SHARED_SECRET);
-		const second = client(username, newSeed(), "Phone");
-		const pending = await second.login(SHARED_SECRET);
-		expect(pending.status).toBe("pending");
-		await expect(second.devices()).rejects.toMatchObject({ code: "device_pending" });
+	it("refuses a known key for another vault or user", async () => {
+		const username = uniqueName("onekey");
+		const vaultName = uniqueName("Vault ");
+		const seed = newSeed();
+		await client(username, vaultName, seed).login(SHARED_SECRET);
+		await expect(client(username, uniqueName("Other "), seed).login(SHARED_SECRET)).rejects.toBeInstanceOf(ApiError);
+		await expect(client(uniqueName("other"), vaultName, seed).login(SHARED_SECRET)).rejects.toBeInstanceOf(ApiError);
+	});
 
-		const devices = await first.devices();
-		expect(devices.find((d) => d.id === pending.deviceId)?.status).toBe("pending");
-		await first.approveDevice(pending.deviceId);
-		expect((await second.devices()).length).toBe(2);
+	it("tells a second new key that the vault is being created", async () => {
+		const username = uniqueName("creating");
+		const vaultName = uniqueName("Vault ");
+		await client(username, vaultName, newSeed()).login(SHARED_SECRET);
+		const second = client(username, vaultName, newSeed());
+		await expect(second.login(SHARED_SECRET)).rejects.toMatchObject({ status: 409, code: "vault_being_created" });
 	});
 
 	it("logs in again when the token is rejected", async () => {
-		const api = client(uniqueName("relogin"), newSeed());
+		const api = client(uniqueName("relogin"), uniqueName("Vault "), newSeed());
 		await api.login(SHARED_SECRET);
 		(api as unknown as { token: string }).token = "not-a-token";
 		expect((await api.selfDevice()).id).toBe(api.deviceId);
