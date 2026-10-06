@@ -13,8 +13,10 @@ export const noBackend = backendUrl === "";
 
 let counter = 0;
 
+/** Unique across test files too: files start in parallel, often in the same millisecond. */
 export function uniqueName(prefix: string): string {
-	return `${prefix}${Date.now().toString(36)}${(counter++).toString(36)}`;
+	const random = Math.floor(Math.random() * 36 ** 4).toString(36);
+	return `${prefix}${Date.now().toString(36)}${(counter++).toString(36)}${random}`;
 }
 
 /**

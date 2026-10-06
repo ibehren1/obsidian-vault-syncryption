@@ -12,14 +12,14 @@ This started as a greenfield repo. The goal is self-hosted Obsidian sync where:
 The client is an Obsidian plugin with minimal setup.
 
 Decisions the user made:
-- **Identity:** SSH keys, Ed25519 only (no RSA).
+- **Identity:** a per-device encryption key, an Ed25519 key in OpenSSH format only (no RSA).
 - **Merging:** the backend does locking but no merging.
 - **Backend:** Python, managed with uv.
 - **HTTPS:** built-in Caddy with Let's Encrypt, or plain HTTP behind the user's own proxy. No tunnels.
 - **Configuration:** docker compose with the variables written inline. No `.env` file.
-- **Storage:** S3 if the user supplies credentials, otherwise a `./data` bind mount. `MIGRATE_TO_S3` moves local data to S3.
+- **Storage:** a `./data` bind mount by default, with no configuration. S3 is optional, for effectively unlimited storage, and used if the user supplies credentials. `MIGRATE_TO_S3` moves local data to S3.
 
-Prior art: Self-hosted LiveSync (CouchDB, complex setup), Remotely Save (S3, weak at syncing `.obsidian`), official Obsidian Sync (paid). What sets this apart: one compose file, SSH-key identity, a server that cannot read notes.
+Prior art: Self-hosted LiveSync (CouchDB, complex setup), Remotely Save (S3, weak at syncing `.obsidian`), official Obsidian Sync (paid). What sets this apart: one compose file, standard Ed25519 key pairs as identity, a server that cannot read notes.
 
 ## Hosting (single container, docker compose)
 `backend/docker/docker-compose.yml` holds the hosting setup, with every variable inline:
@@ -43,6 +43,8 @@ services:
       S3_ENDPOINT: ""                    # optional: MinIO, B2, R2, ...; empty means AWS
       MIGRATE_TO_S3: "FALSE"
       SHARED_SECRET: "change-me"         # required; given to people allowed to join
+      ADMIN_TOKEN: ""                    # required: 32+ characters for /admin
+      ADMIN_CONTACT: ""                  # optional: how users reach the admin
 ```
 - **Variable naming:** `BEHIND_PROXY` uses an underscore, not the hyphen in "BEHIND-PROXY". Shells, and therefore `entrypoint.sh`, can't read environment variable names that contain a hyphen.
 - **`BEHIND_PROXY=FALSE`:**
@@ -55,7 +57,10 @@ services:
   - Trusted `X-Forwarded-*` headers are honoured.
   - `URL` is optional.
 - **`SHARED_SECRET`:** required. The entrypoint exits with a clear error if it is empty. Anyone with the endpoint URL, a username and this secret can join the server. The secret is only checked the first time a key connects (creating a user, or adding a new key to an existing user). Without it, the plugin tells the user to contact their administrator. How the secret is handed out is up to the organisation running the server. Changing it doesn't affect keys that are already registered.
+- **`ADMIN_TOKEN`:** required, at least 32 characters; the entrypoint exits otherwise. It opens the admin page `/admin` (see the M8 admin item), either as `Authorization: Bearer` or typed into the page's login form.
+- **`ADMIN_CONTACT`:** optional, free-form single-line text (at most 500 characters) telling users how to reach the admin: email, Slack, phone, ... It is shown on the `/` page and in `/health`, and passed to the plugin in the maintenance and disabled-account errors so the plugin can show it.
 - **Storage selection:**
+  - Local storage is the default and needs no configuration. S3 is optional and is the way to get effectively unlimited storage.
   - If all three `S3_*` variables are set, file contents go to S3. The region is found automatically with `GetBucketLocation`.
   - `S3_ENDPOINT` (optional) points at an S3-compatible provider such as MinIO, Backblaze B2 or Cloudflare R2. It needs the three `S3_*` variables. If the provider doesn't implement `GetBucketLocation`, the region falls back to `us-east-1`. Litestream uses the same endpoint.
   - Otherwise they go to `/data/blobs` (the `./data` bind mount).
@@ -69,14 +74,13 @@ services:
   - Running again once the marker exists does nothing.
 
 ## Crypto & Identity
-- **Device keys (Ed25519 only):**
-  - On desktop, the user can import `~/.ssh/id_ed25519`, passphrase-protected or not.
-  - On any device, including mobile, the plugin can generate a per-device key.
+- **Device encryption keys (Ed25519 in OpenSSH format only):**
+  - Every device, including mobile, generates its own key. There is no import (removed in plugin 0.1.3): the key is only used to log in and to decrypt the VDK, and approving a new device re-encrypts the VDK to its key, so an existing key never needs to be brought in. Losing every device is covered by the recovery key.
   - The private key is stored only in Obsidian's `SecretStorage` (requires Obsidian 1.13+, no fallback), never in the vault folder. A local passphrase is an optional extra layer.
   - The OpenSSH private-key parser is our own code, about 150 lines: `bcrypt-pbkdf` (pure JS) plus WebCrypto AES-CTR. `sshpk` needs Node crypto, so it isn't usable on mobile.
 - **Envelope:**
   - There is one random 32-byte vault data key (VDK).
-  - `keyring.age` holds the VDK encrypted to every device's `ssh-ed25519` public key, using age's ssh-ed25519 stanza, plus an offline recovery key. The recovery path is `age -d -i ~/.ssh/id_ed25519 keyring.age`.
+  - `keyring.age` holds the VDK encrypted to every device's `ssh-ed25519` public key, using age's ssh-ed25519 stanza, plus an offline recovery key. The offline recovery path is `age -d -i recovery.txt keyring.age` with the recovery key.
   - The stanza is about 80 lines on top of `age-encryption` (typage) and `@noble/curves`/`@noble/hashes`, and is tested against Go `age`.
   - Each file is encrypted with XChaCha20-Poly1305 under `HKDF(VDK, fileId)`.
   - Paths are encrypted inside the file metadata. The server sees only `fileId = HMAC(VDK, path)`, size, timestamps and lock state.
@@ -86,7 +90,7 @@ services:
   - A vault belongs to a user and is found by `(username, vault name)`. The server stores vault names in clear for that lookup.
   - The server keeps vault membership (which keys may access which vault) separately from the user's devices. Blob storage is partitioned as `blobs/<userId>/<vaultId>/...`.
   - The first key of a new username becomes active immediately (with `SHARED_SECRET`). The first device to open a new vault name creates it.
-  - Sharing a vault: people can share one by using the same username, vault name and SSH key. To the server they are one device.
+  - Sharing a vault: each person uses the same username and vault name with their own encryption key. A new key shows a pairing code and an existing member approves it, so each person can be revoked separately. (Sharing one key also works, but then the server sees one device and can't revoke one person.)
 - **Adding a device to a vault:** a key that isn't in a vault's keyring shows its public key and a pairing code. An active member of the vault approves it and rewraps the VDK to the new key. This covers both new keys and known keys opening another vault.
 - **Recovery key:** an optional offline age X25519 identity. The keyring is also encrypted to it, and an Ed25519 key derived from it (HKDF) may sign the next keyring version. So when every device is lost, a new device with the recovery key adds itself to the keyring and the server activates its membership (`POST /vaults/{id}/recover`). Only a device can set or change the recovery key, and the keyring records which device did; revoking that device removes the recovery key. Details in `docs/crypto.md` section 9.
 - **Revoking a device:** rotate the VDK and re-encrypt in the background. Settings list the vault's devices with a "Remove" button (this vault, or every vault of the account); the change feed carries the keyring version so other devices pick up the new epoch.
@@ -101,7 +105,8 @@ services:
   - Endpoint URL
   - username
   - vault name
-  - SSH key: import a file or generate one
+  - device name: a friendly label for lock warnings and the device lists. It starts as the OS hostname on desktop (without the domain) and as "iPhone", "iPad", "Android phone" or "Android tablet" on mobile, and the user can edit it. The server keeps the name a key had when it first joined; a key shared between installations is one device with one name.
+  - encryption key (setting "Encryption key"): generated on the device; the plugin offers a recovery key once per device while the vault has none
   - excluded paths (optional, per device)
   - an "Approve devices" button that opens the same dialog as the command, showing how many devices are waiting
   - shared secret: asked for only when joining, never stored
@@ -144,7 +149,7 @@ services:
 - **Storage interface:** `BlobStore` with two implementations, `LocalBlobStore` and `S3BlobStore`. The migration code calls both through the same interface.
 - **Plugin types:** generated from FastAPI's OpenAPI with `openapi-typescript`.
 
-All endpoints except `/health` sit under `/api/v1`. The full spec is in `docs/protocol.md`.
+All endpoints except `/`, `/health` and `/admin` sit under `/api/v1`. The full spec is in `docs/protocol.md`.
 
 | Endpoint | Purpose |
 |---|---|
@@ -158,7 +163,9 @@ All endpoints except `/health` sit under `/api/v1`. The full spec is in `docs/pr
 | `PUT/GET/HEAD /vaults/{id}/blobs/{hash}`, `POST /vaults/{id}/blobs/missing` | ciphertext blobs (4 MiB chunks), scoped per vault |
 | `GET /vaults/{id}/locks`, `POST/DELETE /vaults/{id}/locks/{fileId}` | lease locks |
 | `GET /devices`, `/devices/{id}/approve`, `DELETE /devices/{id}` | device management |
-| `GET /health` | container healthcheck |
+| `GET /` | HTML page for users: what the service is, how to connect, that joining needs the shared secret, the admin contact, maintenance state |
+| `GET /health` | container healthcheck; reports `"status": "maintenance"` (still 200) while maintenance mode is on |
+| `/admin`, `/admin/api/...` (outside `/api/v1`, not in the OpenAPI schema) | admin page and its JSON API (protocol.md 14) |
 
 ## Repo Layout
 ```
@@ -226,9 +233,13 @@ All endpoints except `/health` sit under `/api/v1`. The full spec is in `docs/pr
   - plugin id `vault-syncryption`; `manifest.json` and `versions.json` are copied to the repo root (Obsidian reads them there), kept in sync by `npm version` and checked in CI.
   - `.github/workflows/release.yml` on the public repo creates the GitHub release (tag = version, `main.js`, `manifest.json`, `styles.css`) when `main` has a version that isn't released yet. BRAT works from these releases until the store listing is approved.
   - submission to the community plugin store
+  - versioning: the plugin (`plugin/package.json`, both manifests) and the backend (`backend/pyproject.toml`, `__version__`, image tag) have independent `x.y.z` versions. Every commit that changes a component's code bumps its `z` (docs alone don't); `x` and `y` change only when the user says so. Compatibility is the separate protocol version (protocol.md 13), not the server version.
+  - admin page `/admin`, opened with `ADMIN_TOKEN` (Bearer header, or a login form that starts a 12-hour HttpOnly, Secure, SameSite=Strict session cookie with CSRF tokens). It lists users with their devices and vaults (stored size, file count, created and last active). Users and vaults are disabled first (access blocked with 403 `user_disabled` / `vault_disabled`, data kept, can be enabled again), and only a disabled one can be purged, after typing its name. Wrong tokens are rate limited (5 per 15 minutes per IP) and admin actions are logged. The plugin stops syncing on these 403s; no protocol bump, since old plugins just see a 403.
+  - `ADMIN_CONTACT` and the `/` page: an optional contact line (see Hosting), shown on an HTML `/` page that describes the service (self-hosted, end-to-end encrypted Obsidian sync; the server holds only ciphertext), how to connect (install the plugin; enter this URL, a username and a vault name; create an encryption key), that joining needs the shared secret from the admin, the admin contact, and whether the server is in maintenance.
+  - maintenance mode: the admin turns it on (with an optional message) and off from the admin page or `POST /admin/api/maintenance/on` (optional body `{"message": "..."}`) and `POST /admin/api/maintenance/off`. It is stored in the database, so it persists across restarts. While on, the sync API answers 503 `maintenance` with `Retry-After`, and the plugin shows "maintenance" (sync paused, resumes by itself, contact the admin) and retries automatically. `/`, `/health` (200 with `"status": "maintenance"`) and `/admin` keep working. Details in protocol.md 2 and 14.
 
 ## Post-v1 Ideas
-- **SSH agent unlock (desktop only):** keep the private key in `ssh-agent` (macOS Keychain, gnome-keyring, KeePassXC, the Windows OpenSSH agent or Pageant) instead of `SecretStorage`.
+- **SSH agent unlock (desktop only; would bring back external keys, which 0.1.3 removed):** keep the private key in `ssh-agent` (macOS Keychain, gnome-keyring, KeePassXC, the Windows OpenSSH agent or Pageant) instead of `SecretStorage`.
   - Login already works through an agent, since it is just an sshsig signature.
   - An agent can't do the X25519 operation that the age `ssh-ed25519` stanza needs. Ed25519 signatures are deterministic, though, so the plugin can derive a second X25519 identity from an agent signature over a fixed message under its own namespace (`syncryption-unlock@v1`). The keyring is then also encrypted to that identity, and the standard stanza stays for `age -d -i` recovery.
   - Needs Node APIs (Unix socket or named pipe), so it goes in a desktop-only module. There is no agent on Android or iOS.
@@ -248,6 +259,7 @@ All endpoints except `/health` sit under `/api/v1`. The full spec is in `docs/pr
   - `BEHIND_PROXY=FALSE` without `URL` exits with an error.
   - Partial `S3_*` variables exit with an error.
   - An empty `SHARED_SECRET` exits with an error.
+  - A missing or short `ADMIN_TOKEN` exits with an error.
   - `BEHIND_PROXY=TRUE` serves `/health` over HTTP on 8080.
   - Let's Encrypt is tested against the staging CA, either on a VPS with a real domain or using Pebble in CI.
 - Integration:

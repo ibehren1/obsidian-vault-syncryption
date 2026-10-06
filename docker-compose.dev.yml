@@ -48,6 +48,8 @@ services:
       BEHIND_PROXY: "TRUE"
       URL: ""
       SHARED_SECRET: "dev-secret"
+      ADMIN_TOKEN: "dev-admin-token-0123456789abcdef"
+      ADMIN_CONTACT: "dev@example.com"
       S3_BUCKET: "syncryption"
       S3_ACCESS_KEY: "minioadmin"
       S3_SECRET_KEY: "minioadmin"

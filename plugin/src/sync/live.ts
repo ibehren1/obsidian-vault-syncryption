@@ -3,9 +3,12 @@
  * its keyring change, then sync or refresh the locks, and wait again.
  */
 import type { ApiClient } from "../api/client";
+import { ApiError } from "../api/http";
 
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
+/** Cap a server's `Retry-After`, so a wrong value can't stop live updates for long. */
+const MAX_RETRY_AFTER_MS = 600_000;
 
 export interface LiveOptions {
 	api: ApiClient;
@@ -70,7 +73,9 @@ export class LiveLoop {
 			} catch (e) {
 				if (this.stopped) break;
 				this.opts.onError?.(e);
-				await this.pause();
+				// Maintenance (503) and rate limits say when to come back.
+				const retryAfter = e instanceof ApiError && e.retryAfter !== undefined ? e.retryAfter * 1000 : 0;
+				await this.pause(Math.min(retryAfter, MAX_RETRY_AFTER_MS));
 			}
 		}
 	}
@@ -80,7 +85,8 @@ export class LiveLoop {
 		this.woken?.();
 	}
 
-	private async pause(): Promise<void> {
+	/** Back off, for at least `minMs`. */
+	private async pause(minMs = 0): Promise<void> {
 		const sleep = this.opts.sleep ?? ((ms) => new Promise<void>((r) => window.setTimeout(r, ms)));
 		let woken = false;
 		const wake = new Promise<void>((resolve) => {
@@ -89,7 +95,7 @@ export class LiveLoop {
 				resolve();
 			};
 		});
-		await Promise.race([sleep(this.backoff), wake]);
+		await Promise.race([sleep(Math.max(this.backoff, minMs)), wake]);
 		this.woken = null;
 		this.backoff = woken ? MIN_BACKOFF_MS : Math.min(this.backoff * 2, MAX_BACKOFF_MS);
 	}

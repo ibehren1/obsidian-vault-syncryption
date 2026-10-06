@@ -27,13 +27,20 @@ expect_error() {
 	echo "ok refuses to start: $message"
 }
 
+ADMIN=ci-admin-token-0123456789abcdef0
 expect_error "URL is required when BEHIND_PROXY=FALSE" -e SHARED_SECRET=x
 expect_error "SHARED_SECRET is required" -e BEHIND_PROXY=TRUE
+expect_error "ADMIN_TOKEN is required" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x
+expect_error "ADMIN_TOKEN must be at least 32" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=short
 expect_error "set all of S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY or none" \
-	-e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e S3_BUCKET=b
-expect_error "MIGRATE_TO_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e MIGRATE_TO_S3=TRUE
+	-e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=$ADMIN -e S3_BUCKET=b
+expect_error "MIGRATE_TO_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=$ADMIN \
+	-e MIGRATE_TO_S3=TRUE
+expect_error "ADMIN_CONTACT must be a single line" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x \
+	-e ADMIN_TOKEN=$ADMIN -e "ADMIN_CONTACT=$(printf 'a\tb')"
 
-docker run -d --name "$NAME" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=ci-secret "$IMAGE" >/dev/null
+docker run -d --name "$NAME" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=ci-secret -e ADMIN_TOKEN=$ADMIN \
+	-e "ADMIN_CONTACT=ops@example.com" "$IMAGE" >/dev/null
 for _ in $(seq 30); do
 	if docker exec "$NAME" python -m syncryption_server health; then
 		break
@@ -49,7 +56,7 @@ echo "ok BEHIND_PROXY=TRUE serves /health over HTTP on 8080"
 docker cp tests "$NAME":/tmp/tests
 docker cp ../testvectors "$NAME":/testvectors
 docker exec -w /tmp -e SYNCRYPTION_URL=http://127.0.0.1:8080 -e SYNCRYPTION_SECRET=ci-secret \
-	"$NAME" python -m tests.test_container
+	-e SYNCRYPTION_ADMIN_TOKEN=$ADMIN "$NAME" python -m tests.test_container
 
 docker stop "$NAME" >/dev/null
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$NAME")" = 0 ] || fail "docker stop didn't exit cleanly"

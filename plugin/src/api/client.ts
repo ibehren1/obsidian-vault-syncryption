@@ -23,9 +23,10 @@ export type WaitResponse = Schemas["WaitResponse"];
 export type Lock = Schemas["Lock"];
 export type Locks = Schemas["Locks"];
 
-/** The server major version this client speaks (protocol.md 13). */
-export const SERVER_MAJOR = 0;
+/** The API protocol this client speaks (protocol.md 13), independent of the server's version. */
+export const PROTOCOL_VERSION = 1;
 export const VERSION_HEADER = "x-syncryption-version";
+export const PROTOCOL_HEADER = "x-syncryption-protocol";
 
 export interface Identity {
 	username: string;
@@ -300,11 +301,14 @@ function checkServerVersion(response: HttpResponse): void {
 	if (version === undefined) {
 		throw new NetworkError("The endpoint didn't answer like a Vault Syncryption server.");
 	}
-	if (Number(version.split(".")[0]) !== SERVER_MAJOR) {
+	// Servers before 0.1.1 don't send the protocol header.
+	const protocol = Number(response.headers[PROTOCOL_HEADER] ?? 0);
+	if (protocol !== PROTOCOL_VERSION) {
+		const update = protocol < PROTOCOL_VERSION ? "the server" : "the plugin";
 		throw new ApiError(
 			0,
 			"version_mismatch",
-			`The server runs Vault Syncryption ${version}, which this plugin doesn't support. Update the plugin or the server.`,
+			`The server runs Vault Syncryption ${version}, which this plugin doesn't support. Update ${update}.`,
 		);
 	}
 }

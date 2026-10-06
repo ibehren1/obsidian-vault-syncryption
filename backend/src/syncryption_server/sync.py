@@ -280,12 +280,16 @@ async def wait(
     def changed() -> bool:
         row = current()
         return (
-            row["seq"] > since
+            state.maintenance is not None
+            or row["seq"] > since
             or row["locks_seq"] > locksSince
             or (keyringSince is not None and row["keyring_version"] > keyringSince)
         )
 
     moved = await state.notifier.wait(vault_id, caller.device_id, changed, timeout)
+    # Maintenance started while waiting: answer with its 503 now (protocol.md 14.1).
+    if (err := state.maintenance_error()) is not None:
+        raise err
     row = current()
     return WaitResponse(
         seq=row["seq"],

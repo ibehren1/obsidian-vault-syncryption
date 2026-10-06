@@ -15,7 +15,7 @@ open, and the manual checks to run on a real iPhone and Android phone.
   It is kept, warned about once, and tried again on every sync.
 - "Show sync status" command, since the status bar isn't shown on mobile.
 - Copy buttons handle a refused clipboard; the recovery key text can be selected on iOS.
-- Key, secret and recovery key fields turn off autocapitalize, autocorrect and spellcheck.
+- Encryption key, secret and recovery key fields turn off autocapitalize, autocorrect and spellcheck.
 
 ## Known limitations
 - **Large files:** a file is read, hashed, encrypted and decrypted whole, on the main
@@ -29,7 +29,7 @@ open, and the manual checks to run on a real iPhone and Android phone.
   conflict copies and "is editing" notices ambiguous with several phones.
 - **Scans:** every sync scans the vault and the config folders (one `stat` per config
   file), which costs battery on large vaults.
-- **Passphrase keys** ask for the passphrase on every cold start, and iOS restarts apps
+- **Encryption keys with a passphrase** ask for the passphrase on every cold start, and iOS restarts apps
   often. A key without a passphrase (kept in SecretStorage) avoids this.
 
 ## Check on a device
@@ -46,8 +46,8 @@ open, and the manual checks to run on a real iPhone and Android phone.
 ## Manual checklist
 Run on an iPhone and an Android phone, with a desktop as the other device.
 
-1. **Setup:** fresh install, fill in the settings, generate a key, copy the public key.
-   Import a key with a passphrase by pasting it; check nothing gets autocorrected.
+1. **Setup:** fresh install, fill in the settings, generate an encryption key, copy the
+   public key.
 2. **Join:** the shared-secret prompt appears once; check the secret isn't stored in
    `data.json`.
 3. **Pairing:** start pairing, lock the screen for a minute, approve on the desktop,

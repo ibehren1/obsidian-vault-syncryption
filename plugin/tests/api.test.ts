@@ -2,13 +2,13 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { describe, expect, it } from "vitest";
 
 import { ApiClient, checkChallenge, normalizeEndpoint } from "../src/api/client";
-import { ApiError, NetworkError, type HttpResponse, type Transport } from "../src/api/http";
+import { ApiError, disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError, type HttpResponse, type Transport } from "../src/api/http";
 import { fingerprint } from "../src/crypto/openssh";
 import { client, newSeed, noBackend, SHARED_SECRET, uniqueName } from "./harness";
 
-const json = (status: number, body: unknown, version = "0.1.0"): HttpResponse => ({
+const json = (status: number, body: unknown, versions: Record<string, string> = { "x-syncryption-version": "0.1.1", "x-syncryption-protocol": "1" }): HttpResponse => ({
 	status,
-	headers: { "content-type": "application/json", ...(version ? { "x-syncryption-version": version } : {}) },
+	headers: { "content-type": "application/json", ...versions },
 	body: new TextEncoder().encode(JSON.stringify(body)).buffer as ArrayBuffer,
 });
 
@@ -85,9 +85,12 @@ describe("ApiClient without a server", () => {
 		await expect(api.login()).rejects.toMatchObject({ code: "bad_challenge" });
 	});
 
-	it("checks the server version", async () => {
-		await expect(fake(() => json(200, {}, "1.0.0")).login()).rejects.toMatchObject({ code: "version_mismatch" });
-		await expect(fake(() => json(200, {}, "")).login()).rejects.toBeInstanceOf(NetworkError);
+	it("checks the protocol version, not the server version", async () => {
+		const login = (versions: Record<string, string>) => fake(() => json(200, {}, versions)).login();
+		await expect(login({ "x-syncryption-version": "0.1.0" })).rejects.toMatchObject({ code: "version_mismatch", message: expect.stringContaining("Update the server") as unknown });
+		await expect(login({ "x-syncryption-version": "0.2.0", "x-syncryption-protocol": "2" })).rejects.toMatchObject({ code: "version_mismatch", message: expect.stringContaining("Update the plugin") as unknown });
+		await expect(login({ "x-syncryption-version": "7.3.1", "x-syncryption-protocol": "1" })).rejects.not.toMatchObject({ code: "version_mismatch" });
+		await expect(login({})).rejects.toBeInstanceOf(NetworkError);
 	});
 
 	it("turns error bodies and Retry-After into ApiError", async () => {
@@ -103,6 +106,19 @@ describe("ApiClient without a server", () => {
 			details: { a: 1 },
 			retryAfter: 12,
 		});
+	});
+
+	it("turns the maintenance 503 into ApiError maintenance, not a NetworkError", async () => {
+		const details = { adminContact: "ops@example.com", note: "Moving to a new disk.", since: "2026-10-05T10:00:00Z" };
+		const api = fake(() => {
+			const r = json(503, { error: "maintenance", message: "The server is in maintenance, so sync is paused.", details });
+			r.headers["retry-after"] = "60";
+			return r;
+		});
+		const error = await api.login().catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ApiError);
+		expect(error).toMatchObject({ status: 503, code: "maintenance", details, retryAfter: 60 });
+		expect(isMaintenance(error)).toBe(true);
 	});
 
 	it("reports an unreachable server as a NetworkError", async () => {
@@ -124,6 +140,42 @@ describe("ApiClient without a server", () => {
 			timeoutMs: 20,
 		});
 		await expect(api.login()).rejects.toBeInstanceOf(NetworkError);
+	});
+});
+
+describe("isDisabled", () => {
+	it("is true only for the admin's 403s", () => {
+		expect(isDisabled(new ApiError(403, "user_disabled", "x"))).toBe(true);
+		expect(isDisabled(new ApiError(403, "vault_disabled", "x"))).toBe(true);
+		expect(isDisabled(new ApiError(403, "device_pending", "x"))).toBe(false);
+		expect(isDisabled(new NetworkError("x"))).toBe(false);
+	});
+});
+
+describe("maintenance and disabled texts", () => {
+	const base = "The server is in maintenance, so sync is paused. It resumes by itself.";
+
+	it("isMaintenance is true only for the maintenance error", () => {
+		expect(isMaintenance(new ApiError(503, "maintenance", "x"))).toBe(true);
+		expect(isMaintenance(new ApiError(503, "http_503", "x"))).toBe(false);
+		expect(isMaintenance(new NetworkError("x"))).toBe(false);
+	});
+
+	it("builds the maintenance text from the parts the server sent", () => {
+		expect(maintenanceText({ note: "Back at 14:00", adminContact: "ops@example.com" })).toBe(
+			`${base} Back at 14:00. For help, contact the server admin: ops@example.com.`,
+		);
+		expect(maintenanceText({ note: null, adminContact: "Ann in #it." })).toBe(`${base} For help, contact the server admin: Ann in #it.`);
+		expect(maintenanceText({ note: "New disk!", since: "2026-10-05T10:00:00Z" })).toBe(`${base} New disk! For help or info, contact your server admin.`);
+		expect(maintenanceText({ note: "  ", adminContact: null })).toBe(`${base} For help or info, contact your server admin.`);
+		expect(maintenanceText({})).toBe(`${base} For help or info, contact your server admin.`);
+	});
+
+	it("adds the admin contact to disabled errors", () => {
+		expect(disabledText(new ApiError(403, "user_disabled", "This user is disabled."))).toBe("This user is disabled.");
+		expect(disabledText(new ApiError(403, "vault_disabled", "This vault is disabled", { adminContact: "ops@example.com" }))).toBe(
+			"This vault is disabled. Contact the server admin: ops@example.com.",
+		);
 	});
 });
 

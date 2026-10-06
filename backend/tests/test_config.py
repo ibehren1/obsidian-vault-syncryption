@@ -4,7 +4,8 @@ import pytest
 
 from syncryption_server.config import ConfigError, load_settings
 
-BASE = {"SHARED_SECRET": "s", "URL": "https://Notes.Example.com/"}
+ADMIN = {"ADMIN_TOKEN": "t" * 32}
+BASE = {"SHARED_SECRET": "s", **ADMIN, "URL": "https://Notes.Example.com/"}
 
 
 def test_defaults():
@@ -14,14 +15,18 @@ def test_defaults():
     assert s.s3 is None
     assert s.migrate_to_s3 is False
     assert s.data_dir == Path("/data")
+    assert s.admin_token == "t" * 32
+    assert s.admin_contact == ""
 
 
 @pytest.mark.parametrize(
     ("env", "message"),
     [
-        ({"SHARED_SECRET": "s"}, "URL is required"),
-        ({"SHARED_SECRET": "s", "BEHIND_PROXY": "FALSE"}, "URL is required"),
-        ({"URL": "https://a.example"}, "SHARED_SECRET is required"),
+        ({"SHARED_SECRET": "s", **ADMIN}, "URL is required"),
+        ({"SHARED_SECRET": "s", **ADMIN, "BEHIND_PROXY": "FALSE"}, "URL is required"),
+        ({"URL": "https://a.example", **ADMIN}, "SHARED_SECRET is required"),
+        ({**BASE, "ADMIN_TOKEN": ""}, "ADMIN_TOKEN is required"),
+        ({**BASE, "ADMIN_TOKEN": "t" * 31}, "ADMIN_TOKEN must be at least 32"),
         ({**BASE, "SHARED_SECRET": "  "}, "SHARED_SECRET is required"),
         ({**BASE, "BEHIND_PROXY": "yes"}, "BEHIND_PROXY must be TRUE or FALSE"),
         ({**BASE, "URL": "ftp://a.example"}, "URL must look like"),
@@ -29,6 +34,9 @@ def test_defaults():
         ({**BASE, "S3_BUCKET": "b"}, "S3_ACCESS_KEY, S3_SECRET_KEY empty"),
         ({**BASE, "S3_BUCKET": "b", "S3_ACCESS_KEY": "k"}, "S3_SECRET_KEY empty"),
         ({**BASE, "MIGRATE_TO_S3": "TRUE"}, "MIGRATE_TO_S3=TRUE needs"),
+        ({**BASE, "ADMIN_CONTACT": "x" * 501}, "ADMIN_CONTACT must be at most 500"),
+        ({**BASE, "ADMIN_CONTACT": "a\nb"}, "ADMIN_CONTACT must be a single line"),
+        ({**BASE, "ADMIN_CONTACT": "a\tb"}, "ADMIN_CONTACT must be a single line"),
         ({**BASE, "S3_ENDPOINT": "https://s3.example.com"}, "S3_ENDPOINT needs"),
         (
             {
@@ -48,7 +56,7 @@ def test_invalid(env, message):
 
 
 def test_behind_proxy_without_url():
-    s = load_settings({"SHARED_SECRET": "s", "BEHIND_PROXY": "true"})
+    s = load_settings({"SHARED_SECRET": "s", **ADMIN, "BEHIND_PROXY": "true"})
     assert s.behind_proxy is True
     assert s.url is None
 
@@ -86,3 +94,9 @@ def test_s3_endpoint():
         }
     )
     assert s.s3.endpoint_url == "https://minio.example.com:9000"
+
+
+def test_admin_contact():
+    s = load_settings({**BASE, "ADMIN_CONTACT": "  Ops <ops@example.com>, #help on Slack \n"})
+    assert s.admin_contact == "Ops <ops@example.com>, #help on Slack"
+    assert load_settings({**BASE, "ADMIN_CONTACT": "é" * 500}).admin_contact == "é" * 500

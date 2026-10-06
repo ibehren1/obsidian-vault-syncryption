@@ -1,9 +1,10 @@
-/** Settings: endpoint, username, vault name, the device key and the exclude list (docs/PLAN.md). */
+/** Settings: endpoint, username, vault name, device name, the device key and the exclude list (docs/PLAN.md). */
 import { App, Notice, Platform, PluginSettingTab, type Setting, type SettingDefinition, type SettingDefinitionGroup, type SettingDefinitionItem } from "obsidian";
 
 import { normalizeEndpoint } from "./api/client";
-import { fingerprint, generateDeviceKey, isEncryptedOpenSshKey, parseOpenSshPrivateKey, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey } from "./crypto/openssh";
-import { saveKeyText, secretId, unlockKey } from "./keys";
+import { cleanDeviceName, defaultDeviceName, desktopHostname } from "./device";
+import { fingerprint, generateDeviceKey, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey } from "./crypto/openssh";
+import { saveKeyText, secretId } from "./keys";
 import type SyncryptionPlugin from "./main";
 import { ConfirmModal, prompt } from "./ui/modals";
 
@@ -11,6 +12,8 @@ export interface SyncryptionSettings {
 	endpoint: string;
 	username: string;
 	vaultName: string;
+	/** A friendly name for this installation. Starts as the hostname; data.json isn't synced. */
+	deviceName: string;
 	/** The SecretStorage id of the private key. The key itself is never stored here. */
 	keyId: string;
 	/** OpenSSH public key text, to show and copy. */
@@ -23,6 +26,7 @@ export const DEFAULT_SETTINGS: SyncryptionSettings = {
 	endpoint: "",
 	username: "",
 	vaultName: "",
+	deviceName: "",
 	keyId: "",
 	publicKey: "",
 	exclude: "",
@@ -30,6 +34,11 @@ export const DEFAULT_SETTINGS: SyncryptionSettings = {
 
 export function isConfigured(s: SyncryptionSettings): boolean {
 	return s.endpoint !== "" && s.username !== "" && s.vaultName !== "" && s.keyId !== "";
+}
+
+/** The hostname on desktop, else a platform name such as "iPhone". */
+export function initialDeviceName(): string {
+	return defaultDeviceName(Platform, desktopHostname(Platform));
 }
 
 export class SyncryptionSettingTab extends PluginSettingTab {
@@ -64,7 +73,7 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 				desc: "The vault on the server. Use the same name on every device that syncs this vault.",
 				control: { type: "text", key: "vaultName" },
 			},
-			{ name: "SSH key", aliases: ["Ed25519", "Import", "Generate"], render: (setting) => this.renderKey(setting) },
+			{ name: "Encryption key", aliases: ["SSH", "SSH key", "Ed25519", "Private key", "Generate"], render: (setting) => this.renderKey(setting) },
 			{
 				name: "Excluded paths",
 				desc: "Files and folders this device doesn't sync, one per line. Use * to match within a folder name and ** to match across folders, for example *.mp4.",
@@ -111,6 +120,7 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 		const text = typeof value === "string" ? value : "";
 		if (key === "exclude") settings.exclude = text;
 		else if (key === "endpoint" || key === "username" || key === "vaultName") settings[key] = text.trim();
+		else if (key === "deviceName") settings.deviceName = cleanDeviceName(text) || initialDeviceName();
 		else return;
 		await this.plugin.saveSettings();
 		if (key === "exclude") this.plugin.updateExcludes();
@@ -131,10 +141,9 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 				}),
 			);
 		} else {
-			setting.setDesc("Generate a key for this device, or import an SSH key (type ed25519) you already use with this account.");
+			setting.setDesc("Generate an encryption key for this device. Each device has its own key, and a device that already syncs the vault approves it.");
 		}
 		setting.addButton((b) => b.setButtonText("Generate").onClick(() => this.generate()));
-		setting.addButton((b) => b.setButtonText("Import").onClick(() => this.import()));
 	}
 
 	private devices(): SettingDefinitionGroup {
@@ -234,9 +243,9 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 	private async confirmReplace(): Promise<boolean> {
 		if (!this.plugin.settings.publicKey) return true;
 		const answer = await prompt(this.app, {
-			title: "Replace the SSH key?",
+			title: "Replace the encryption key?",
 			description:
-				"This device will use the new key. Unless the key is already known to the server, it must join and be approved again. Type REPLACE to continue.",
+				"This device will use a new key, so it must join and be approved again. Type REPLACE to continue.",
 			label: "Confirm",
 			submit: "Replace",
 		});
@@ -250,36 +259,13 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 		await this.store(id, writeOpenSshPrivateKey(key.seed, { comment: key.comment }), publicKeyText(key.publicKey, key.comment));
 	}
 
-	private async import(): Promise<void> {
-		const id = this.keySlot();
-		if (id === null) return;
-		const pem = await prompt(this.app, {
-			title: "Import an SSH key",
-			description: "Paste an OpenSSH Ed25519 private key (the contents of a file like ~/.ssh/id_ed25519). It is stored only in Obsidian's secret storage.",
-			label: "Private key",
-			multiline: true,
-			submit: "Import",
-		});
-		if (pem === null || !(await this.confirmReplace())) return;
-		try {
-			const key = isEncryptedOpenSshKey(pem)
-				? await unlockKey(pem, (retry) => this.plugin.askPassphrase(retry))
-				: parseOpenSshPrivateKey(pem);
-			if (key === null) return;
-			// Stored as imported, with its passphrase if it has one (crypto.md 3.3).
-			await this.store(id, pem.trim() + "\n", publicKeyText(key.publicKey, key.comment));
-		} catch (e) {
-			new Notice(e instanceof Error ? e.message : "The key couldn't be imported.");
-		}
-	}
-
 	private async store(id: string, pem: string, publicKey: string): Promise<void> {
 		saveKeyText(this.app, id, pem);
 		this.plugin.settings.keyId = id;
 		this.plugin.settings.publicKey = publicKey;
 		await this.plugin.saveSettings();
 		this.plugin.forgetKey();
-		new Notice("SSH key saved.");
+		new Notice("Encryption key saved.");
 		this.update();
 	}
 }

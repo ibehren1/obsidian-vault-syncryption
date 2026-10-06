@@ -2,22 +2,35 @@
 
 import asyncio
 import contextlib
+import html
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from syncryption_server import __version__, auth, blobs, devices, locks, sync, vaults
+from syncryption_server import (
+    PROTOCOL_VERSION,
+    __version__,
+    admin,
+    auth,
+    blobs,
+    devices,
+    locks,
+    sync,
+    vaults,
+)
 from syncryption_server.config import Settings, load_settings
 from syncryption_server.db import Database
-from syncryption_server.errors import install_error_handlers, too_large
-from syncryption_server.state import AppState
+from syncryption_server.encoding import rfc3339
+from syncryption_server.errors import error_response, install_error_handlers, too_large
+from syncryption_server.state import AppState, load_maintenance
 from syncryption_server.storage import BlobStore, LocalBlobStore, S3BlobStore
 
 VERSION_HEADER = "X-Syncryption-Version"
+PROTOCOL_HEADER = "X-Syncryption-Protocol"
 GC_INTERVAL = 3600
 # Request bodies other than blob uploads: the largest is a keyring upload (1 MiB, base64).
 MAX_BODY_SIZE = 2 * 1024 * 1024
@@ -67,6 +80,38 @@ class BodyLimit:
         await JSONResponse(body, status_code=err.status)(scope, receive, send)
 
 
+def home_page(state: AppState, origin: str) -> HTMLResponse:
+    """The page at `/`, for people who open the server's URL in a browser. It names no
+    secret: the shared secret comes from the administrator."""
+    contact = state.settings.admin_contact
+    m = state.maintenance
+    if m is None:
+        status = '<p class="notice">Status: ok</p>'
+    else:
+        status = (
+            '<p class="notice error">Status: maintenance since '
+            f"{html.escape(rfc3339(m.since))}. Sync is paused until maintenance ends.</p>"
+        )
+        if m.message:
+            status += f"<p>Message from the administrator: {html.escape(m.message)}</p>"
+    body = (
+        f"<h1>Vault Syncryption server {html.escape(__version__)}</h1>"
+        "<p>Self-hosted, end-to-end encrypted sync for Obsidian. Notes are encrypted on "
+        "your devices; this server stores only ciphertext.</p>"
+        f"{status}"
+        "<h2>Connecting</h2><ol>"
+        "<li>Install the Vault Syncryption plugin in Obsidian.</li>"
+        f"<li>Enter this server's URL (<code>{html.escape(origin)}</code>), a username and "
+        "a vault name, and create an encryption key.</li>"
+        "<li>The first time a device joins, you need the server's shared secret: ask the "
+        "server administrator for it.</li></ol>"
+        "<p>Administrator: "
+        + (html.escape(contact) if contact else "contact the person who runs this server.")
+        + "</p>"
+    )
+    return admin.html_page(body, title="Vault Syncryption")
+
+
 def make_blob_store(settings: Settings) -> BlobStore:
     if settings.s3 is not None:
         return S3BlobStore(settings.s3)
@@ -100,6 +145,7 @@ def create_app(
         blob_store = store or make_blob_store(settings)
         await blob_store.start()
         state = AppState(settings=settings, db=db, store=blob_store)
+        state.maintenance = load_maintenance(db)
         if clock is not None:
             state.clock = clock
         app.state.ctx = state
@@ -119,21 +165,44 @@ def create_app(
 
     @app.middleware("http")
     async def add_version_header(request: Request, call_next) -> Response:
-        response = await call_next(request)
+        # Maintenance pauses the sync API only: `/`, `/health` and `/admin` keep working.
+        state: AppState | None = getattr(request.app.state, "ctx", None)
+        path = request.url.path
+        err = state.maintenance_error() if state is not None else None
+        if err is not None and (path == "/api/v1" or path.startswith("/api/v1/")):
+            response: Response = error_response(err)
+        else:
+            response = await call_next(request)
+        # On every response, errors included: the plugin checks the protocol first.
         response.headers[VERSION_HEADER] = __version__
+        response.headers[PROTOCOL_HEADER] = str(PROTOCOL_VERSION)
         return response
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
         state: AppState = request.app.state.ctx
+        m = state.maintenance
+        body = {
+            "status": "ok" if m is None else "maintenance",
+            "version": __version__,
+            "protocol": PROTOCOL_VERSION,
+            "maintenance": None if m is None else {"since": rfc3339(m.since), "message": m.message},
+            "adminContact": state.settings.admin_contact or None,
+        }
         try:
             state.db.ping()
             await state.store.ping()
         except Exception:
             log.exception("health check failed")
-            return JSONResponse({"status": "unavailable", "version": __version__}, status_code=503)
-        return JSONResponse({"status": "ok", "version": __version__})
+            return JSONResponse({**body, "status": "unavailable"}, status_code=503)
+        # Still 200 in maintenance: the container is healthy, only sync is paused.
+        return JSONResponse(body)
 
-    for module in (auth, devices, vaults, blobs, sync, locks):
+    @app.get("/", include_in_schema=False)
+    async def home(request: Request) -> HTMLResponse:
+        state: AppState = request.app.state.ctx
+        return home_page(state, auth.request_origin(request, state))
+
+    for module in (auth, devices, vaults, blobs, sync, locks, admin):
         app.include_router(module.router)
     return app

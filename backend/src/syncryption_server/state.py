@@ -10,7 +10,8 @@ from fastapi import Request
 
 from syncryption_server.config import Settings
 from syncryption_server.db import Database
-from syncryption_server.errors import ApiError
+from syncryption_server.encoding import rfc3339
+from syncryption_server.errors import ApiError, maintenance
 from syncryption_server.storage import BlobStore
 
 
@@ -31,6 +32,11 @@ class RateLimiter:
         for key in [k for k, h in self.hits.items() if not h or h[-1] <= now - self.windows[k]]:
             del self.hits[key]
             del self.windows[key]
+
+    def full(self, key: str, limit: int, window: float) -> bool:
+        """True when `key` already has `limit` hits in the window. Doesn't add a hit."""
+        now = self.clock()
+        return sum(1 for t in self.hits.get(key, ()) if t > now - window) >= limit
 
     def check(self, key: str, limit: int, window: float) -> None:
         self.checks += 1
@@ -77,6 +83,10 @@ class Notifier:
             async with cond:
                 cond.notify_all()
 
+    async def notify_all(self) -> None:
+        for vault_id in list(self.conditions):
+            await self.notify(vault_id)
+
     async def wait(
         self, vault_id: str, device_id: str, changed: Callable[[], bool], seconds: float
     ) -> bool:
@@ -105,6 +115,19 @@ class Notifier:
         return not waiter.kicked and changed()
 
 
+@dataclass(frozen=True)
+class Maintenance:
+    """Maintenance mode, on since `since` (Unix seconds), with the admin's optional note."""
+
+    since: int
+    message: str | None = None
+
+
+def load_maintenance(db: Database) -> Maintenance | None:
+    row = db.one("SELECT since, message FROM maintenance WHERE id = 1")
+    return Maintenance(row["since"], row["message"]) if row else None
+
+
 @dataclass
 class AppState:
     settings: Settings
@@ -113,6 +136,8 @@ class AppState:
     clock: Callable[[], float] = time.time
     notifier: Notifier = field(default_factory=Notifier)
     limiter: RateLimiter = field(init=False)
+    # A copy of the `maintenance` row, so requests don't query it. Only the admin changes it.
+    maintenance: Maintenance | None = None
     # Striped locks so blob upload and garbage collection of the same blob never interleave.
     blob_locks: list[asyncio.Lock] = field(
         default_factory=lambda: [asyncio.Lock() for _ in range(64)]
@@ -126,6 +151,13 @@ class AppState:
 
     def now(self) -> int:
         return int(self.clock())
+
+    def maintenance_error(self) -> ApiError | None:
+        """The 503 every `/api/v1` request gets while maintenance is on, else None."""
+        m = self.maintenance
+        if m is None:
+            return None
+        return maintenance(self.settings.admin_contact, m.message, rfc3339(m.since))
 
 
 async def get_state(request: Request) -> AppState:

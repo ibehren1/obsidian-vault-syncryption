@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ApiClient } from "../src/api/client";
+import { ApiError } from "../src/api/http";
 import { LiveLoop } from "../src/sync/live";
 
 describe("LiveLoop.wake", () => {
@@ -32,5 +33,36 @@ describe("LiveLoop.wake", () => {
 		const stopped = loop.stop();
 		loop.wake();
 		await stopped;
+	});
+});
+
+describe("LiveLoop backoff", () => {
+	it("waits at least the server's Retry-After, as during maintenance", async () => {
+		const maintenance = new ApiError(503, "maintenance", "In maintenance.", {}, 60);
+		const api = { wait: () => Promise.reject(maintenance) } as unknown as ApiClient;
+		const sleeps: number[] = [];
+		const errors: unknown[] = [];
+		let done = (): void => {};
+		const twice = new Promise<void>((r) => (done = r));
+		const loop: LiveLoop = new LiveLoop({
+			api,
+			vaultId: "v",
+			cursor: async () => 0,
+			onChanges: async () => {},
+			onLocks: async () => {},
+			onError: (e) => errors.push(e),
+			sleep: async (ms) => {
+				sleeps.push(ms);
+				if (sleeps.length === 2) {
+					void loop.stop();
+					done();
+				}
+			},
+		});
+		loop.start();
+		await twice;
+		await loop.stop();
+		expect(sleeps).toEqual([60_000, 60_000]);
+		expect(errors[0]).toBe(maintenance);
 	});
 });

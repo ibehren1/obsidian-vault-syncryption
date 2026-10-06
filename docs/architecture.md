@@ -14,7 +14,7 @@ flowchart LR
         crypto["crypto (age, XChaCha)"]
         idb[("IndexedDB state")]
         adapter["vault.adapter (all files)"]
-        secret[("SecretStorage (SSH key)")]
+        secret[("SecretStorage (encryption key)")]
         plugin --- ui & engine
         engine --- crypto & idb & adapter
         crypto --- secret
@@ -43,13 +43,13 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 
 | Module | Responsibility |
 |---|---|
-| `app` | `create_app` factory (lifespan opens the database and blob store), hourly blob GC task, `/health`, version header |
-| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET` |
+| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly blob GC task, `/health`, the HTML `/` page, version headers, the maintenance `503` for `/api/v1` |
+| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors) |
 | `db` | SQLite connection (WAL mode), schema migrations (`PRAGMA user_version`), `BEGIN IMMEDIATE` transaction helper |
 | `errors` | `ApiError` and the handlers that turn every error into the protocol's `{error, message, details}` shape |
 | `encoding` | `b64u`, RFC 3339 times, id formats |
-| `sshkeys` | Ed25519 public-key parsing, fingerprints, pairing codes, sshsig verification |
-| `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks |
+| `sshkeys` | devices' encryption keys (Ed25519 public keys in OpenSSH format): parsing, fingerprints, pairing codes, sshsig verification |
+| `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag |
 | `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens |
 | `devices` | device list, approval, revocation |
 | `vaults` | open/create by name, membership and approval, keyring versions |
@@ -57,6 +57,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `blobs` | blob upload, download and `missing`, and the garbage collector |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
 | `locks` | lease locks and `locksSeq` (M6) |
+| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode) |
 | `migrate` | `MIGRATE_TO_S3` one-shot copy, run by the entrypoint before serving (M3) |
 
 ### 2.1 Data model (SQLite)
@@ -80,6 +81,7 @@ erDiagram
         text id PK
         text username UK
         int created_at
+        int disabled_at "set by the admin page"
     }
     devices {
         text id PK
@@ -111,6 +113,7 @@ erDiagram
         int locks_seq
         int keyring_version
         int created_at
+        int disabled_at "set by the admin page"
     }
     memberships {
         text vault_id PK, FK
@@ -161,9 +164,19 @@ erDiagram
         text client_id
         int expires_at
     }
+    admin_sessions {
+        text token_hash PK
+        text csrf
+        int expires_at
+    }
     join_attempts {
         text ip "rate limiting for SHARED_SECRET failures"
         int at
+    }
+    maintenance {
+        int id PK "always 1: the row exists while maintenance is on"
+        int since
+        text message "shown to users, or null"
     }
 ```
 - Identity (`users`, `devices`, `sessions`) and data (`vaults`, `memberships` and below)
@@ -175,6 +188,8 @@ erDiagram
   which gives a total order per vault without extra locking.
 - Ids are text: UUIDv4 for users and vaults, `d_...` for devices. Times are integer Unix
   seconds.
+- `maintenance` and `admin_sessions` stand alone. The app reads `maintenance` at startup and
+  then keeps it in memory; only the admin routes change it (protocol.md 14.1).
 - There is one `sqlite3` connection and every handler is `async`, so the database is only
   touched from the event loop thread. Nothing is awaited inside a transaction.
 
@@ -203,7 +218,8 @@ class BlobStore(Protocol):
 Each vault has an `asyncio.Condition`. A commit or lock change notifies it after the
 transaction commits. `/wait` re-checks `seq`/`locksSeq` under the condition before
 waiting, so no wake-up is lost. There is one container and one uvicorn worker, so this
-in-process mechanism is enough. Running several workers would need a different
+in-process mechanism is enough. Turning maintenance on notifies every vault's condition,
+and `/wait` then answers with the maintenance `503`. Running several workers would need a different
 notification path and is out of scope.
 
 ## 3. Container (`backend/Dockerfile`, `backend/entrypoint.sh`)
@@ -238,7 +254,8 @@ environment rules live in one place (`config.py`).
    everything down cleanly and exits 0.
 
 The healthcheck runs `python -m syncryption_server health`, a GET of `/health` on the
-local uvicorn port.
+local uvicorn port. It stays `200` during maintenance, so pausing sync never marks the
+container unhealthy.
 
 `backend/container-checks.sh` builds the image, checks that bad environments are refused,
 starts a container behind a proxy, runs `tests/test_container.py` inside it, and checks a
@@ -248,7 +265,7 @@ clean stop. CI runs it in the `container` job.
 | Module | Responsibility |
 |---|---|
 | `main` | plugin lifecycle, commands, status bar, event wiring |
-| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, key import/generate (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval and reload dialogs, file history and restore |
+| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval and reload dialogs, file history and restore |
 | `obsidian` | `requestUrl` transport, and the `VaultFs` over the Vault API |
 | `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects |
 | `api` | typed client over a `Transport` (`requestUrl` in the plugin, `fetch` in tests). `src/api/schema.ts` is generated from the server's OpenAPI with `npm run api-types` (CI checks it is current) |

@@ -7,7 +7,7 @@ from moto.server import ThreadedMotoServer
 
 from syncryption_server.app import create_app
 from syncryption_server.config import S3Settings, Settings
-from tests.helpers import SECRET, Device
+from tests.helpers import ADMIN_TOKEN, SECRET, Device
 
 
 class FakeClock:
@@ -28,7 +28,12 @@ def clock() -> FakeClock:
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    return Settings(shared_secret=SECRET, url="https://notes.example.com", data_dir=tmp_path)
+    return Settings(
+        shared_secret=SECRET,
+        admin_token=ADMIN_TOKEN,
+        url="https://notes.example.com",
+        data_dir=tmp_path,
+    )
 
 
 @pytest.fixture

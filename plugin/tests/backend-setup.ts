@@ -49,6 +49,7 @@ export default async function setup(project: TestProject): Promise<() => void> {
 			env: {
 				...process.env,
 				SHARED_SECRET,
+				ADMIN_TOKEN: "test-admin-token-0123456789abcdef",
 				BEHIND_PROXY: "TRUE",
 				SYNCRYPTION_DATA_DIR: dataDir,
 			},

@@ -125,6 +125,24 @@ MIGRATIONS: list[str] = [
     ALTER TABLE keyrings ADD COLUMN recovery_signer TEXT;
     ALTER TABLE keyrings ADD COLUMN by_recovery INTEGER NOT NULL DEFAULT 0;
     """,
+    # 3: the admin page (protocol.md 14): disabled users and vaults, browser sessions
+    """
+    ALTER TABLE users ADD COLUMN disabled_at INTEGER;
+    ALTER TABLE vaults ADD COLUMN disabled_at INTEGER;
+    CREATE TABLE admin_sessions (
+        token_hash TEXT PRIMARY KEY,
+        csrf TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+    );
+    """,
+    # 4: maintenance mode (protocol.md 14.1): one row while it is on
+    """
+    CREATE TABLE maintenance (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        since INTEGER NOT NULL,
+        message TEXT
+    );
+    """,
 ]
 
 

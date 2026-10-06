@@ -1,14 +1,14 @@
-import { debounce, Notice, Platform, Plugin, requireApiVersion, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
+import { debounce, Notice, Plugin, requireApiVersion, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
 
 import { ApiClient } from "./api/client";
-import { NetworkError } from "./api/http";
+import { disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError } from "./api/http";
 import { hasSecretStorage, MIN_APP_VERSION } from "./compat";
 import { generateRecoveryKey } from "./crypto/keyring";
 import type { OpenSshKey } from "./crypto/openssh";
 import { loadKeyText, unlockKey } from "./keys";
 import { requestUrlTransport } from "./obsidian/transport";
 import { ObsidianFs } from "./obsidian/fs";
-import { DEFAULT_SETTINGS, isConfigured, SyncryptionSettingTab, type SyncryptionSettings } from "./settings";
+import { DEFAULT_SETTINGS, initialDeviceName, isConfigured, SyncryptionSettingTab, type SyncryptionSettings } from "./settings";
 import { IndexedDbStore } from "./store/idb";
 import { AdapterFs, isHiddenPath, SplitFs } from "./sync/adapter-fs";
 import { VaultCipher } from "./sync/cipher";
@@ -29,8 +29,10 @@ const INSTALL_ID = "syncryption-install-id";
 const CLIENT_ID = "syncryption-client-id";
 /** Store meta: the recovery key was offered after creating the vault. */
 const RECOVERY_OFFERED = "recoveryOffered";
+/** Maintenance: retry after the server's `Retry-After`, within these bounds (seconds). */
+const MAINTENANCE_RETRY_S = { default: 60, min: 5, max: 600 };
 
-type State = "off" | "connecting" | "idle" | "syncing" | "offline" | "error";
+type State = "off" | "connecting" | "idle" | "syncing" | "offline" | "maintenance" | "error";
 
 /** Undocumented: fired for every change on disk, including the hidden config folder. */
 interface RawEvents {
@@ -63,7 +65,18 @@ export default class SyncryptionPlugin extends Plugin {
 	private lockBar: HTMLElement | null = null;
 	/** The path last warned about, so reopening the same note doesn't warn again. */
 	private warnedLock: string | null = null;
-	private readonly scheduleSync = debounce(() => void this.syncNow(), CHANGE_DELAY_MS, true);
+	/** The retry while the server is in maintenance, and when it is due. */
+	private retryTimer = 0;
+	private retryAt = 0;
+	/** The maintenance notice was shown: once per maintenance period, not on every retry. */
+	private maintenanceNoticed = false;
+	private readonly scheduleSync = debounce(
+		() => {
+			if (!this.paused()) void this.syncNow();
+		},
+		CHANGE_DELAY_MS,
+		true,
+	);
 
 	override async onload(): Promise<void> {
 		if (!requireApiVersion(MIN_APP_VERSION) || !hasSecretStorage(this.app)) {
@@ -75,6 +88,7 @@ export default class SyncryptionPlugin extends Plugin {
 		this.statusBar = this.addStatusBarItem();
 		this.lockBar = this.addStatusBarItem();
 		this.render();
+		this.register(() => window.clearTimeout(this.retryTimer));
 
 		this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.syncNow(true) });
 		this.addCommand({ id: "connect", name: "Connect again", callback: () => void this.restart() });
@@ -151,6 +165,10 @@ export default class SyncryptionPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		this.settings = { ...DEFAULT_SETTINGS, ...((await this.loadData()) as Partial<SyncryptionSettings> | null) };
+		if (this.settings.deviceName === "") {
+			this.settings.deviceName = initialDeviceName();
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings(): Promise<void> {
@@ -176,10 +194,11 @@ export default class SyncryptionPlugin extends Plugin {
 		this.key = null;
 	}
 
-	askPassphrase(retry: boolean): Promise<string | null> {
+	/** Only keys imported by plugin versions before 0.1.3 can have a passphrase. */
+	private askPassphrase(retry: boolean): Promise<string | null> {
 		return prompt(this.app, {
-			title: "Unlock the SSH key",
-			description: retry ? "Wrong passphrase. Try again." : "This SSH key is protected with a passphrase.",
+			title: "Unlock the encryption key",
+			description: retry ? "Wrong passphrase. Try again." : "This encryption key is protected with a passphrase.",
 			label: "Passphrase",
 			password: true,
 			submit: "Unlock",
@@ -198,6 +217,7 @@ export default class SyncryptionPlugin extends Plugin {
 				return this.syncedText();
 			case "offline":
 				return `Offline. ${this.detail}`;
+			case "maintenance":
 			case "error":
 				return this.detail;
 		}
@@ -206,7 +226,7 @@ export default class SyncryptionPlugin extends Plugin {
 	async restart(): Promise<void> {
 		this.stop();
 		if (!isConfigured(this.settings)) {
-			new Notice("Fill in the server URL, username, vault name and SSH key first.");
+			new Notice("Fill in the server URL, username, vault name and encryption key first.");
 			return;
 		}
 		await this.start();
@@ -236,7 +256,7 @@ export default class SyncryptionPlugin extends Plugin {
 		try {
 			const key = await this.unlock();
 			if (key === null) throw new SetupCancelled();
-			const deviceName = defaultDeviceName();
+			const deviceName = this.settings.deviceName;
 			const api = new ApiClient({
 				endpoint: this.settings.endpoint,
 				identity: { username: this.settings.username, seed: key.seed },
@@ -378,7 +398,7 @@ export default class SyncryptionPlugin extends Plugin {
 	private async unlock(): Promise<OpenSshKey | null> {
 		if (this.key) return this.key;
 		const pem = loadKeyText(this.app, this.settings.keyId);
-		if (pem === null) throw new Error("The SSH key is missing from this device's secret storage. Import or generate it again.");
+		if (pem === null) throw new Error("The encryption key is missing from this device's secret storage. Generate a new one in the settings.");
 		this.key = await unlockKey(pem, (retry) => this.askPassphrase(retry));
 		return this.key;
 	}
@@ -392,10 +412,35 @@ export default class SyncryptionPlugin extends Plugin {
 		return id;
 	}
 
-	/** Sync, or connect again if the last attempt failed for want of a network. */
+	/** Sync, or connect again if the last attempt failed for want of a network or for maintenance. */
 	private tick(): void {
+		if (this.paused()) return;
 		if (this.engine) void this.syncNow();
-		else if (this.state === "offline" && isConfigured(this.settings)) void this.start();
+		else if ((this.state === "offline" || this.state === "maintenance") && isConfigured(this.settings)) void this.start();
+	}
+
+	/** In maintenance, background syncs wait for the retry the server asked for. */
+	private paused(): boolean {
+		return this.state === "maintenance" && Date.now() < this.retryAt;
+	}
+
+	/** Try again after `seconds` (the server's `Retry-After`), through `tick`. */
+	private scheduleRetry(seconds: number | undefined): void {
+		const { min, max } = MAINTENANCE_RETRY_S;
+		const ms = Math.min(Math.max(seconds ?? MAINTENANCE_RETRY_S.default, min), max) * 1000;
+		this.clearRetry();
+		this.retryAt = Date.now() + ms;
+		this.retryTimer = window.setTimeout(() => {
+			this.retryTimer = 0;
+			this.retryAt = 0;
+			this.tick();
+		}, ms);
+	}
+
+	private clearRetry(): void {
+		window.clearTimeout(this.retryTimer);
+		this.retryTimer = 0;
+		this.retryAt = 0;
 	}
 
 	private noteChange(path: string): void {
@@ -421,7 +466,7 @@ export default class SyncryptionPlugin extends Plugin {
 			this.announce(report);
 			await this.checkApprovals();
 		} catch (e) {
-			if (this.engine === engine) this.fail(e);
+			if (this.engine === engine) this.fail(e, manual);
 		}
 	}
 
@@ -492,7 +537,7 @@ export default class SyncryptionPlugin extends Plugin {
 			];
 			new ApproveModal(this.app, items).open();
 		} catch (e) {
-			this.fail(e);
+			this.fail(e, true);
 		}
 	}
 
@@ -517,7 +562,7 @@ export default class SyncryptionPlugin extends Plugin {
 		try {
 			await session.setRecovery(key);
 		} catch (e) {
-			this.fail(e);
+			this.fail(e, true);
 			return false;
 		}
 		new Notice("Recovery key set.");
@@ -530,7 +575,7 @@ export default class SyncryptionPlugin extends Plugin {
 		try {
 			await session.setRecovery(undefined);
 		} catch (e) {
-			this.fail(e);
+			this.fail(e, true);
 			return false;
 		}
 		new Notice("Recovery key removed.");
@@ -559,7 +604,7 @@ export default class SyncryptionPlugin extends Plugin {
 		try {
 			await session.removeDevice(id, everywhere);
 		} catch (e) {
-			this.fail(e);
+			this.fail(e, true);
 			return false;
 		}
 		new Notice(`${name} was removed. Files are re-encrypted with a new key in the background.`);
@@ -594,14 +639,16 @@ export default class SyncryptionPlugin extends Plugin {
 		}).open();
 	}
 
-	/** Offer a recovery key once, when this device has just created the vault. */
+	/**
+	 * Offer a recovery key once per device while the vault has none. Device keys can't be
+	 * exported, so it is the only way back in when every device is lost.
+	 */
 	private async offerRecoveryKey(session: VaultSession): Promise<void> {
-		const k = session.keyring;
-		if (k.version !== 1 || k.recovery !== undefined || (await session.store.getMeta(RECOVERY_OFFERED))) return;
+		if (session.keyring.recovery !== undefined || (await session.store.getMeta(RECOVERY_OFFERED))) return;
 		await session.store.setMeta(RECOVERY_OFFERED, true);
 		new ConfirmModal(this.app, {
 			title: "Create a recovery key?",
-			text: "If you lose every device of this vault, a recovery key is the only way to read it again. You can also create one later in the settings.",
+			text: "This vault has no recovery key. Each device's encryption key stays on that device, so if you lose every device of this vault, a recovery key is the only way to read it again. You can also create one later in the settings.",
 			confirm: "Create recovery key",
 			cancel: "Not now",
 			onConfirm: () => void this.createRecoveryKey(),
@@ -643,22 +690,41 @@ export default class SyncryptionPlugin extends Plugin {
 		};
 	}
 
-	private fail(e: unknown): void {
+	/** Report a failure. `userAction`: the user asked for it, so always show a notice. */
+	private fail(e: unknown, userAction = false): void {
 		if (e instanceof NetworkError) {
 			this.detail = e.message;
 			this.setState("offline");
 			return;
 		}
-		const message = e instanceof Error ? e.message : "Sync failed.";
+		if (isMaintenance(e)) {
+			// A pause, not an error: keep the session and try again when the server says.
+			this.detail = maintenanceText(e.details);
+			this.setState("maintenance");
+			this.scheduleRetry(e.retryAfter);
+			if (!this.maintenanceNoticed || userAction) new Notice(`Sync: ${this.detail}`, 10_000);
+			this.maintenanceNoticed = true;
+			return;
+		}
+		let message = e instanceof Error ? e.message : "Sync failed.";
+		if (isDisabled(e)) {
+			message = disabledText(e);
+			this.stop(); // until the user reconnects
+		}
 		// Syncs retry on every wake-up and timer tick: show each error once, not on every retry.
 		const repeated = this.lastError === message;
 		this.lastError = message;
 		this.detail = message;
 		this.setState("error");
-		if (!repeated) new Notice(`Sync: ${message}`);
+		if (!repeated || userAction) new Notice(`Sync: ${message}`);
 	}
 
 	private setState(state: State): void {
+		if (state !== "maintenance" && state !== "syncing" && state !== "connecting") {
+			// Back from maintenance (or stopped): no retry pending, notice again next time.
+			this.clearRetry();
+			if (state === "idle" || state === "off") this.maintenanceNoticed = false;
+		}
 		this.state = state;
 		this.render();
 	}
@@ -671,6 +737,7 @@ export default class SyncryptionPlugin extends Plugin {
 			syncing: "Vault Syncryption: syncing",
 			idle: this.fileCount === null ? "Vault Syncryption: synced" : `Vault Syncryption: ${plural(this.fileCount, "file")} synced`,
 			offline: "Vault Syncryption: offline",
+			maintenance: "Vault Syncryption: maintenance",
 			error: "Vault Syncryption: error",
 		};
 		this.statusBar.setText(label[this.state]);
@@ -680,13 +747,4 @@ export default class SyncryptionPlugin extends Plugin {
 
 function plural(n: number, word: string): string {
 	return `${n} ${word}${n === 1 ? "" : "s"}`;
-}
-
-function defaultDeviceName(): string {
-	if (Platform.isIosApp) return "iOS";
-	if (Platform.isAndroidApp) return "Android";
-	if (Platform.isMacOS) return "Mac";
-	if (Platform.isWin) return "Windows";
-	if (Platform.isLinux) return "Linux";
-	return "Obsidian";
 }

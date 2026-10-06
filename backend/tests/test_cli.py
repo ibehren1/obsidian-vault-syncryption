@@ -4,14 +4,22 @@ import pytest
 
 from syncryption_server.__main__ import main
 
-BASE = {"SHARED_SECRET": "very-secret", "URL": "https://notes.example.com"}
+ADMIN = "admin-token-" + "f" * 32
+BASE = {"SHARED_SECRET": "very-secret", "ADMIN_TOKEN": ADMIN, "URL": "https://notes.example.com"}
 S3 = {"S3_BUCKET": "bucket", "S3_ACCESS_KEY": "AKIA-key", "S3_SECRET_KEY": "s3-secret"}
 
 
 @pytest.fixture
 def env(monkeypatch):
     def set_env(values):
-        for name in ("BEHIND_PROXY", "URL", "SHARED_SECRET", "MIGRATE_TO_S3", "S3_ENDPOINT"):
+        for name in (
+            "BEHIND_PROXY",
+            "URL",
+            "SHARED_SECRET",
+            "ADMIN_TOKEN",
+            "MIGRATE_TO_S3",
+            "S3_ENDPOINT",
+        ):
             monkeypatch.delenv(name, raising=False)
         for name in S3:
             monkeypatch.delenv(name, raising=False)
@@ -22,7 +30,7 @@ def env(monkeypatch):
 
 
 def test_check_reports_errors(env, capsys):
-    env({"SHARED_SECRET": "x"})
+    env({"SHARED_SECRET": "x", "ADMIN_TOKEN": ADMIN})
     assert main(["check"]) == 1
     assert "URL is required" in capsys.readouterr().err
 
@@ -32,7 +40,7 @@ def test_check_never_prints_secrets(env, capsys):
     assert main(["check"]) == 0
     out = capsys.readouterr().out
     assert "bucket" in out and "minio" in out
-    for secret in ("very-secret", "AKIA-key", "s3-secret"):
+    for secret in ("very-secret", ADMIN, "AKIA-key", "s3-secret"):
         assert secret not in out
 
 
@@ -51,7 +59,7 @@ def test_render_with_caddy_and_litestream(env, tmp_path, capsys):
 
 
 def test_render_behind_proxy_without_s3(env, tmp_path, capsys):
-    env({"SHARED_SECRET": "x", "BEHIND_PROXY": "TRUE"})
+    env({"SHARED_SECRET": "x", "ADMIN_TOKEN": ADMIN, "BEHIND_PROXY": "TRUE"})
     assert main(["render", str(tmp_path)]) == 0
     assert "behind_proxy=TRUE" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == []

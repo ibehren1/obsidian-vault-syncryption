@@ -21,6 +21,7 @@ if TYPE_CHECKING:  # TestClient needs httpx, which the container image doesn't h
 
 VECTORS = Path(__file__).resolve().parents[2] / "testvectors"
 SECRET = "open-sesame"
+ADMIN_TOKEN = "admin-" + "0123456789abcdef" * 2
 
 
 def load_vectors(name: str) -> Any:

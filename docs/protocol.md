@@ -6,7 +6,7 @@ plugin's TypeScript types are generated from its OpenAPI schema. Crypto details 
 
 ## 1. Conventions
 - **Base URL:** the configured endpoint, e.g. `https://notes.example.com`. All paths
-  below are under `/api/v1`, except `/health`.
+  below are under `/api/v1`, except `/`, `/health` and `/admin`.
 - **Bodies:** JSON (`application/json`), except blob uploads and downloads, which are
   `application/octet-stream`.
 - **Binary values in JSON:** `b64u` (base64url, no padding).
@@ -29,26 +29,52 @@ plugin's TypeScript types are generated from its OpenAPI schema. Crypto details 
 |---|---|
 | 400 | `bad_request`, `bad_signature_format` |
 | 401 | `unauthenticated`, `token_expired`, `challenge_invalid` |
-| 403 | `forbidden`, `join_required`, `device_pending`, `device_revoked` |
+| 403 | `forbidden`, `join_required`, `device_pending`, `device_revoked`, `user_disabled`, `vault_disabled` |
 | 404 | `not_found` |
 | 409 | `stale_parent`, `exists`, `keyring_version` |
 | 413 | `too_large` |
 | 422 | `missing_blobs`, `hash_mismatch` |
 | 423 | `locked` |
 | 429 | `rate_limited` (with `Retry-After`) |
+| 503 | `maintenance` (with `Retry-After`, section 14.1) |
 
-## 2. Health
-`GET /health` (*public*) returns `200 {"status": "ok", "version": "0.1.0"}` once the
-database is open and the blob store is reachable, and `503` otherwise. It is used by the
-container healthcheck.
+`user_disabled` and `vault_disabled` carry `details: {"adminContact": "..."}` when the
+server sets `ADMIN_CONTACT` (free text: an email address, a Slack channel, a phone
+number...), and empty `details` otherwise, so the plugin can say whom to ask.
+
+## 2. Health and the home page
+`GET /health` (*public*) returns `200` once the database is open and the blob store is
+reachable, and `503` with `"status": "unavailable"` otherwise. It is used by the container
+healthcheck, so it stays `200` during maintenance (section 14.1):
+```json
+{
+  "status": "ok",
+  "version": "0.1.2",
+  "protocol": 1,
+  "maintenance": null,
+  "adminContact": "ops@example.com"
+}
+```
+- `status` is `ok`, or `maintenance` while maintenance is on.
+- `maintenance` is `null`, or `{"since": "<RFC 3339>", "message": "..." | null}`.
+- `adminContact` is `ADMIN_CONTACT`, or `null` when it isn't set.
+
+`GET /` (*public*, not in the OpenAPI schema) is a short HTML page (with the admin page's strict headers)
+for people who open the server's URL in a browser: the server version, what the server is,
+how to connect (install the plugin, enter this URL, a username and a vault name, and create
+an encryption key; the first join needs the shared secret, which comes from the
+administrator), the administrator's contact if `ADMIN_CONTACT` is set, and the status (`ok`,
+or maintenance with its start time and message). It never shows the shared secret, and it
+works during maintenance.
 
 ## 3. Model: users, devices, vaults
 The server tracks identity and data separately:
 - **User:** a `username`, unique on the server (`[a-z0-9._-]{1,32}`, lowercase).
-- **Device:** one registered Ed25519 public key belonging to a user. The same key can be
-  used for any number of that user's vaults. Several installations that share one key
-  (for example people sharing a vault by sharing the username, vault and key) are a single
-  device to the server. Each installation also sends a random `clientId` (kept in the
+- **Device:** one registered encryption key belonging to a user (the public half of an
+  Ed25519 key, sent in OpenSSH `ssh-ed25519 AAAA...` form). The same key can be
+  used for any number of that user's vaults. Several installations that share one key are a
+  single device to the server. People who share a vault should each use their own key
+  (pairing and approval, section 7), so each can be revoked on its own. Each installation also sends a random `clientId` (kept in the
   app's local storage, so it is never synced), used only to tell installations apart in locks (section 11).
 - **Vault:** belongs to one user and is identified by `(username, vault name)`. The vault
   name is unique per user (1 to 64 characters, NFC, trimmed, compared exactly). The server
@@ -63,7 +89,7 @@ the caller's device in that vault, otherwise `403 forbidden`.
 ## 4. Joining the server (shared secret)
 The server is configured with a `SHARED_SECRET` environment variable. It is handed out by
 whoever runs the server, through whatever channel the organisation uses. The secret is
-needed only the **first time a key connects** to the server: to create a user, or to add a
+needed only the **first time an encryption key connects** to the server: to create a user, or to add a
 new key to an existing user. Logging in later with a known key never needs it.
 
 The plugin asks for it only when the server says it is needed (`join_required`), and
@@ -100,7 +126,7 @@ order. That stops a malicious server from relaying a challenge from another serv
 {
   "challengeId": "...",
   "signature": "-----BEGIN SSH SIGNATURE-----\n...",
-  "deviceName": "MacBook",
+  "deviceName": "Isaacs-MacBook",
   "sharedSecret": "only when joining"
 }
 ```
@@ -434,7 +460,71 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 - `429` responses carry `Retry-After` in seconds.
 
 ## 13. Versioning
-- The path prefix `/api/v1` changes only on a breaking change.
-- Every response carries `X-Syncryption-Version: <server version>`.
-- The plugin refuses to sync with a server whose major version differs, and tells the
-  user to update one side.
+- The server and the plugin have independent `x.y.z` versions.
+- The API has its own integer **protocol version**, currently `1`. It goes up only on a
+  breaking API change, together with the path prefix (`/api/v1`).
+- Every response carries `X-Syncryption-Version: <server version>` and
+  `X-Syncryption-Protocol: <protocol version>`. `/health` returns both as `version` and
+  `protocol`.
+- The plugin checks only the protocol version. If it differs, it refuses to sync and tells
+  the user which side to update; a missing protocol header (servers before 0.1.1) means
+  "update the server". A response without `X-Syncryption-Version` isn't a Vault
+  Syncryption server.
+
+## 14. Admin
+The admin page is outside `/api/v1` and isn't part of the OpenAPI schema or the plugin's
+API. Every route needs `ADMIN_TOKEN`.
+
+- **Authentication:** `Authorization: Bearer <ADMIN_TOKEN>`, or (pages only) a session
+  cookie from the login form: `POST /admin/login` with the form field `token` sets
+  `syncryption_admin` (HttpOnly, Secure over HTTPS, SameSite=Strict, `Path=/admin`,
+  12 hours). Every form posted with a cookie session carries the session's `csrf` field.
+  `POST /admin/logout` ends the session. The JSON routes take only the Bearer header.
+- **Rate limit:** 5 wrong tokens per IP in 15 minutes. While the limit is full, every
+  attempt from that IP gets `429`, even with the right token.
+- **Pages:** `GET /admin` shows the login form or the dashboard;
+  `POST /admin/{users|vaults}/{id}/{disable|enable|purge}` and
+  `POST /admin/maintenance/{on|off}` (form field `message` for `on`) act and redirect to
+  `/admin?done=<code>`.
+- **JSON:**
+  - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
+    with the same values as `/health`.
+  - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
+    `createdAt`, `lastSeenAt`, `disabled`, `devices` (`id`, `name`, `status`,
+    `createdAt`, `lastSeenAt`) and `vaults` (`id`, `name`, `size` in stored bytes,
+    `files`, `createdAt`, `lastChangeAt`, `disabled`). Times are RFC 3339 or `null`.
+  - `POST /admin/api/{users|vaults}/{id}/{disable|enable}` returns `204`.
+  - `POST /admin/api/{users|vaults}/{id}/purge` with `{"confirm": "<username or vault
+    name>"}` returns `204`. It returns `409 not_disabled` unless the item is disabled
+    first, and `400 confirm` if the name doesn't match.
+- **Effect on clients:** a disabled user gets `403 user_disabled` on login and on every
+  request; a disabled vault gets `403 vault_disabled` on open and on every vault request.
+  Waiting long-polls return at once. Purging deletes the blobs first, then the rows, so a
+  failed purge can be run again.
+
+### 14.1 Maintenance
+The administrator can pause sync for the whole server, for example to move it or restore a
+backup.
+
+- **Switch:** `POST /admin/api/maintenance/on` with an optional body
+  `{"message": "back at 18:00 UTC"}` (one line, at most 500 characters, otherwise
+  `400 bad_request`), and `POST /admin/api/maintenance/off`. Both return `204` and can be
+  repeated: turning it on again replaces the message and keeps the start time. The
+  dashboard has the same switch.
+- **Storage:** a row in the `maintenance` table, so it survives a restart. The server keeps
+  a copy in memory and doesn't read the table per request.
+- **While on,** every request under `/api/v1` returns `503` with `Retry-After: 60` and the
+  usual version headers:
+  ```json
+  {
+    "error": "maintenance",
+    "message": "The server is in maintenance, so sync is paused. It resumes by itself when maintenance ends.",
+    "details": { "adminContact": "ops@example.com", "note": "back at 18:00 UTC", "since": "2026-10-05T12:00:00Z" }
+  }
+  ```
+  `adminContact` and `note` are `null` when unset. `/`, `/health` and `/admin` keep working.
+- **Long-polls:** turning maintenance on wakes every waiting `/wait`, which answers with the
+  same `503` at once.
+- **Clients** are expected to pause sync, show the message and the contact, and retry after
+  `Retry-After`. Nothing changes on the server while it is on, so they resume where they
+  stopped.

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from syncryption_server.encoding import b64u, from_b64u, new_device_id, rfc3339
-from syncryption_server.errors import ApiError, bad_request
+from syncryption_server.errors import ApiError, bad_request, user_disabled
 from syncryption_server.sshkeys import (
     NAMESPACE_AUTH,
     KeyFormatError,
@@ -225,7 +225,9 @@ async def verify(
     # 4. Log in or join.
     username = row["username"]
     name = body.deviceName.strip() or "Device"
-    user = state.db.one("SELECT id FROM users WHERE username = ?", username)
+    user = state.db.one("SELECT id, disabled_at FROM users WHERE username = ?", username)
+    if user is not None and user["disabled_at"] is not None:
+        raise user_disabled(state.settings.admin_contact)
     device = (
         state.db.one(
             "SELECT id, status FROM devices WHERE user_id = ? AND public_key = ?",
@@ -312,7 +314,7 @@ def _caller(request: Request, state: AppState) -> Caller:
         raise ApiError(401, "unauthenticated", "Log in first.") from e
     row = state.db.one(
         "SELECT s.expires_at, d.id, d.user_id, d.public_key, d.status, d.last_seen_at, "
-        "u.username FROM sessions s JOIN devices d ON d.id = s.device_id "
+        "u.username, u.disabled_at FROM sessions s JOIN devices d ON d.id = s.device_id "
         "JOIN users u ON u.id = d.user_id WHERE s.token_hash = ?",
         token_hash,
     )
@@ -323,6 +325,8 @@ def _caller(request: Request, state: AppState) -> Caller:
         raise ApiError(401, "token_expired", "The session has expired. Log in again.")
     if row["status"] == "revoked":
         raise ApiError(403, "device_revoked", "This device has been revoked.")
+    if row["disabled_at"] is not None:
+        raise user_disabled(state.settings.admin_contact)
     if (row["last_seen_at"] or 0) + LAST_SEEN_RESOLUTION <= now:
         with state.db.transaction() as db:
             db.execute("UPDATE devices SET last_seen_at = ? WHERE id = ?", (now, row["id"]))

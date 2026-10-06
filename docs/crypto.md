@@ -5,16 +5,16 @@ are marked with their milestone. Both the plugin (TypeScript) and the backend (P
 implement against this document, and every primitive below has a vector in `testvectors/`.
 
 ## Overview
-Each device has its own Ed25519 SSH key. A vault has one random vault data key (`VDK`) per
-key epoch. The `VDK`s live in the **keyring**, an age file encrypted to every device's SSH
-key and signed by the device that last changed it. File paths and contents are encrypted
+Each device has its own encryption key, an Ed25519 key in OpenSSH format. A vault has one
+random vault data key (`VDK`) per key epoch. The `VDK`s live in the **keyring**, an age
+file encrypted to every device's encryption key (age `ssh-ed25519` stanza) and signed by the device that last changed it. File paths and contents are encrypted
 under keys derived from the `VDK`, so the server only stores the keyring, opaque file ids
 and ciphertext.
 
 ```mermaid
 flowchart TD
     subgraph device["Each device (private key never leaves it)"]
-        ssh["Ed25519 SSH key<br/>(SecretStorage)"]
+        ssh["Encryption key: Ed25519, OpenSSH format<br/>(SecretStorage)"]
         x["X25519 key<br/>(converted, 3.4)"]
         ssh --> x
     end
@@ -37,7 +37,7 @@ What each side holds:
 ```mermaid
 flowchart LR
     subgraph client["Client (trusted)"]
-        c1["SSH private key"]
+        c1["private encryption key"]
         c2["decrypted keyring: VDKs, indexKey"]
         c3["plaintext paths and files"]
     end
@@ -97,9 +97,11 @@ Libraries (backend): `cryptography`. The backend verifies sshsig signatures itse
 accepts exactly the format below. It never encrypts or decrypts vault data.
 
 ## 3. Identity keys
+The user-facing name is **encryption key**: one key per device, used both to log in
+(sshsig, section 7) and to unwrap the keyring (age `ssh-ed25519` stanza, section 4).
 
 ### 3.1 Key type
-Only **Ed25519** SSH keys are accepted (`ssh-ed25519`). Any other key type (RSA, ECDSA,
+Only **Ed25519** keys in OpenSSH format are accepted (`ssh-ed25519`). Any other key type (RSA, ECDSA,
 `sk-ssh-ed25519@openssh.com`) is rejected with a clear message.
 
 Public key wire format (RFC 8709):
@@ -149,10 +151,12 @@ base64( "openssh-key-v1\0"
 - The only secret the plugin keeps is `seed32`.
 
 ### 3.3 Generated device keys and local storage
-- On any device the plugin can generate a key: `seed32 = RAND(32)`.
-- The private key, whether generated or imported, is stored **only** in Obsidian's
-  `SecretStorage` (`app.secretStorage`, Obsidian 1.11.4 and later), **in OpenSSH format**,
-  so the user can export it and use it directly with `age -d -i` or `ssh-keygen`. It is
+- Every device generates its own key: `seed32 = RAND(32)`. There is no import (removed in
+  plugin 0.1.3): a new device pairs, and the recovery key (section 9) covers losing every
+  device.
+- The private key is stored **only** in Obsidian's
+  `SecretStorage` (`app.secretStorage`, Obsidian 1.11.4 and later), **in OpenSSH format**
+  (so it stays compatible with `age -d -i` and `ssh-keygen`, though the plugin doesn't export it). It is
   never written to `data.json` or anywhere else in the vault folder, so backups and other
   sync tools that copy the vault can't pick it up.
 - The plugin requires `SecretStorage` (`minAppVersion` 1.13.0 in `manifest.json`, which also brings the declarative settings API). There
@@ -164,8 +168,9 @@ base64( "openssh-key-v1\0"
 - Optional local passphrase, as an extra layer on top of `SecretStorage`:
   `ciphername = aes256-ctr`, `kdfname = bcrypt`, `salt = RAND(16)`, `rounds = 16` (the
   `ssh-keygen` default). Without one: `none`/`none`. The key writer supports it, but the
-  settings' Generate button doesn't ask for a passphrase yet; an imported key keeps its own.
-- An imported key is stored as imported (passphrase-protected or not). The unlocked seed
+  settings' Generate button doesn't ask for a passphrase. Keys imported by plugin versions
+  before 0.1.3 were stored as imported and may have one; the plugin still unlocks them.
+- The unlocked seed
   is kept only in memory for the lifetime of the Obsidian session. Session tokens and
   decrypted VDKs are also memory only.
 - Whether `SecretStorage` is backed by the iOS Keychain and Android Keystore, and whether
@@ -283,9 +288,11 @@ The keyring plaintext is UTF-8 JSON:
 ### 6.2 Encryption
 `keyring.age` is a standard age v1 file whose payload is the plaintext above. Its
 recipients are an `ssh-ed25519` stanza for every entry in `devices`, plus an X25519 stanza
-for `recovery` if it is set. Anyone holding one of those keys can run:
+for `recovery` if it is set. Anyone holding one of those keys can decrypt it with standard
+tools. Device keys stay in each device's `SecretStorage`, so in practice that is the recovery
+key (section 9):
 ```
-age -d -i ~/.ssh/id_ed25519 keyring.age
+age -d -i recovery.txt keyring.age
 ```
 
 ### 6.3 Signature

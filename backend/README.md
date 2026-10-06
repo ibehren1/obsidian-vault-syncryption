@@ -1,4 +1,4 @@
-# syncryption-server
+# vault-syncryption-server
 
 The Vault Syncryption sync server. See [../docs/architecture.md](../docs/architecture.md) and
 [../docs/protocol.md](../docs/protocol.md).
@@ -11,13 +11,17 @@ uv run ruff format --check .
 ```
 
 Run a development server. The app is built by a factory that reads its settings from the
-environment, so set at least the shared secret, and keep the data outside `/data`:
+environment, so set at least the shared secret and the admin token, and keep the data
+outside `/data`:
 ```
-SHARED_SECRET=dev-secret BEHIND_PROXY=TRUE SYNCRYPTION_DATA_DIR=./dev-data \
+SHARED_SECRET=dev-secret ADMIN_TOKEN=dev-admin-token-0123456789abcdef BEHIND_PROXY=TRUE SYNCRYPTION_DATA_DIR=./dev-data \
   uv run uvicorn --factory syncryption_server.app:create_app --reload
 ```
 `SYNCRYPTION_DATA_DIR` is for development only and isn't part of the container
-configuration. Without the `S3_*` variables, blobs are stored under `<data dir>/blobs`.
+configuration. S3 is optional: without the `S3_*` variables, blobs are stored under
+`<data dir>/blobs`. `ADMIN_CONTACT` (optional) sets the contact shown on `/`, in `/health`
+and in maintenance and disabled-account errors. The container variables are described in
+[../docs/self-hosting.md](../docs/self-hosting.md), section 2.
 
 Tests run against a temporary directory and, for `S3BlobStore`, an in-process moto
 server. Set `MINIO_ENDPOINT` (with `docker compose -f docker-compose.dev.yml up`) to also

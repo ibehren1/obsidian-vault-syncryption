@@ -10,7 +10,14 @@ from pydantic import BaseModel, Field
 from syncryption_server.auth import ActiveCaller, AnyCaller, Caller, State
 from syncryption_server.devices import Device, activate_device, device_model
 from syncryption_server.encoding import b64u, from_b64u, is_uuid4, rfc3339
-from syncryption_server.errors import ApiError, bad_request, forbidden, not_found, too_large
+from syncryption_server.errors import (
+    ApiError,
+    bad_request,
+    forbidden,
+    not_found,
+    too_large,
+    vault_disabled,
+)
 from syncryption_server.sshkeys import (
     NAMESPACE_KEYRING,
     KeyFormatError,
@@ -111,6 +118,8 @@ def require_member(state: AppState, caller: Caller, vault_id: str) -> sqlite3.Ro
     )
     if row is None:
         raise forbidden()
+    if row["disabled_at"] is not None:
+        raise vault_disabled(state.settings.admin_contact)
     return row
 
 
@@ -166,6 +175,8 @@ async def open_vault(body: OpenRequest, caller: AnyCaller, state: State) -> Open
     )
     if vault is None:
         raise not_found("No vault with this name.")
+    if vault["disabled_at"] is not None:
+        raise vault_disabled(state.settings.admin_contact)
     with state.db.transaction() as db:
         db.execute(
             "INSERT OR IGNORE INTO memberships (vault_id, device_id, status, created_at) "
@@ -381,6 +392,8 @@ def _require_membership(state: AppState, caller: Caller, vault_id: str) -> None:
     """Pending or active: the recovery endpoints serve devices that wait for approval."""
     if _membership(state, vault_id, caller.device_id) is None:
         raise forbidden()
+    if state.db.one("SELECT disabled_at FROM vaults WHERE id = ?", vault_id)["disabled_at"]:
+        raise vault_disabled(state.settings.admin_contact)
 
 
 def _no_recovery() -> ApiError:

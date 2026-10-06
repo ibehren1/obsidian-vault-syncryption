@@ -4,6 +4,8 @@
     SYNCRYPTION_URL=http://127.0.0.1:8080 SYNCRYPTION_SECRET=dev-secret uv run pytest \
         tests/test_container.py
 
+With SYNCRYPTION_ADMIN_TOKEN set, it also turns maintenance on and off again.
+
 It also runs without pytest, inside the image (see backend/container-checks.sh):
     python -m tests.test_container
 """
@@ -19,6 +21,7 @@ from typing import Any
 from tests.helpers import Device, blob, file_id
 
 URL = os.environ.get("SYNCRYPTION_URL", "")
+ADMIN_TOKEN = os.environ.get("SYNCRYPTION_ADMIN_TOKEN", "")
 
 try:
     import pytest
@@ -80,6 +83,29 @@ def test_health():
     assert r.json()["status"] == "ok"
 
 
+def test_home_page():
+    r = Client(URL).get("/")
+    assert r.status_code == 200
+    assert "Vault Syncryption server" in r.text and "Status: ok" in r.text
+
+
+def test_maintenance():
+    if not ADMIN_TOKEN:
+        return
+    client = Client(URL)
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    r = client.post("/admin/api/maintenance/on", admin, json={"message": "container check"})
+    assert r.status_code == 204, r.text
+    try:
+        r = client.get("/api/v1/vaults")
+        assert (r.status_code, r.json()["error"]) == (503, "maintenance")
+        health = client.get("/health")
+        assert (health.status_code, health.json()["status"]) == (200, "maintenance")
+    finally:
+        assert client.post("/admin/api/maintenance/off", admin).status_code == 204
+    assert client.get("/health").json()["status"] == "ok"
+
+
 def test_join_create_upload_and_commit():
     client = Client(URL)
     alice = Device(client, f"smoke-{secrets.token_hex(4)}", name="Smoke")
@@ -101,6 +127,11 @@ def test_join_create_upload_and_commit():
 
 
 if __name__ == "__main__":
-    for check in (test_health, test_join_create_upload_and_commit):
+    for check in (
+        test_health,
+        test_home_page,
+        test_maintenance,
+        test_join_create_upload_and_commit,
+    ):
         check()
         print(f"ok {check.__name__}")

@@ -6,10 +6,15 @@ hosting configuration.
 """
 
 import os
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+
+MIN_ADMIN_TOKEN = 32
+# `ADMIN_CONTACT` and the maintenance message: one line of free text.
+MAX_NOTE = 500
 
 
 class ConfigError(Exception):
@@ -28,12 +33,18 @@ class S3Settings:
 @dataclass(frozen=True)
 class Settings:
     shared_secret: str
+    # `ADMIN_TOKEN`, for the /admin page. Empty only when built in code (tests, `openapi`):
+    # the admin page then refuses every token.
+    admin_token: str = ""
     behind_proxy: bool = False
     # Public origin (`scheme://host[:port]`), or None to use the request's origin.
     url: str | None = None
     s3: S3Settings | None = None
     migrate_to_s3: bool = False
     data_dir: Path = Path("/data")
+    # `ADMIN_CONTACT`: how users reach the administrator (email, Slack, phone, ...). Public:
+    # shown on `/`, in `/health` and in some errors. Empty when unset.
+    admin_contact: str = ""
 
     @property
     def db_path(self) -> Path:
@@ -47,6 +58,15 @@ def _bool(env: Mapping[str, str], name: str) -> bool:
     if value == "TRUE":
         return True
     raise ConfigError(f"{name} must be TRUE or FALSE")
+
+
+def note_problem(value: str) -> str | None:
+    """Why `value` isn't one line of at most MAX_NOTE characters, or None if it is."""
+    if len(value) > MAX_NOTE:
+        return f"must be at most {MAX_NOTE} characters"
+    if any(unicodedata.category(c) == "Cc" for c in value):
+        return "must be a single line without control characters"
+    return None
 
 
 def parse_origin(url: str) -> str:
@@ -77,6 +97,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if not shared_secret.strip():
         raise ConfigError("SHARED_SECRET is required")
 
+    admin_token = env.get("ADMIN_TOKEN", "").strip()
+    if not admin_token:
+        raise ConfigError("ADMIN_TOKEN is required (generate one with: openssl rand -hex 32)")
+    if len(admin_token) < MIN_ADMIN_TOKEN:
+        raise ConfigError(f"ADMIN_TOKEN must be at least {MIN_ADMIN_TOKEN} characters")
+
     names = ("S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")
     values = [env.get(n, "").strip() for n in names]
     if any(values) and not all(values):
@@ -97,12 +123,19 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if migrate and s3 is None:
         raise ConfigError("MIGRATE_TO_S3=TRUE needs S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY")
 
+    admin_contact = env.get("ADMIN_CONTACT", "").strip()
+    problem = note_problem(admin_contact)
+    if problem:
+        raise ConfigError(f"ADMIN_CONTACT {problem}")
+
     data_dir = Path(env.get("SYNCRYPTION_DATA_DIR", "") or "/data")
     return Settings(
         shared_secret=shared_secret,
+        admin_token=admin_token,
         behind_proxy=behind_proxy,
         url=url,
         s3=s3,
         migrate_to_s3=migrate,
         data_dir=data_dir,
+        admin_contact=admin_contact,
     )
