@@ -1,5 +1,5 @@
 /** Creating a recovery key (docs/crypto.md 9): shown once, set only after the user stored it. */
-import { App, Modal, Notice, Setting } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Setting } from "obsidian";
 
 /**
  * Show a new recovery key once. Resolves true if the user confirmed they stored it, and
@@ -31,11 +31,12 @@ class RecoveryKeyModal extends Modal {
 			cls: "mod-warning",
 		});
 		let confirmed = false;
-		let save: HTMLButtonElement | null = null;
+		// Through the component: it ignores clicks while its own disabled flag is set.
+		let save: ButtonComponent | null = null;
 		new Setting(this.contentEl).setName("I have stored the recovery key").addToggle((t) =>
 			t.onChange((v) => {
 				confirmed = v;
-				save?.toggleAttribute("disabled", !v);
+				save?.setDisabled(!v);
 			}),
 		);
 		new Setting(this.contentEl)
@@ -50,7 +51,7 @@ class RecoveryKeyModal extends Modal {
 				}),
 			)
 			.addButton((b) => {
-				save = b.buttonEl;
+				save = b;
 				b.setButtonText("Use this key")
 					.setCta()
 					.setDisabled(true)
