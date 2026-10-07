@@ -35,6 +35,29 @@ export const VAULT_ID = "vaultId";
 export const REPLACED = "replacedDevice";
 const PAIRING_POLL_MS = 5000;
 
+/** The vault a key slot last connected to, remembered on the device to open its local state offline. */
+export interface LastVault {
+	slot: string;
+	vaultId: string;
+}
+
+/**
+ * Open the local state of the vault `slot` last connected to, without connecting: while
+ * sync is paused, changes still queue and the status window lists them. Null when the slot
+ * changed since, or the store isn't that vault's.
+ */
+export async function openLastVault(
+	last: LastVault | null,
+	slot: string,
+	openStore: (vaultId: string) => Promise<SyncStore>,
+): Promise<SyncStore | null> {
+	if (!last || last.slot !== slot) return null;
+	const store = await openStore(last.vaultId);
+	if ((await store.getMeta<string>(VAULT_ID)) === last.vaultId) return store;
+	store.close();
+	return null;
+}
+
 export interface ConnectCallbacks {
 	/** The server needs the shared secret to join. Resolve with null if the user cancels. */
 	askSharedSecret(): Promise<string | null>;

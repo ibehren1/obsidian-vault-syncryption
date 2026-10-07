@@ -89,6 +89,12 @@ export class LockManager {
 		return Date.parse(lock.expiresAt) > now ? lock : null;
 	}
 
+	/** Every live lock of another device, as of the last `refresh` or `renew`. */
+	heldByOthers(): Lock[] {
+		const now = this.opts.now?.() ?? Date.now();
+		return [...this.others.values()].filter((lock) => Date.parse(lock.expiresAt) > now);
+	}
+
 	/** Release the current lock, for example when Obsidian goes to the background. */
 	async releaseAll(): Promise<void> {
 		const current = this.current;

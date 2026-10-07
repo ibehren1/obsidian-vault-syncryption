@@ -25,16 +25,22 @@ import { parseExcludes, pathFilter, type PathFilter } from "./sync/filter";
 import { LiveLoop } from "./sync/live";
 import { LockManager, newClientId } from "./sync/locks";
 import { isMergeable } from "./sync/merge";
-import { connect, handOver, SetupCancelled, type VaultSession } from "./sync/session";
+import { connect, handOver, openLastVault, SetupCancelled, type LastVault, type VaultSession } from "./sync/session";
 import { DeletedFilesModal, HistoryModal, type HistorySource } from "./ui/history";
 import { ApproveModal, ConfirmModal, confirmFirstSync, PairingModal, prompt, ReloadModal, type PendingApproval } from "./ui/modals";
 import { showRecoveryKey } from "./ui/recovery";
+import { StatusModal, type StatusDetails } from "./ui/status";
+import { countFiles, type OutboxEntry, type SyncStore } from "./store/state";
 
 /** Long-poll brings remote changes; the timer is a fallback. Local changes sync soon after. */
 const SYNC_INTERVAL_MS = 120_000;
 const CHANGE_DELAY_MS = 2_000;
 const INSTALL_ID = "syncryption-install-id";
 const CLIENT_ID = "syncryption-client-id";
+/** Local storage: the user paused sync on this device, until they resume it. */
+const PAUSED = "syncryption-paused";
+/** Local storage: the key slot and vault id of the last connection (`LastVault`). */
+const LAST_VAULT = "syncryption-last-vault";
 /** Store meta: the recovery key was offered after creating the vault. */
 const RECOVERY_OFFERED = "recoveryOffered";
 /** The vault keys on the server, for the settings tab, are fetched again after this long. */
@@ -94,8 +100,15 @@ export default class SyncryptionPlugin extends Plugin {
 	/** This device hasn't finished its first sync of the vault: it shows its progress in a notice. */
 	private firstSync = false;
 	private progressNotice: Notice | null = null;
-	/** The settings tab follows the status text while it is open. */
-	onStatus: ((text: string) => void) | null = null;
+	/** The settings tab and the status window follow the status while they are open. */
+	private readonly statusListeners = new Set<() => void>();
+	/** The user paused sync: no requests to the server until they resume. */
+	private userPaused = false;
+	/** How many local changes wait to be uploaded, for the status text. */
+	private waiting = 0;
+	/** Paused without a connection: the last vault's local state, to queue and list changes. */
+	private localStore: SyncStore | null = null;
+	private localSlot: string | null = null;
 	private readonly scheduleSync = debounce(
 		() => {
 			if (!this.paused()) void this.syncNow();
@@ -111,15 +124,38 @@ export default class SyncryptionPlugin extends Plugin {
 		}
 		await this.loadSettings();
 		this.addSettingTab(new SyncryptionSettingTab(this.app, this));
+		this.userPaused = this.app.loadLocalStorage(PAUSED) === true;
 		this.statusBar = this.addStatusBarItem();
 		this.lockBar = this.addStatusBarItem();
+		for (const item of [this.statusBar, this.lockBar]) {
+			item.addClass("mod-clickable");
+			this.registerDomEvent(item, "click", () => this.openStatus());
+		}
 		this.render();
 		this.register(() => window.clearTimeout(this.retryTimer));
 
 		this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.syncNow(true) });
 		this.addCommand({ id: "connect", name: "Connect again", callback: () => void this.restart() });
 		// The status bar isn't shown on mobile.
-		this.addCommand({ id: "status", name: "Show sync status", callback: () => new Notice(this.statusText(), 8000) });
+		this.addCommand({ id: "status", name: "Show sync status", callback: () => this.openStatus() });
+		this.addCommand({
+			id: "pause",
+			name: "Pause sync",
+			checkCallback: (checking) => {
+				if (this.userPaused) return false;
+				if (!checking) this.pause();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "resume",
+			name: "Resume sync",
+			checkCallback: (checking) => {
+				if (!this.userPaused) return false;
+				if (!checking) void this.resume();
+				return true;
+			},
+		});
 		this.addCommand({ id: "approve-devices", name: "Approve new keys", callback: () => void this.openApprovals() });
 		this.addCommand({
 			id: "file-history",
@@ -181,7 +217,9 @@ export default class SyncryptionPlugin extends Plugin {
 				this.live?.wake();
 				this.tick();
 			});
-			if (isConfigured(this.settings)) void this.start();
+			// Paused: don't connect at all, but queue the changes in the local state.
+			if (this.userPaused) void this.openLocal();
+			else if (isConfigured(this.settings)) void this.start();
 		});
 	}
 
@@ -234,6 +272,8 @@ export default class SyncryptionPlugin extends Plugin {
 	}
 
 	statusText(): string {
+		const waiting = this.waiting ? ` ${plural(this.waiting, "change")} ${this.waiting === 1 ? "waits" : "wait"} to upload.` : "";
+		if (this.showsPaused()) return `Sync is paused.${waiting} Resume to sync.`;
 		switch (this.state) {
 			case "off":
 				if (this.detail) return this.detail;
@@ -245,31 +285,85 @@ export default class SyncryptionPlugin extends Plugin {
 			case "idle":
 				return this.syncedText();
 			case "offline":
-				return `Offline. ${this.detail}`;
+				return `Offline. ${this.detail}${waiting}`;
 			case "maintenance":
 			case "error":
 				return this.detail;
 		}
 	}
 
-	async restart(): Promise<void> {
+	/** Whether the status shows "paused": sync is paused and nothing else needs telling. */
+	private showsPaused(): boolean {
+		return this.userPaused && (this.state === "idle" || this.state === "off" || this.state === "offline");
+	}
+
+	isPaused(): boolean {
+		return this.userPaused;
+	}
+
+	/** Follow status changes; returns the function that stops following. */
+	onStatusChange(listener: () => void): () => void {
+		this.statusListeners.add(listener);
+		return () => this.statusListeners.delete(listener);
+	}
+
+	togglePause(): void {
+		if (this.userPaused) void this.resume();
+		else this.pause();
+	}
+
+	/** Stop talking to the server until `resume`. Local changes are still noted. */
+	pause(): void {
+		if (this.userPaused) return;
+		this.userPaused = true;
+		this.app.saveLocalStorage(PAUSED, true);
+		this.stopLive();
+		this.render();
+		void this.openLocal();
+		new Notice("Sync paused. Resume it from the sync status or the command palette.");
+	}
+
+	async resume(): Promise<void> {
+		if (!this.userPaused) return;
+		this.userPaused = false;
+		this.app.saveLocalStorage(PAUSED, null);
+		const session = this.session;
+		if (session && this.engine) {
+			this.startLive(session);
+			this.render();
+			await this.syncNow(true);
+		} else if (isConfigured(this.settings)) {
+			await this.restart();
+		} else {
+			this.render();
+		}
+	}
+
+	/** Connect again; `syncOnce` syncs even while paused (Sync now). */
+	async restart(syncOnce = false): Promise<void> {
 		this.stop();
 		if (!isConfigured(this.settings)) {
 			new Notice("Fill in the server URL, username, vault name and encryption key first.");
 			return;
 		}
-		await this.start();
+		await this.start(syncOnce);
 	}
 
-	private stop(): void {
-		this.abort?.abort();
-		this.abort = null;
+	/** Stop the long-poll and lock renewals, and release this device's lock. */
+	private stopLive(): void {
 		void this.live?.stop();
 		this.live = null;
 		void this.locks?.releaseAll().catch(() => {});
 		this.locks = null;
 		window.clearInterval(this.renewTimer);
 		this.renderLock();
+	}
+
+	private stop(): void {
+		this.abort?.abort();
+		this.abort = null;
+		this.stopLive();
+		this.closeLocal();
 		this.session?.store.close();
 		this.session = null;
 		this.sessionSlot = null;
@@ -281,8 +375,9 @@ export default class SyncryptionPlugin extends Plugin {
 		this.setState("off");
 	}
 
-	private async start(): Promise<void> {
+	private async start(syncOnce = false): Promise<void> {
 		if (this.state === "connecting") return;
+		this.closeLocal();
 		this.setState("connecting");
 		const abort = new AbortController();
 		this.abort = abort;
@@ -297,7 +392,7 @@ export default class SyncryptionPlugin extends Plugin {
 				api,
 				deviceName,
 				seed: key.seed,
-				openStore: (vaultId) => IndexedDbStore.open(`syncryption-${this.installId()}-${vaultId}`),
+				openStore: (vaultId) => this.openStore(vaultId),
 				callbacks: {
 					askSharedSecret: () =>
 						prompt(this.app, {
@@ -356,17 +451,21 @@ export default class SyncryptionPlugin extends Plugin {
 			}
 			this.session = session;
 			this.sessionSlot = slot;
+			this.app.saveLocalStorage(LAST_VAULT, { slot, vaultId: session.vault.id } satisfies LastVault);
 			this.engine = engine;
 			this.firstSync = first;
-			this.startLive(session);
+			this.waiting = (await engine.pending()).length;
+			if (!this.userPaused) this.startLive(session);
 			this.setState("idle");
 			void this.offerRecoveryKey(session);
-			void this.finishRevocations(session);
+			if (!this.userPaused) void this.finishRevocations(session);
 			// In the background: the first sync of a large vault takes a while.
-			void this.syncNow();
+			if (!this.userPaused || syncOnce) void this.syncNow(syncOnce);
 		} catch (e) {
 			(pairing as PairingModal | null)?.finish();
 			if (this.abort !== abort) return; // stopped or restarted meanwhile
+			// Sync now while paused and offline: keep queuing changes locally.
+			if (this.userPaused) void this.openLocal();
 			if (e instanceof SetupCancelled) {
 				this.setState("off");
 				return;
@@ -504,9 +603,9 @@ export default class SyncryptionPlugin extends Plugin {
 		else if ((this.state === "offline" || this.state === "maintenance") && isConfigured(this.settings)) void this.start();
 	}
 
-	/** In maintenance, background syncs wait for the retry the server asked for. */
+	/** Background syncs wait while the user paused sync, or in maintenance for the retry the server asked for. */
 	private paused(): boolean {
-		return this.state === "maintenance" && Date.now() < this.retryAt;
+		return this.userPaused || (this.state === "maintenance" && Date.now() < this.retryAt);
 	}
 
 	/** Try again after `seconds` (the server's `Retry-After`), through `tick`. */
@@ -529,16 +628,72 @@ export default class SyncryptionPlugin extends Plugin {
 	}
 
 	private noteChange(path: string): void {
-		if (!this.engine) return;
-		void this.engine.noteChange(path).then(() => this.scheduleSync());
+		const engine = this.engine;
+		if (!engine) {
+			const store = this.localStore;
+			if (store && this.localSlot === this.settings.keyId && this.filter()(path)) {
+				void store.enqueue(path).then(() => this.countLocal(store));
+			}
+			return;
+		}
+		void engine.noteChange(path).then(async () => {
+			// Syncs soon unless paused or offline: then the status shows what waits.
+			if (this.userPaused || this.state === "offline") await this.countWaiting(engine);
+			this.scheduleSync();
+		});
 	}
 
+	private openStore(vaultId: string): Promise<IndexedDbStore> {
+		return IndexedDbStore.open(`syncryption-${this.installId()}-${vaultId}`);
+	}
+
+	/** Paused and not connected: open the last vault's local state. No network. */
+	private async openLocal(): Promise<void> {
+		if (this.localStore || this.engine || !isConfigured(this.settings)) return;
+		const slot = this.settings.keyId;
+		const last = this.app.loadLocalStorage(LAST_VAULT) as LastVault | null;
+		const store = await openLastVault(last, slot, (vaultId) => this.openStore(vaultId)).catch(() => null);
+		if (!store) return;
+		// Resumed, connected or opened meanwhile.
+		if (!this.userPaused || this.engine || this.localStore || this.state === "connecting") {
+			store.close();
+			return;
+		}
+		this.localStore = store;
+		this.localSlot = slot;
+		this.fileCount = await countFiles(store);
+		await this.countLocal(store);
+		this.render();
+	}
+
+	private closeLocal(): void {
+		this.localStore?.close();
+		this.localStore = null;
+		this.localSlot = null;
+	}
+
+	private async countLocal(store: SyncStore): Promise<void> {
+		const waiting = (await store.outbox()).length;
+		if (this.localStore !== store || waiting === this.waiting) return;
+		this.waiting = waiting;
+		this.render();
+	}
+
+	private async countWaiting(engine: SyncEngine): Promise<void> {
+		const waiting = (await engine.pending()).length;
+		if (this.engine !== engine || waiting === this.waiting) return;
+		this.waiting = waiting;
+		this.render();
+	}
+
+	/** Sync now. `manual`: the user asked, so it also runs while paused, once. */
 	async syncNow(manual = false): Promise<void> {
 		const engine = this.engine;
 		if (!engine) {
-			if (manual) await this.restart();
+			if (manual) await this.restart(true);
 			return;
 		}
+		if (this.userPaused && !manual) return;
 		this.setState("syncing");
 		if (this.firstSync) this.progressNotice ??= new Notice("First sync…", 0);
 		try {
@@ -549,6 +704,7 @@ export default class SyncryptionPlugin extends Plugin {
 			this.lastSync = new Date();
 			this.lastReport = report;
 			this.fileCount = await engine.fileCount();
+			this.waiting = (await engine.pending()).length;
 			this.lastError = "";
 			this.setState("idle");
 			if (this.firstSync) {
@@ -850,7 +1006,8 @@ export default class SyncryptionPlugin extends Plugin {
 				try {
 					await engine.restore(path, rev);
 				} finally {
-					if (this.engine === engine) await this.syncNow();
+					// Asked for by the user: also while paused.
+					if (this.engine === engine) await this.syncNow(true);
 				}
 			},
 			deviceName: (id) => session.keyring.devices.find((d) => d.id === id)?.name ?? null,
@@ -907,9 +1064,48 @@ export default class SyncryptionPlugin extends Plugin {
 			maintenance: "Vault Syncryption: maintenance",
 			error: "Vault Syncryption: error",
 		};
-		this.statusBar.setText(label[this.state]);
+		this.statusBar.setText(this.showsPaused() ? "Vault Syncryption: paused" : label[this.state]);
 		this.statusBar.setAttr("aria-label", this.statusText());
-		this.onStatus?.(this.statusText());
+		for (const listener of this.statusListeners) listener();
+	}
+
+	openStatus(): void {
+		new StatusModal(this.app, this).open();
+	}
+
+	/** What the status window shows, all from memory. */
+	statusDetails(): StatusDetails {
+		const s = this.settings;
+		return {
+			text: this.statusText(),
+			state: this.showsPaused() ? "paused" : this.state,
+			paused: this.userPaused,
+			connected: this.engine !== null,
+			syncing: this.state === "syncing",
+			lastSync: this.lastSync,
+			lastReport: this.lastReport,
+			fileCount: this.fileCount,
+			endpoint: s.endpoint,
+			vault: s.username && s.vaultName ? `${s.username} / ${this.session?.vault.name ?? s.vaultName}` : "",
+			deviceName: s.deviceName,
+			fingerprint: isConfigured(s) ? fingerprint(parsePublicKeyText(s.publicKey)) : null,
+		};
+	}
+
+	/** The local changes waiting to upload, or null without local state. No network. */
+	async waitingChanges(): Promise<OutboxEntry[] | null> {
+		if (this.engine) return this.engine.pending();
+		return (await this.localStore?.outbox()) ?? null;
+	}
+
+	/** Other devices' locks with the path when this device has synced it, as of the last refresh. */
+	async editingElsewhere(): Promise<Array<{ deviceName: string; path: string | null }> | null> {
+		const locks = this.locks;
+		const engine = this.engine;
+		if (!locks || !engine) return null;
+		const held = locks.heldByOthers();
+		const paths = await engine.pathsOf(new Set(held.map((l) => l.fileId)));
+		return held.map((l) => ({ deviceName: l.deviceName, path: paths.get(l.fileId) ?? null }));
 	}
 }
 

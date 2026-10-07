@@ -1,6 +1,6 @@
 {
 	"name": "syncryption-plugin",
-	"version": "0.1.8",
+	"version": "0.1.10",
 	"private": true,
 	"description": "Vault Syncryption Obsidian plugin",
 	"type": "module",
@@ -39,5 +39,8 @@
 		"age-encryption": "^0.3.1",
 		"bcrypt-pbkdf": "^1.0.2",
 		"node-diff3": "^3.2.1"
+	},
+	"overrides": {
+		"moment": "^2.31.0"
 	}
 }

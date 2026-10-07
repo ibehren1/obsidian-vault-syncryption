@@ -45,6 +45,13 @@ export function newOutboxEntry(path: string): OutboxEntry {
 	return { path, id: crypto.randomUUID(), queuedAt: Date.now() };
 }
 
+/** The paths in sync: the synced files, without deletions. */
+export async function countFiles(store: SyncStore): Promise<number> {
+	let count = 0;
+	for (const file of (await store.files()).values()) if (!file.deleted) count++;
+	return count;
+}
+
 export class MemoryStore implements SyncStore {
 	private readonly meta = new Map<string, unknown>();
 	private readonly synced = new Map<string, SyncedFile>();

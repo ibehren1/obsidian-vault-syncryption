@@ -276,8 +276,8 @@ clean stop. CI runs it in the `container` job.
 ## 4. Plugin (`plugin/`)
 | Module | Responsibility |
 |---|---|
-| `main` | plugin lifecycle, commands, status bar, event wiring |
-| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval and reload dialogs, file history and restore |
+| `main` | plugin lifecycle, commands, status bar, pause and resume, event wiring |
+| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval and reload dialogs, file history and restore, the status window (`ui/status`) |
 | `obsidian` | `requestUrl` transport, and the `VaultFs` over the Vault API |
 | `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects |
 | `api` | typed client over a `Transport` (`requestUrl` in the plugin, `fetch` in tests). `src/api/schema.ts` is generated from the server's OpenAPI with `npm run api-types` (CI checks it is current) |

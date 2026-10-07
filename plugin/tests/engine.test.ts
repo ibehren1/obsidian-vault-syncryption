@@ -199,6 +199,19 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		expect(b.fs.text("a.md")).toBe("1");
 	});
 
+	it("lists the changes waiting to upload, and the paths of file ids", async () => {
+		const [a] = await twoDevices();
+		a.fs.set("a.md", "1");
+		a.fs.set("b.md", "2");
+		await a.engine.noteChange("b.md");
+		await a.engine.noteChange("a.md");
+		expect((await a.engine.pending()).map((e) => e.path)).toEqual(["b.md", "a.md"]);
+		await a.engine.push();
+		expect(await a.engine.pending()).toEqual([]);
+		const fileId = (await a.store.files()).get("a.md")!.fileId;
+		expect(await a.engine.pathsOf(new Set([fileId, "unknown"]))).toEqual(new Map([[fileId, "a.md"]]));
+	});
+
 	it("runs one sync at a time and runs again for calls made meanwhile", async () => {
 		const [a] = await twoDevices();
 		a.fs.set("a.md", "1");

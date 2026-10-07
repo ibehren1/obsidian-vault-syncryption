@@ -1,11 +1,12 @@
 /** Settings: endpoint, username, vault name, device name, the device key and the exclude list (docs/PLAN.md). */
-import { App, Notice, Platform, PluginSettingTab, type Setting, type SettingDefinition, type SettingDefinitionGroup, type SettingDefinitionItem } from "obsidian";
+import { App, type ButtonComponent, Notice, Platform, PluginSettingTab, type Setting, type SettingDefinition, type SettingDefinitionGroup, type SettingDefinitionItem } from "obsidian";
 
 import { normalizeEndpoint } from "./api/client";
 import { cleanDeviceName, defaultDeviceName, desktopHostname, keyComment } from "./device";
 import { fingerprint, generateDeviceKey, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey } from "./crypto/openssh";
 import { normalizeVaultName, saveKeyText, secretId, storedPublicKey } from "./keys";
 import type SyncryptionPlugin from "./main";
+import { keyDescription, keyServerStatus } from "./ui/keys";
 import { ConfirmModal, prompt } from "./ui/modals";
 
 export interface SyncryptionSettings {
@@ -71,6 +72,9 @@ export function initialDeviceName(): string {
 }
 
 export class SyncryptionSettingTab extends PluginSettingTab {
+	/** Stops following the status text. */
+	private unfollow: (() => void) | null = null;
+
 	constructor(
 		app: App,
 		private readonly plugin: SyncryptionPlugin,
@@ -116,18 +120,27 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 				name: "Connect",
 				render: (setting) => {
 					// Follows the connection and the progress of a sync while the tab is open.
-					this.plugin.onStatus = (text) => {
-						setting.setDesc(text);
-					};
-					setting.setDesc(this.plugin.statusText()).addButton((b) =>
-						b
-							.setButtonText("Connect")
-							.setCta()
-							.onClick(async () => {
-								await this.plugin.restart();
-								this.update();
-							}),
-					);
+					this.unfollow?.();
+					let pause: ButtonComponent | null = null;
+					this.unfollow = this.plugin.onStatusChange(() => {
+						setting.setDesc(this.plugin.statusText());
+						pause?.setButtonText(this.plugin.isPaused() ? "Resume sync" : "Pause sync");
+					});
+					setting
+						.setDesc(this.plugin.statusText())
+						.addButton((b) => {
+							pause = b;
+							b.setButtonText(this.plugin.isPaused() ? "Resume sync" : "Pause sync").onClick(() => this.plugin.togglePause());
+						})
+						.addButton((b) =>
+							b
+								.setButtonText("Connect")
+								.setCta()
+								.onClick(async () => {
+									await this.plugin.restart();
+									this.update();
+								}),
+						);
 				},
 			},
 			{
@@ -152,7 +165,8 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 	}
 
 	override hide(): void {
-		this.plugin.onStatus = null;
+		this.unfollow?.();
+		this.unfollow = null;
 		super.hide();
 	}
 
@@ -215,18 +229,10 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 						name: fingerprint(parsePublicKeyText(key.publicKey)),
 						searchable: false,
 						render: (setting) => {
-							const parts = [key.name, `added ${formatDate(key.added)}`];
-							if (key.self) parts.push("This device");
-							setting.setDesc(parts.join(" · "));
+							setting.setDesc(keyDescription(key));
 							const server = setting.descEl.createDiv();
 							void status?.then(
-								(devices) => {
-									const device = devices.get(key.id);
-									if (!device) server.setText("Not on the server");
-									else if (device.status === "active") {
-										server.setText(device.lastSeenAt ? `Active · last seen ${formatDate(device.lastSeenAt)}` : "Active");
-									} else server.setText(device.status === "pending" ? "Waiting for approval" : "Revoked");
-								},
+								(devices) => server.setText(keyServerStatus(devices.get(key.id))),
 								() => {},
 							);
 							if (key.self || !removable) return;
@@ -374,10 +380,4 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 		new Notice("Encryption key saved.");
 		this.update();
 	}
-}
-
-/** A date for the key list, in the user's locale. */
-function formatDate(iso: string): string {
-	const date = new Date(iso);
-	return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString();
 }

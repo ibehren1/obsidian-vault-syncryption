@@ -46,3 +46,12 @@
 	letter-spacing: normal;
 	word-break: break-all;
 }
+
+.syncryption-status-list {
+	max-height: 12em;
+	overflow: auto;
+	margin: 0 0 var(--size-4-2);
+	font-size: var(--font-ui-small);
+	word-break: break-all;
+	user-select: text;
+}

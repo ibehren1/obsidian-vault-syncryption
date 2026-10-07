@@ -6,7 +6,7 @@ import type { ApiClient, Revision } from "../api/client";
 import { ApiError, NetworkError } from "../api/http";
 import { KeyringError } from "../crypto/keyring";
 import { ObjectError, type FileMeta } from "../crypto/objects";
-import type { SyncedFile, SyncStore } from "../store/state";
+import { countFiles, type OutboxEntry, type SyncedFile, type SyncStore } from "../store/state";
 import { sha256Hex, type VaultCipher } from "./cipher";
 import type { FileStat, VaultFs } from "./fs";
 import { conflictPath, mergeText } from "./merge";
@@ -143,9 +143,7 @@ export class SyncEngine {
 
 	/** How many files are in sync: those with a synced state that isn't a deletion. */
 	async fileCount(): Promise<number> {
-		let count = 0;
-		for (const file of (await this.opts.store.files()).values()) if (!file.deleted) count++;
-		return count;
+		return countFiles(this.opts.store);
 	}
 
 	/** How many local files are synced, before any sync has run. */
@@ -156,6 +154,18 @@ export class SyncEngine {
 	/** Note a local change from a vault event. The next sync pushes it. */
 	async noteChange(path: string): Promise<void> {
 		if (this.opts.include(path)) await this.opts.store.enqueue(path);
+	}
+
+	/** The local changes waiting to be pushed, oldest first. Reads only the local store. */
+	async pending(): Promise<OutboxEntry[]> {
+		return this.opts.store.outbox();
+	}
+
+	/** The synced paths of these file ids, for showing other devices' locks. */
+	async pathsOf(fileIds: Set<string>): Promise<Map<string, string>> {
+		const paths = new Map<string, string>();
+		for (const [path, file] of await this.opts.store.files()) if (fileIds.has(file.fileId)) paths.set(file.fileId, path);
+		return paths;
 	}
 
 	/** Synced paths whose last revision is a deletion, sorted: the files that can be restored. */

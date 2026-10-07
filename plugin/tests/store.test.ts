@@ -2,7 +2,8 @@ import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 
 import { IndexedDbStore } from "../src/store/idb";
-import { MemoryStore, type SyncStore } from "../src/store/state";
+import { countFiles, MemoryStore, type SyncStore } from "../src/store/state";
+import { openLastVault, VAULT_ID } from "../src/sync/session";
 
 const file = { fileId: "f", rev: 3, deleted: false, sha256: "ab", size: 2, mtime: 5 };
 
@@ -23,6 +24,8 @@ describe.each([
 		expect(await store.getFile("a.md")).toEqual(file);
 		await store.removeFile("a.md");
 		expect([...(await store.files()).keys()]).toEqual(["b.md"]);
+		await store.putFile("gone.md", { ...file, deleted: true });
+		expect(await countFiles(store)).toBe(1);
 		store.close();
 	});
 
@@ -63,5 +66,31 @@ describe.each([
 		expect((await store.files()).size).toBe(0);
 		expect(await store.outbox()).toEqual([]);
 		store.close();
+	});
+});
+
+describe("openLastVault", () => {
+	it("opens the last vault's local state only for the same key slot and vault", async () => {
+		const factory = new IDBFactory();
+		const opened: string[] = [];
+		const openStore = async (vaultId: string) => {
+			opened.push(vaultId);
+			return IndexedDbStore.open(`test-${vaultId}`, factory);
+		};
+		const synced = await openStore("v1");
+		await synced.setMeta(VAULT_ID, "v1");
+		await synced.enqueue("a.md");
+		synced.close();
+		opened.length = 0;
+
+		expect(await openLastVault(null, "slot", openStore)).toBeNull();
+		expect(await openLastVault({ slot: "other", vaultId: "v1" }, "slot", openStore)).toBeNull();
+		expect(opened).toEqual([]);
+		// A store that isn't that vault's (never synced, or cleared) isn't used.
+		expect(await openLastVault({ slot: "slot", vaultId: "v2" }, "slot", openStore)).toBeNull();
+
+		const store = await openLastVault({ slot: "slot", vaultId: "v1" }, "slot", openStore);
+		expect((await store!.outbox()).map((e) => e.path)).toEqual(["a.md"]);
+		store!.close();
 	});
 });

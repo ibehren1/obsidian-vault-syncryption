@@ -111,6 +111,7 @@ services:
   - excluded paths (optional, per device)
   - an "Approve devices" button that opens the same dialog as the command, showing how many devices are waiting
   - shared secret: asked for only when the vault doesn't exist on the server yet, never stored
+- **Status window and pause** (decided 2026-10-06): clicking the status bar item (or the "Show sync status" command, also on mobile) opens a window with the sync state, the last sync, the changes waiting to upload (the outbox), this device, the vault's keys with their server status, the recovery key, keys waiting for approval and the files being edited on other devices. Removing a key stays in the settings. "Pause sync" and "Resume sync" (commands, and buttons in the window and the settings) stop all network use on this device until the user resumes: no long-poll, no syncs, no locks. Changes keep queuing in the outbox, and "Sync now" syncs once and stays paused. Pause is runtime state in `app.saveLocalStorage`, not a setting, and lasts across restarts. A device paused at startup doesn't connect, but it opens the local state of the vault it last synced (the key slot and vault id are remembered in local storage), so its changes still queue and the window lists them.
 
 ## Sync Scope (research outcome: full vault in place)
 - **No nested pseudo-vault.** Obsidian advises against vaults inside vaults: links break and content is indexed twice. Mobile also can't open a nested vault from code.
@@ -137,7 +138,7 @@ services:
   If retention already removed the base, the merge runs without it, which leaves a conflict copy more often.
 - **History retention** (decided 2026-10-06, fixed values, no setting): the server keeps every revision for 30 days and at least the last 10 per file; 90 days after a file is deleted only its tombstone is left; 30 days after a file has a revision under a newer epoch, its revisions under older epochs go, even within the last 10. A file's head (tombstones included) is never removed. Pruning runs hourly before the blob GC; the server reads the epoch from the clear `meta` header (protocol.md 9.3). Old epochs stay in the keyring (crypto.md 6.4). Capacity: [scaling.md](scaling.md).
   - Binary files always get a conflict copy.
-- **Live updates:** a long-poll of about 25 seconds. `requestUrl` can't stream, so SSE isn't an option.
+- **Live updates:** a long-poll of about 25 seconds. `requestUrl` can't stream, so SSE isn't an option. Pausing sync stops the long-poll and releases the device's locks.
 - **Local state:** IndexedDB holds the sync cursor, the path table and an outbox of pending changes for offline work.
 
 ## Backend (Python 3.12, uv)
