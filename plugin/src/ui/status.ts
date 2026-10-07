@@ -164,7 +164,11 @@ export class StatusModal extends Modal {
 			const approvals = new Setting(el).setName("Keys waiting for approval");
 			approvals.addButton((b) => b.setButtonText("Approve").onClick(() => void this.plugin.openApprovals()));
 			void this.plugin.pendingCount().then(
-				(n) => approvals.setDesc(n === null ? "" : String(n)),
+				// Braces: a Setting has a then() method, so returning it would make the promise
+				// resolve it again and again, a microtask loop that freezes Obsidian.
+				(n) => {
+					approvals.setDesc(n === null ? "" : String(n));
+				},
 				() => {},
 			);
 		}
