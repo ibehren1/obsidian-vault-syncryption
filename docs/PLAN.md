@@ -232,7 +232,7 @@ All endpoints except `/`, `/health` and `/admin` sit under `/api/v1`. The full s
   - recovery key
   - device revocation with VDK rotation
   - rate limiting
-  - mobile QA (ships as beta in 0.1.0 and is finished after the release)
+  - mobile QA (shipped as beta in 0.1.0, finished after the release; the beta note is gone since plugin 0.1.12)
 - **M8, release:**
   - public GitHub repo `ibehren1/obsidian-vault-syncryption`. `scripts/push-public-release.sh` pushes a snapshot of `main` with private files stripped (`scripts/`, `CLAUDE.md`, `STATUS.md`, `.gitea/`, `.claude/`), one commit per push, so the private history stays private.
   - plugin id `vault-syncryption`; `manifest.json` and `versions.json` are copied to the repo root (Obsidian reads them there), kept in sync by `npm version` and checked in CI.

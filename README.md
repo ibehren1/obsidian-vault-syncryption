@@ -1,21 +1,29 @@
 # Vault Syncryption
 
-Self-hosted, end-to-end encrypted sync for Obsidian.
+**Your vault, on every device, readable only by you.**
 
-- **Full vault sync:** notes, attachments, settings, themes and plugins. Attaching a new device brings over your whole setup.
-- **Zero-knowledge server:** everything is encrypted on your devices, so the server stores only ciphertext. Each device has its own encryption key for each vault (a standard Ed25519 key pair), used both to log in and to decrypt the vault key. Any device of a vault can see every key by fingerprint and remove one. Ed25519 is a very well documented and widely implemented form of public key cryptography. The server is reached over HTTPS only.
-- **Offline-first:** each device keeps a full local copy and syncs when it's back online.
-- **Shared vaults:** share a vault with someone by sharing its username and vault name. When they connect, they generate a new encryption key and pair it with the vault. An existing user must approve the connection.
-- **One Container Backend Self-hosted Server:**
-  - Configured with a few environment variables in [`backend/docker/docker-compose.yml`](backend/docker/docker-compose.yml).
-  - Built-in Let's Encrypt, or plain HTTP behind your own proxy.
-  - Storage is local disk (the `./data` folder, no configuration needed) by default, or optionally S3 for effectively unlimited storage.
-  - An admin page to manage users and vaults, and a maintenance mode.
+Vault Syncryption is self-hosted, end-to-end encrypted sync for Obsidian. You run the server, your devices hold the keys, and the server stores only ciphertext. There's no subscription, no third-party cloud and no telemetry, and it works on desktop, iPhone, iPad and Android.
 
-> **Status:** early release (0.1). Desktop is the main target. **Mobile (iOS and Android) is in beta:** it is enabled but still being tested, so keep a backup of your vault.
+## Why Vault Syncryption
+- **Your whole setup, everywhere.** Notes, attachments, settings, themes and plugins all sync. Connect a new device and your whole Obsidian setup arrives with it.
+- **A server that can't read your notes.** Everything is encrypted on your devices before upload, including file names and folder paths, so the server stores only ciphertext. Each device has its own Ed25519 encryption key for each vault. It is used both to log in and to unlock the vault, and it never leaves the device.
+- **You decide who gets in.** A new device joins only when a device that already syncs the vault approves it. Every key is listed by fingerprint, and any device can remove a lost or old one. A recovery key gets you back in even if you lose every device.
+- **Conflicts that resolve themselves.** Edits to different parts of the same note from two devices are merged automatically. When the same lines change on both, both versions are kept, so nothing is overwritten silently.
+- **Time travel for every file.** The server keeps your file history: every version for 30 days and at least the last 10, and a deleted file's versions for 90 days. Restore any of them from "Show file history".
+- **Offline-first and fast.** Each device keeps a full local copy and syncs as soon as it's back online. Live updates bring changes from your other devices within moments.
+- **You're in control.** A status window shows what's synced, what's waiting to upload and what's being edited on another device. On a slow or metered connection, pause sync with one click: changes keep queuing and upload when you resume.
+- **Share a vault, not a password.** Share a vault by sharing its username and vault name. The other person generates their own key and joins once an existing device approves them.
+
+## A server you'll actually enjoy running
+- **One container**, configured with a few environment variables in [`backend/docker/docker-compose.yml`](backend/docker/docker-compose.yml).
+- **HTTPS out of the box** with built-in Let's Encrypt, or plain HTTP behind your own reverse proxy.
+- **Storage your way:** local disk by default (the `./data` folder, nothing to configure), or S3 and S3-compatible storage for effectively unlimited space.
+- **An admin page** to manage users and vaults, plus a maintenance mode for upgrades.
+
+See [docs/self-hosting.md](docs/self-hosting.md) to get it running.
 
 ## Requirements
-- A Vault Syncryption server that you run yourself. See [docs/self-hosting.md](docs/self-hosting.md). The plugin does nothing without one.
+- A Vault Syncryption server that you run yourself. The plugin does nothing without one.
 - Obsidian 1.13 or later. The plugin keeps your encryption key in Obsidian's secret storage.
 
 ## Install the plugin
@@ -23,7 +31,13 @@ Self-hosted, end-to-end encrypted sync for Obsidian.
 - **Until then, with [BRAT](https://github.com/TfTHacker/obsidian42-brat):** add the beta plugin `ibehren1/obsidian-vault-syncryption`. This works on desktop and mobile.
 - **By hand:** download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/ibehren1/obsidian-vault-syncryption/releases/latest) into `<vault>/.obsidian/plugins/vault-syncryption/`.
 
-Then open the plugin settings. Enter the server URL, your username and the vault name, check the device name (it starts as your computer's hostname), and generate an encryption key. Each device has its own key for each vault; a device that already syncs the vault approves new ones. Create a recovery key when the plugin offers it: it is the only way back in if you lose every device. Creating a vault asks for the server's shared secret; a new device joining an existing vault doesn't need it, since a device that already syncs the vault approves it. The server admin must supply the shared secret. It keeps random individuals from joining the server; for an organization, it can be treated as an internal configuration value rather than a secret, as it is not used to secure the data. Opening the server URL in a browser shows how to connect and how to contact the admin.
+## Get started
+1. Open the plugin settings and enter the server URL, your username and the vault name.
+2. Check the device name (it starts as your computer's hostname), then generate an encryption key.
+3. Connect. Creating a new vault asks for the server's shared secret, which the server admin provides. A device joining an existing vault doesn't need it: a device that already syncs the vault approves it instead.
+4. Create a recovery key when the plugin offers it. It is the only way back in if you lose every device.
+
+The shared secret keeps strangers from creating accounts on your server. It doesn't protect your data (your encryption keys do), so an organization can treat it as an internal configuration value. Opening the server URL in a browser shows how to connect and how to contact the admin.
 
 ## Network use and privacy
 - The plugin connects **only to the server URL you enter**. There is no telemetry, no analytics, and no other network traffic.
@@ -33,8 +47,6 @@ Then open the plugin settings. Enter the server URL, your username and the vault
 
 ## How it reads your vault
 The plugin syncs the whole vault in place, including the config folder (`.obsidian`, or whichever folder you set): settings, themes and other plugins. The Vault API doesn't cover the config folder, so the plugin uses `app.vault.adapter` for those files. Its own folder and `workspace*.json` are never synced, and each device can exclude more paths in the settings.
-
-The server keeps a history of every file: every version for 30 days and at least the last 10, and a deleted file's versions for 90 days. "Show file history" restores any version still kept.
 
 ## Documentation
 - [docs/self-hosting.md](docs/self-hosting.md): running the server

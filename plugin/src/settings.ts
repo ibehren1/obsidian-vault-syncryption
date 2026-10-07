@@ -86,12 +86,6 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 	override getSettingDefinitions(): SettingDefinitionItem[] {
 		return [
 			{
-				name: "Mobile support is in beta",
-				desc: "Keep a backup of your vault.",
-				visible: Platform.isMobile,
-				searchable: false,
-			},
-			{
 				name: "Server URL",
 				desc: "The address of your sync server.",
 				control: { type: "text", key: "endpoint", placeholder: "https://sync.example.com" },
