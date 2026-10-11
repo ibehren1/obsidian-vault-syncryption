@@ -34,7 +34,7 @@ def test_home_page(client):
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers[PROTOCOL_HEADER] == str(PROTOCOL_VERSION)
     text = r.text
-    assert f"Vault Syncryption server {__version__}" in text
+    assert f'Vault Syncryption server <span class="ver">{__version__}</span>' in text
     assert "https://notes.example.com" in text
     assert "encryption key" in text and "shared secret" in text
     assert f"Administrator: {CONTACT}" in text

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Vault Syncryption (small sizes: 16-32px)</title>
+  <!-- Simplified: flat fills, no bolts/shadow/bevel, heavier arrows. Same palette as main icon. -->
+  <rect width="512" height="512" rx="112" fill="#2d2f31"/>
+  <circle cx="256" cy="256" r="200" fill="#d9dbde"/>
+  <g fill="#B3101F">
+    <path d="M115.0,204.7 A150,150 0 0 1 348.3,137.8 L360.7,122.0 L376.8,216.8 L307.7,189.8 L320.0,174.0 A104,104 0 0 0 158.3,220.4 Z"/>
+    <path d="M397.0,307.3 A150,150 0 0 1 163.7,374.2 L151.3,390.0 L135.2,295.2 L204.3,322.2 L192.0,338.0 A104,104 0 0 0 353.7,291.6 Z"/>
+  </g>
+  <circle cx="256" cy="256" r="64" fill="#2d2f31"/>
+  <g fill="#e8eaed">
+    <circle cx="256" cy="246" r="18"/>
+    <polygon points="248,254 264,254 272,290 240,290"/>
+  </g>
+</svg>

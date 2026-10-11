@@ -1,4 +1,4 @@
-import { debounce, Notice, Plugin, requireApiVersion, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
+import { debounce, Notice, Plugin, requireApiVersion, setIcon, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
 
 import { ApiClient, type Device } from "./api/client";
 import {
@@ -45,6 +45,7 @@ import { DeletedFilesModal, HistoryModal, type HistorySource } from "./ui/histor
 import { ApproveModal, ConfirmModal, confirmFirstSync, PairingModal, prompt, ReloadModal, type PendingApproval } from "./ui/modals";
 import { showRecoveryKey } from "./ui/recovery";
 import { ComplianceModal } from "./ui/compliance";
+import { ICON, registerIcon } from "./ui/icon";
 import { StatusModal, type StatusDetails } from "./ui/status";
 import { countFiles, type OutboxEntry, type SyncStore } from "./store/state";
 import type { VaultKey } from "./ui/keys";
@@ -151,6 +152,8 @@ export default class SyncryptionPlugin extends Plugin {
 		await this.loadSettings();
 		this.addSettingTab(new SyncryptionSettingTab(this.app, this));
 		this.userPaused = this.app.loadLocalStorage(PAUSED) === true;
+		registerIcon();
+		this.addRibbonIcon(ICON, "Vault Syncryption: sync status", () => this.openStatus());
 		this.statusBar = this.addStatusBarItem();
 		this.lockBar = this.addStatusBarItem();
 		for (const item of [this.statusBar, this.lockBar]) {
@@ -632,7 +635,8 @@ export default class SyncryptionPlugin extends Plugin {
 		if (!this.lockBar) return;
 		const path = this.app.workspace.getActiveFile()?.path;
 		const other = path ? this.locks?.heldByOther(path) : null;
-		this.lockBar.setText(other ? `Vault Syncryption: ${other.deviceName} is editing` : "");
+		this.lockBar.empty();
+		if (other) statusBarText(this.lockBar, "lock", `${other.deviceName} is editing`, null);
 		this.lockBar.toggle(Boolean(other));
 	}
 
@@ -1257,17 +1261,21 @@ export default class SyncryptionPlugin extends Plugin {
 
 	private render(): void {
 		if (!this.statusBar) return;
+		// The glyph says which plugin this is, so the text is only the state (PLAN, Status bar).
+		const waiting = this.waiting ? ` · ${plural(this.waiting, "change")} waiting` : "";
 		const label: Record<State, string> = {
-			off: "Vault Syncryption: off",
-			connecting: "Vault Syncryption: connecting",
-			syncing: "Vault Syncryption: syncing",
-			idle: this.fileCount === null ? "Vault Syncryption: synced" : `Vault Syncryption: ${plural(this.fileCount, "file")} synced`,
-			offline: "Vault Syncryption: offline",
-			maintenance: "Vault Syncryption: maintenance",
-			error: "Vault Syncryption: error",
+			off: "Off",
+			connecting: "Connecting…",
+			syncing: this.progress ? `Syncing… ${this.progress}` : "Syncing…",
+			idle: this.fileCount === null ? "Synced" : `Synced · ${plural(this.fileCount, "file")}`,
+			offline: `Offline${waiting}`,
+			maintenance: "Server maintenance",
+			error: "Sync error",
 		};
-		this.statusBar.setText(this.showsPaused() ? "Vault Syncryption: paused" : label[this.state]);
-		this.statusBar.setAttr("aria-label", this.statusText());
+		const paused = this.showsPaused();
+		this.statusBar.empty();
+		statusBarText(this.statusBar, ICON, paused ? `Paused${waiting}` : label[this.state], paused ? "warn" : STATUS_KINDS[this.state]);
+		this.statusBar.setAttr("aria-label", `Vault Syncryption: ${this.statusText()}`);
 		for (const listener of this.statusListeners) listener();
 	}
 
@@ -1326,6 +1334,26 @@ export default class SyncryptionPlugin extends Plugin {
 		const paths = await engine.pathsOf(new Set(held.map((l) => l.fileId)));
 		return held.map((l) => ({ deviceName: l.deviceName, path: paths.get(l.fileId) ?? null }));
 	}
+}
+
+/** Which states colour the status bar item: the ones that ask for attention. */
+const STATUS_KINDS: Record<State, "warn" | "error" | "syncing" | null> = {
+	off: null,
+	connecting: null,
+	syncing: "syncing",
+	idle: null,
+	offline: "warn",
+	maintenance: "warn",
+	error: "error",
+};
+
+/** One status bar item: the glyph, then the text. The glyph spins while syncing. */
+function statusBarText(item: HTMLElement, icon: string, text: string, kind: "warn" | "error" | "syncing" | null): void {
+	const glyph = item.createSpan({ cls: "status-bar-item-icon" });
+	setIcon(glyph, icon);
+	item.createSpan({ text });
+	item.toggleClass("syncryption-bar", true);
+	for (const name of ["warn", "error", "syncing"] as const) item.toggleClass(`mod-${name}`, kind === name);
 }
 
 function plural(n: number, word: string): string {

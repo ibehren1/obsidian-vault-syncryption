@@ -43,7 +43,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 
 | Module | Responsibility |
 |---|---|
-| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, the HTML `/` page, version headers, the maintenance `503` for `/api/v1` |
+| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, the HTML `/` page, the icons `/` and `/admin` link (`static/`), version headers, the maintenance `503` for `/api/v1` |
 | `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors) |
 | `db` | SQLite connection (WAL mode), schema migrations (`PRAGMA user_version`), `BEGIN IMMEDIATE` transaction helper |
 | `errors` | `ApiError` and the handlers that turn every error into the protocol's `{error, message, details}` shape |
@@ -290,8 +290,8 @@ clean stop. CI runs it in the `container` job.
 ## 4. Plugin (`plugin/`)
 | Module | Responsibility |
 |---|---|
-| `main`, `compat`, `device` | plugin lifecycle, commands, status bar, pause and resume, event wiring, the first-sync confirmation, the `SecretStorage` check, the default device name |
-| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval, first-sync and reload dialogs, the recovery key dialog, file history and restore, the status window (`ui/status`), the remote-only compliance report (`ui/compliance`) |
+| `main`, `compat`, `device` | plugin lifecycle, commands, ribbon icon and status bar, pause and resume, event wiring, the first-sync confirmation, the `SecretStorage` check, the default device name |
+| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval, first-sync and reload dialogs, the recovery key dialog, file history and restore, the status window (`ui/status`), the icons (`ui/icon`), the remote-only compliance report (`ui/compliance`) |
 | `obsidian` | `requestUrl` transport, and the `VaultFs` over the Vault API |
 | `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects, path and key derivation (`kdf`), sealing under a remote-only device's local key (`local`, crypto.md 11) |
 | `api` | typed client over a `Transport` (`requestUrl` in the plugin, `fetch` in tests). `src/api/schema.ts` is generated from the server's OpenAPI with `npm run api-types` (CI checks it is current) |

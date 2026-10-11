@@ -7,9 +7,10 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from syncryption_server import (
@@ -30,6 +31,17 @@ from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import error_response, install_error_handlers, too_large
 from syncryption_server.state import AppState, load_maintenance
 from syncryption_server.storage import BlobStore, LocalBlobStore, S3BlobStore
+
+STATIC_DIR = Path(__file__).parent / "static"
+# Served at the root so browsers find them and the pages can link them: the logo, the
+# favicon and the icon iOS uses when a page is added to the home screen.
+ICONS = {
+    "/favicon.ico": "image/vnd.microsoft.icon",
+    "/icon-32.png": "image/png",
+    "/icon-128.png": "image/png",
+    "/icon-256.png": "image/png",
+}
+ICON_CACHE = "public, max-age=86400"
 
 VERSION_HEADER = "X-Syncryption-Version"
 PROTOCOL_HEADER = "X-Syncryption-Protocol"
@@ -117,8 +129,8 @@ def home_page(state: AppState, origin: str, health: dict[str, object]) -> HTMLRe
         if m.message:
             status += f"<p>Message from the administrator: {html.escape(m.message)}</p>"
     body = (
-        f"<h1>Vault Syncryption server {html.escape(__version__)}</h1>"
-        "<p>Self-hosted, end-to-end encrypted sync for Obsidian. Notes are encrypted on "
+        admin.brand("Vault Syncryption server", __version__)
+        + "<p>Self-hosted, end-to-end encrypted sync for Obsidian. Notes are encrypted on "
         "your devices; this server stores only ciphertext.</p>"
         f"{status}"
         "<h2>Connecting</h2><ol>"
@@ -220,6 +232,16 @@ def create_app(
     async def health(request: Request) -> JSONResponse:
         body, status = await health_report(request.app.state.ctx)
         return JSONResponse(body, status_code=status)
+
+    def add_icon_route(path: str, media_type: str) -> None:
+        file = STATIC_DIR / path.lstrip("/")
+
+        @app.get(path, include_in_schema=False, name=f"icon{path}")
+        async def icon() -> FileResponse:
+            return FileResponse(file, media_type=media_type, headers={"Cache-Control": ICON_CACHE})
+
+    for icon_path, icon_type in ICONS.items():
+        add_icon_route(icon_path, icon_type)
 
     @app.get("/", include_in_schema=False)
     async def home(request: Request) -> HTMLResponse:

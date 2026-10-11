@@ -478,6 +478,9 @@ button.danger { color: #fff; background: #c33; border: 1px solid #a22; }
 }
 .notice.error { background: #f8eeee; border-color: #c99; }
 header { display: flex; justify-content: space-between; align-items: center; }
+.brand { display: flex; align-items: center; gap: 1rem; }
+.brand h1 { margin: .5rem 0; }
+.brand .ver { color: #777; font-size: .95rem; font-weight: 400; }
 """
 
 
@@ -494,12 +497,28 @@ def _when(value: str | None) -> str:
     return html.escape(value.replace("T", " ").replace("Z", " UTC")) if value else "never"
 
 
+ICON_LINKS = (
+    '<link rel="icon" href="/favicon.ico" sizes="any">'
+    '<link rel="icon" type="image/png" href="/icon-32.png" sizes="32x32">'
+    '<link rel="apple-touch-icon" href="/icon-256.png">'
+)
+
+
+def brand(title: str, version: str | None = None) -> str:
+    """The logo and page title, shared by `/` and `/admin`."""
+    ver = f' <span class="ver">{html.escape(version)}</span>' if version else ""
+    return (
+        '<div class="brand"><img src="/icon-128.png" width="64" height="64" alt="">'
+        f"<h1>{html.escape(title)}{ver}</h1></div>"
+    )
+
+
 def html_page(body: str, status: int = 200, title: str = "Vault Syncryption admin") -> HTMLResponse:
     """A page with the admin style and strict headers. Also used for the `/` page."""
     doc = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{html.escape(title)}</title><style>{STYLE}</style></head>"
+        f"<title>{html.escape(title)}</title>{ICON_LINKS}<style>{STYLE}</style></head>"
         f"<body>{body}</body></html>"
     )
     return HTMLResponse(
@@ -507,7 +526,8 @@ def html_page(body: str, status: int = 200, title: str = "Vault Syncryption admi
         status_code=status,
         headers={
             "Cache-Control": "no-store",
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'; "
+            "style-src 'unsafe-inline'; "
             "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             "Referrer-Policy": "no-referrer",
             "X-Frame-Options": "DENY",
@@ -520,8 +540,7 @@ def _login_page(message: str | None = None, status: int = 200, error: bool = Tru
     kind = "notice error" if error else "notice"
     notice = f'<p class="{kind}">{html.escape(message)}</p>' if message else ""
     return html_page(
-        "<h1>Vault Syncryption admin</h1>"
-        f"{notice}"
+        brand("Vault Syncryption admin") + f"{notice}"
         '<form method="post" action="/admin/login">'
         '<p><label>Admin token<br><input type="password" name="token" size="48" '
         'autocomplete="current-password" required autofocus></label></p>'
@@ -602,7 +621,7 @@ def _dashboard(
         if admin.csrf
         else ""
     )
-    parts = [f"<header><h1>Vault Syncryption admin</h1>{logout}</header>"]
+    parts = [f"<header>{brand('Vault Syncryption admin')}{logout}</header>"]
     if message:
         parts.append(f'<p class="notice{" error" if error else ""}">{html.escape(message)}</p>')
     parts.append(_maintenance_section(admin, state))

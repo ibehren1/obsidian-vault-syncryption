@@ -6,7 +6,8 @@ Crypto details live in [crypto.md](crypto.md).
 
 ## 1. Conventions
 - **Base URL:** the configured endpoint, e.g. `https://notes.example.com`. All paths
-  below are under `/api/v1`, except `/`, `/health` and `/admin`.
+  below are under `/api/v1`, except `/`, `/health`, `/admin` and the icons
+  (`/favicon.ico`, `/icon-32.png`, `/icon-128.png`, `/icon-256.png`).
 - **Bodies:** JSON (`application/json`), except blob uploads and downloads, which are
   `application/octet-stream`.
 - **Binary values in JSON:** `b64u` (base64url, no padding).

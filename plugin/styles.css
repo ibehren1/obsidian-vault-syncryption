@@ -55,3 +55,374 @@
 	word-break: break-all;
 	user-select: text;
 }
+
+/* Status bar items: the glyph, then the state. Colour only where it asks for attention. */
+.syncryption-bar {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.syncryption-bar.mod-warn {
+	color: var(--text-warning);
+}
+
+.syncryption-bar.mod-error {
+	color: var(--text-error);
+}
+
+.syncryption-bar.mod-syncing .status-bar-item-icon svg {
+	animation: syncryption-spin 1.6s linear infinite;
+}
+
+@keyframes syncryption-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* The sync status window: a wide modal with its own header, tile strip and sections. */
+.modal.syncryption-status {
+	width: 920px;
+	max-width: 92vw;
+	padding: 0;
+}
+
+.syncryption-status .modal-content {
+	margin: 0;
+	padding: 0;
+	user-select: text;
+}
+
+.syncryption-head {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-3);
+	padding: var(--size-4-3) var(--size-4-4);
+	padding-right: calc(var(--size-4-4) + var(--size-4-6));
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.syncryption-logo {
+	flex: none;
+	border-radius: var(--radius-s);
+}
+
+.syncryption-id-name {
+	font-weight: var(--font-semibold);
+}
+
+.syncryption-id-where {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.syncryption-actions {
+	display: flex;
+	gap: var(--size-4-2);
+}
+
+.syncryption-spacer {
+	flex: 1;
+}
+
+.syncryption-detail {
+	padding: var(--size-4-2) var(--size-4-4);
+	border-bottom: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.syncryption-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	padding: 0 var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-l);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	white-space: nowrap;
+}
+
+.syncryption-pill::before {
+	content: "";
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+.syncryption-pill.mod-ok {
+	color: var(--color-green);
+}
+
+.syncryption-pill.mod-warn {
+	color: var(--text-warning);
+}
+
+.syncryption-pill.mod-error {
+	color: var(--text-error);
+}
+
+.syncryption-pill.mod-off,
+.syncryption-pill.mod-unknown {
+	color: var(--text-muted);
+}
+
+/* The four numbers people look for, across the top. */
+.syncryption-tiles {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.syncryption-tile {
+	padding: var(--size-4-2) var(--size-4-4);
+	border-right: 1px solid var(--background-modifier-border);
+	min-width: 0;
+}
+
+.syncryption-tile:last-child {
+	border-right: 0;
+}
+
+.syncryption-tile-key {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+}
+
+.syncryption-tile-value {
+	font-size: var(--font-ui-large);
+	font-weight: var(--font-semibold);
+	font-variant-numeric: tabular-nums;
+}
+
+.syncryption-tile-detail {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Left: what is in flight. Right: this device. */
+.syncryption-cols {
+	display: grid;
+	grid-template-columns: 1.15fr 1fr;
+}
+
+.syncryption-col {
+	padding: var(--size-4-3) var(--size-4-4);
+	min-width: 0;
+}
+
+.syncryption-col + .syncryption-col {
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+.syncryption-keys {
+	padding: var(--size-4-3) var(--size-4-4);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.syncryption-foot:not(:empty) {
+	padding: var(--size-4-2) var(--size-4-4);
+	border-top: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.syncryption-sec + .syncryption-sec {
+	margin-top: var(--size-4-4);
+}
+
+.syncryption-sec-head {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.syncryption-sec-name {
+	font-weight: var(--font-semibold);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+}
+
+.syncryption-sec-count {
+	color: var(--text-faint);
+}
+
+.syncryption-warn {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-3);
+	color: var(--text-warning);
+}
+
+.syncryption-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--font-ui-small);
+	table-layout: fixed;
+}
+
+.syncryption-table th {
+	text-align: left;
+	font-weight: var(--font-normal);
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	padding: 0 var(--size-4-2) var(--size-2-2) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.syncryption-table td {
+	padding: var(--size-2-2) var(--size-4-2) var(--size-2-2) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+	vertical-align: middle;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.syncryption-table .syncryption-right {
+	text-align: right;
+	padding-right: 0;
+}
+
+.syncryption-muted {
+	color: var(--text-muted);
+}
+
+.syncryption-mono {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+.syncryption-ellipsis {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+
+.syncryption-scroll {
+	max-height: 11em;
+	overflow-y: auto;
+}
+
+.syncryption-kv {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 0;
+	margin: 0;
+	font-size: var(--font-ui-small);
+}
+
+.syncryption-kv dt {
+	color: var(--text-muted);
+	padding: var(--size-2-2) var(--size-4-3) var(--size-2-2) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.syncryption-kv dd {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin: 0;
+	padding: var(--size-2-2) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+	min-width: 0;
+}
+
+.syncryption-kv dd button {
+	padding: var(--size-2-1) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+}
+
+.syncryption-tag {
+	margin-left: var(--size-2-2);
+	padding: 0 var(--size-2-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.syncryption-tag.mod-self {
+	color: var(--text-accent);
+}
+
+.syncryption-dot {
+	flex: none;
+	display: inline-block;
+	width: 7px;
+	height: 7px;
+	margin-right: var(--size-2-2);
+	border-radius: 50%;
+	background: var(--text-faint);
+}
+
+.syncryption-dot.mod-ok {
+	background: var(--color-green);
+}
+
+.syncryption-dot.mod-warn {
+	background: var(--color-yellow);
+}
+
+.syncryption-dot.mod-error {
+	background: var(--color-red);
+}
+
+/* Narrow windows and phones: one column, tiles 2x2, and the key table keeps the ends. */
+@media (max-width: 700px) {
+	.modal.syncryption-status {
+		width: 100%;
+		max-width: 100%;
+	}
+
+	.syncryption-head {
+		flex-wrap: wrap;
+	}
+
+	.syncryption-actions {
+		flex: 1 0 100%;
+	}
+
+	.syncryption-actions button {
+		flex: 1;
+	}
+
+	.syncryption-tiles {
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.syncryption-tile:nth-child(2n) {
+		border-right: 0;
+	}
+
+	.syncryption-tile:nth-child(-n + 2) {
+		border-bottom: 1px solid var(--background-modifier-border);
+	}
+
+	.syncryption-cols {
+		grid-template-columns: 1fr;
+	}
+
+	.syncryption-col + .syncryption-col {
+		border-left: 0;
+		border-top: 1px solid var(--background-modifier-border);
+	}
+
+	.syncryption-table th:nth-child(2),
+	.syncryption-table td:nth-child(2),
+	.syncryption-table th:nth-child(3),
+	.syncryption-table td:nth-child(3) {
+		display: none;
+	}
+}

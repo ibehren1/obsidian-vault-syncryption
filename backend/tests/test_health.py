@@ -39,3 +39,21 @@ def test_errors_use_the_protocol_format(client):
     assert r.json()["error"] == "not_found"
     assert r.headers[VERSION_HEADER] == __version__
     assert r.headers[PROTOCOL_HEADER] == str(PROTOCOL_VERSION)
+
+
+def test_icons_are_served_and_linked(client):
+    page = client.get("/")
+    assert 'href="/favicon.ico"' in page.text
+    assert 'src="/icon-128.png"' in page.text
+    assert "img-src 'self'" in page.headers["Content-Security-Policy"]
+
+    for path, media_type in (
+        ("/favicon.ico", "image/vnd.microsoft.icon"),
+        ("/icon-32.png", "image/png"),
+        ("/icon-128.png", "image/png"),
+        ("/icon-256.png", "image/png"),
+    ):
+        r = client.get(path)
+        assert (r.status_code, r.headers["content-type"]) == (200, media_type), path
+        assert r.content[:4] in (b"\x00\x00\x01\x00", b"\x89PNG"), path
+        assert "max-age" in r.headers["Cache-Control"]
