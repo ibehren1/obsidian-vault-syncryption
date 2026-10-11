@@ -162,7 +162,8 @@ export interface PendingApproval {
 	/** `SHA256:…` */
 	fingerprint: string;
 	code: string;
-	approve(): Promise<void>;
+	/** `remoteOnly`: approve it as a remote-only device (docs/remote-only.md 4). */
+	approve(remoteOnly: boolean): Promise<void>;
 }
 
 /** Lists the keys waiting for approval, each with its pairing code. */
@@ -183,25 +184,35 @@ export class ApproveModal extends Modal {
 		this.contentEl.createEl("p", {
 			text: "Approve a key only if its device shows exactly the same code. An approved key can read the whole vault.",
 		});
+		this.contentEl.createEl("p", {
+			cls: "syncryption-note",
+			text: "A remote-only device keeps the vault's files on its disk only encrypted, locks when it can't reach the server for too long, and deletes them when its key is removed. It can't approve or remove keys or set the recovery key.",
+		});
 		for (const item of this.pending) {
 			const setting = new Setting(this.contentEl).setName(item.name).setDesc(item.code);
 			setting.nameEl.createDiv({ text: item.fingerprint, cls: "setting-item-description" });
-			setting.addButton((b: ButtonComponent) =>
-				b
-					.setButtonText("Codes match, approve")
+			const buttons: ButtonComponent[] = [];
+			const approve = async (remoteOnly: boolean) => {
+				for (const b of buttons) b.setDisabled(true);
+				try {
+					await item.approve(remoteOnly);
+					setting.setDesc(`${item.code}: approved${remoteOnly ? " as remote-only" : ""}`);
+					for (const b of buttons) b.buttonEl.remove();
+				} catch (e) {
+					for (const b of buttons) b.setDisabled(false);
+					setting.setDesc(`${item.code}: ${e instanceof Error ? e.message : "approval failed"}`);
+				}
+			};
+			setting.addButton((b: ButtonComponent) => {
+				buttons.push(b);
+				b.setButtonText("Approve as remote-only").onClick(() => approve(true));
+			});
+			setting.addButton((b: ButtonComponent) => {
+				buttons.push(b);
+				b.setButtonText("Codes match, approve")
 					.setCta()
-					.onClick(async () => {
-						b.setDisabled(true);
-						try {
-							await item.approve();
-							setting.setDesc(`${item.code}: approved`);
-							b.buttonEl.remove();
-						} catch (e) {
-							b.setDisabled(false);
-							setting.setDesc(`${item.code}: ${e instanceof Error ? e.message : "approval failed"}`);
-						}
-					}),
-			);
+					.onClick(() => approve(false));
+			});
 		}
 	}
 

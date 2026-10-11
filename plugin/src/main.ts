@@ -1,13 +1,27 @@
 import { debounce, Notice, Plugin, requireApiVersion, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
 
 import { ApiClient, type Device } from "./api/client";
-import { ApiError, disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError } from "./api/http";
+import {
+	ApiError,
+	disabledText,
+	isDisabled,
+	isMaintenance,
+	isLocked,
+	isRevoked,
+	maintenanceText,
+	NetworkError,
+	LOCKED_TEXT,
+	REVOKED_TEXT,
+} from "./api/http";
 import { hasSecretStorage, MIN_APP_VERSION } from "./compat";
 import { generateRecoveryKey } from "./crypto/keyring";
 import { fingerprint, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey, type OpenSshKey } from "./crypto/openssh";
 import { loadKeyText, saveKeyText, unlockKey } from "./keys";
 import { requestUrlTransport } from "./obsidian/transport";
 import { ObsidianFs } from "./obsidian/fs";
+import { duration } from "./remote/compliance";
+import { RemoteOnly } from "./remote/remote-only";
+import { RemoteStatFs } from "./remote/stat-fs";
 import {
 	currentKeySlot,
 	DEFAULT_SETTINGS,
@@ -18,6 +32,7 @@ import {
 	type SyncryptionSettings,
 } from "./settings";
 import { IndexedDbStore } from "./store/idb";
+import { SealedHashStore } from "./store/sealed";
 import { AdapterFs, isHiddenPath, SplitFs } from "./sync/adapter-fs";
 import { VaultCipher } from "./sync/cipher";
 import { CURSOR, SyncEngine, type SyncProgress, type SyncReport } from "./sync/engine";
@@ -29,8 +44,10 @@ import { connect, handOver, openLastVault, SetupCancelled, type LastVault, type 
 import { DeletedFilesModal, HistoryModal, type HistorySource } from "./ui/history";
 import { ApproveModal, ConfirmModal, confirmFirstSync, PairingModal, prompt, ReloadModal, type PendingApproval } from "./ui/modals";
 import { showRecoveryKey } from "./ui/recovery";
+import { ComplianceModal } from "./ui/compliance";
 import { StatusModal, type StatusDetails } from "./ui/status";
 import { countFiles, type OutboxEntry, type SyncStore } from "./store/state";
+import type { VaultKey } from "./ui/keys";
 
 /** Long-poll brings remote changes; the timer is a fallback. Local changes sync soon after. */
 const SYNC_INTERVAL_MS = 120_000;
@@ -49,6 +66,8 @@ const DEVICES_CACHE_MS = 10_000;
 const MAINTENANCE_RETRY_S = { default: 60, min: 5, max: 600 };
 /** Sync progress is shown at most this often. */
 const PROGRESS_MS = 250;
+/** How often a remote-only device checks its lease and File Recovery. */
+const REMOTE_CHECK_MS = 30_000;
 
 type State = "off" | "connecting" | "idle" | "syncing" | "offline" | "maintenance" | "error";
 
@@ -109,6 +128,11 @@ export default class SyncryptionPlugin extends Plugin {
 	/** Paused without a connection: the last vault's local state, to queue and list changes. */
 	private localStore: SyncStore | null = null;
 	private localSlot: string | null = null;
+	/** Remote-only files (docs/remote-only.md): the wrapper, the lease and the wipe. */
+	private readonly remote = new RemoteOnly(this.app, {
+		installId: () => this.installId(),
+		register: (fn) => this.register(fn),
+	});
 	private readonly scheduleSync = debounce(
 		() => {
 			if (!this.paused()) void this.syncNow();
@@ -122,6 +146,8 @@ export default class SyncryptionPlugin extends Plugin {
 			new Notice(`Vault Syncryption needs Obsidian ${MIN_APP_VERSION} or later. Please update Obsidian.`);
 			return;
 		}
+		// Before anything else, so Obsidian's reads of remote-only files go through the wrapper.
+		await this.remote.load();
 		await this.loadSettings();
 		this.addSettingTab(new SyncryptionSettingTab(this.app, this));
 		this.userPaused = this.app.loadLocalStorage(PAUSED) === true;
@@ -168,6 +194,25 @@ export default class SyncryptionPlugin extends Plugin {
 			},
 		});
 		this.addCommand({ id: "restore-deleted", name: "Restore a deleted file", callback: () => void this.openDeleted() });
+		this.addCommand({ id: "remote-only-report", name: "Show remote-only compliance report", callback: () => this.openCompliance() });
+		this.addCommand({
+			id: "lock-remote-only",
+			name: "Lock remote-only files",
+			checkCallback: (checking) => {
+				if (!this.isRemoteOnly() || !this.remote.unlocked) return false;
+				if (!checking) this.lockRemote();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "unlock-remote-only",
+			name: "Unlock remote-only files",
+			checkCallback: (checking) => {
+				if (!this.isRemoteOnly() || this.remote.unlocked) return false;
+				if (!checking) void this.unlockRemote();
+				return true;
+			},
+		});
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				if (!(file instanceof TFile) || !this.filter()(file.path)) return;
@@ -185,8 +230,13 @@ export default class SyncryptionPlugin extends Plugin {
 			const changed = (file: TAbstractFile) => {
 				if (file instanceof TFile) this.noteChange(file.path);
 			};
-			this.registerEvent(this.app.vault.on("create", changed));
-			this.registerEvent(this.app.vault.on("modify", changed));
+			// A remote-only file written to disk by something other than Obsidian becomes a stub.
+			const written = (file: TAbstractFile) => {
+				void this.remote.noteDiskChange(file).catch(() => {});
+				changed(file);
+			};
+			this.registerEvent(this.app.vault.on("create", written));
+			this.registerEvent(this.app.vault.on("modify", written));
 			this.registerEvent(this.app.vault.on("delete", changed));
 			this.registerEvent(
 				this.app.vault.on("rename", (file, oldPath) => {
@@ -201,7 +251,13 @@ export default class SyncryptionPlugin extends Plugin {
 				}),
 			);
 			this.registerInterval(window.setInterval(() => this.tick(), SYNC_INTERVAL_MS));
-			this.registerEvent(this.app.workspace.on("file-open", () => void this.holdActive()));
+			this.registerInterval(window.setInterval(() => this.checkRemote(), REMOTE_CHECK_MS));
+			this.registerEvent(
+				this.app.workspace.on("file-open", (file) => {
+					void this.holdActive();
+					void this.remote.warmEmbeds(file);
+				}),
+			);
 			// Mobile apps are suspended in the background: let the lock go instead of letting it expire.
 			this.registerDomEvent(document, "visibilitychange", () => {
 				if (document.visibilityState === "hidden") {
@@ -209,6 +265,7 @@ export default class SyncryptionPlugin extends Plugin {
 					return;
 				}
 				// Timers and the long-poll don't run while a mobile app is in the background.
+				this.checkRemote();
 				void this.holdActive();
 				this.live?.wake();
 				this.tick();
@@ -368,6 +425,8 @@ export default class SyncryptionPlugin extends Plugin {
 		this.session = null;
 		this.sessionSlot = null;
 		this.serverDevices = null;
+		// A sync still running mustn't commit what it reads after a lock or an unload.
+		this.engine?.close();
 		this.engine = null;
 		this.firstSync = false;
 		this.hideProgress();
@@ -420,7 +479,7 @@ export default class SyncryptionPlugin extends Plugin {
 				vaultId: session.vault.id,
 				cipher: new VaultCipher(() => session.keyring),
 				fs: new SplitFs(
-					new ObsidianFs(this.app),
+					new RemoteStatFs(new ObsidianFs(this.app), () => this.remote.stub),
 					new AdapterFs(this.app.vault.adapter, {
 						configDir: this.app.vault.configDir,
 						skipsFolder: (folder) => this.filter().skipsFolder(folder),
@@ -449,6 +508,21 @@ export default class SyncryptionPlugin extends Plugin {
 				session.store.close();
 				return;
 			}
+			try {
+				const wasRemote = this.remote.flag !== null;
+				const mode = await this.remote.apply(session, session.store as SealedHashStore);
+				if (mode === "restored") new Notice("This device is no longer remote-only: its files are back on disk.");
+				else if (mode === "remote-only" && !wasRemote) {
+					new Notice("This device is now remote-only: its notes are stored on it only encrypted.", 10_000);
+				}
+			} catch (e) {
+				session.store.close();
+				throw e;
+			}
+			if (this.abort !== abort) {
+				session.store.close();
+				return;
+			}
 			this.session = session;
 			this.sessionSlot = slot;
 			this.app.saveLocalStorage(LAST_VAULT, { slot, vaultId: session.vault.id } satisfies LastVault);
@@ -457,8 +531,11 @@ export default class SyncryptionPlugin extends Plugin {
 			this.waiting = (await engine.pending()).length;
 			if (!this.userPaused) this.startLive(session);
 			this.setState("idle");
-			void this.offerRecoveryKey(session);
-			if (!this.userPaused) void this.finishRevocations(session);
+			// A remote-only device can't manage the vault (remote-only.md 4).
+			if (!session.remoteOnly) {
+				void this.offerRecoveryKey(session);
+				if (!this.userPaused) void this.finishRevocations(session);
+			}
 			// In the background: the first sync of a large vault takes a while.
 			if (!this.userPaused || syncOnce) void this.syncNow(syncOnce);
 		} catch (e) {
@@ -518,6 +595,10 @@ export default class SyncryptionPlugin extends Plugin {
 			cursor: async () => (await session.store.getMeta<number>(CURSOR)) ?? 0,
 			keyringVersion: () => session.keyring.version,
 			onChanges: () => this.syncNow(),
+			// A removed key ends here at once, not at the next sync.
+			onError: (e) => {
+				if (this.session === session && (isRevoked(e) || isLocked(e))) this.fail(e);
+			},
 			onLocks: async () => {
 				if (this.locks !== locks) return;
 				await locks.refresh();
@@ -598,6 +679,7 @@ export default class SyncryptionPlugin extends Plugin {
 
 	/** Sync, or connect again if the last attempt failed for want of a network or for maintenance. */
 	private tick(): void {
+		this.checkRemote();
 		if (this.paused()) return;
 		if (this.engine) void this.syncNow();
 		else if ((this.state === "offline" || this.state === "maintenance") && isConfigured(this.settings)) void this.start();
@@ -643,8 +725,32 @@ export default class SyncryptionPlugin extends Plugin {
 		});
 	}
 
-	private openStore(vaultId: string): Promise<IndexedDbStore> {
-		return IndexedDbStore.open(`syncryption-${this.installId()}-${vaultId}`);
+	/** The sync state, with the content hashes sealed on a remote-only device. */
+	private async openStore(vaultId: string): Promise<SealedHashStore> {
+		const store = await IndexedDbStore.open(`syncryption-${this.installId()}-${vaultId}`);
+		return new SealedHashStore(store, () => this.remote.hashMode(vaultId));
+	}
+
+	/**
+	 * A remote-only device locks once the grace period passes without a login (remote-only.md
+	 * 5), and while File Recovery is on. It unlocks at the next connection.
+	 */
+	private checkRemote(): void {
+		if (!this.remote.unlocked) return;
+		let reason: string;
+		if (this.remote.fileRecoveryEnabled()) {
+			reason = "Remote-only files locked: the File Recovery core plugin is on. Turn it off, then connect again.";
+		} else if (this.remote.leaseExpired()) {
+			const grace = this.remote.lease()?.graceSeconds ?? 0;
+			reason = `Remote-only files locked: no connection to the server for over ${duration(grace * 1000)}. They unlock when it connects again.`;
+		} else {
+			return;
+		}
+		this.remote.lock();
+		this.stop();
+		this.detail = reason;
+		this.setState("offline");
+		new Notice(`Sync: ${reason}`, 10_000);
 	}
 
 	/** Paused and not connected: open the last vault's local state. No network. */
@@ -713,7 +819,13 @@ export default class SyncryptionPlugin extends Plugin {
 				new Notice(`First sync done. ${plural(this.fileCount ?? 0, "file")} in sync.`, 8000);
 			}
 			this.announce(report);
-			await this.checkApprovals();
+			// Another device changed this device's policy: connect again to follow it.
+			const session = this.session;
+			if (session && session.remoteOnly !== (this.remote.flag?.vaultId === session.vault.id)) {
+				void this.restart();
+				return;
+			}
+			if (!session?.remoteOnly) await this.checkApprovals();
 		} catch (e) {
 			if (this.engine !== engine) return;
 			this.progress = "";
@@ -802,14 +914,18 @@ export default class SyncryptionPlugin extends Plugin {
 			new Notice("Not connected to the sync server.");
 			return;
 		}
+		if (session.remoteOnly) {
+			new Notice("This device is remote-only: approve new keys on a full device of the vault.");
+			return;
+		}
 		try {
 			const pending = await session.pendingDevices();
 			const items: PendingApproval[] = pending.map((p) => ({
 				name: p.device.name,
 				fingerprint: p.device.fingerprint,
 				code: p.code,
-				approve: async () => {
-					await session.approve(p.device);
+				approve: async (remoteOnly) => {
+					await session.approve(p.device, { remoteOnly });
 					this.serverDevices = null;
 				},
 			}));
@@ -861,10 +977,22 @@ export default class SyncryptionPlugin extends Plugin {
 	}
 
 	/** Every key in the vault's keyring, for the settings tab, or null when not connected. */
-	vaultKeys(): Array<{ id: string; name: string; publicKey: string; added: string; self: boolean }> | null {
+	vaultKeys(): VaultKey[] | null {
 		const session = this.session;
 		if (!session) return null;
-		return session.keyring.devices.map((d) => ({ ...d, self: d.id === session.deviceId }));
+		return session.keyring.devices.map((d) => ({
+			id: d.id,
+			name: d.name,
+			publicKey: d.publicKey,
+			added: d.added,
+			self: d.id === session.deviceId,
+			remoteOnly: d.policy === "remote-only",
+		}));
+	}
+
+	/** Whether the connected device is remote-only (remote-only.md 4): it can't manage the vault. */
+	isRemoteOnly(): boolean {
+		return this.session?.remoteOnly ?? this.remote.flag !== null;
 	}
 
 	/** The vault's keys on the server by id (status, last seen), cached briefly. Null when not connected. */
@@ -877,6 +1005,60 @@ export default class SyncryptionPlugin extends Plugin {
 			this.serverDevices = { at: Date.now(), devices };
 		}
 		return this.serverDevices.devices;
+	}
+
+	/** Lock this remote-only device's files and disconnect, until the user unlocks them (remote-only.md 5). */
+	lockRemote(): void {
+		this.remote.lock();
+		this.stop();
+		this.forgetKey();
+		this.detail = "Remote-only files locked on this device. Unlock them to open notes and sync.";
+		this.render();
+		new Notice("Remote-only files locked.");
+	}
+
+	/** Unlock is connecting: the local key comes from the keyring. */
+	async unlockRemote(): Promise<void> {
+		await this.restart();
+		if (this.remote.unlocked) new Notice("Remote-only files unlocked.");
+	}
+
+	/** Make another key remote-only or a full device again (remote-only.md 4). */
+	async setDevicePolicy(id: string, remoteOnly: boolean): Promise<boolean> {
+		const session = this.session;
+		if (!session) {
+			new Notice("Not connected to the sync server.");
+			return false;
+		}
+		const name = session.keyring.devices.find((d) => d.id === id)?.name ?? "The device";
+		try {
+			await session.setPolicy(id, remoteOnly);
+		} catch (e) {
+			this.fail(e, true);
+			return false;
+		}
+		this.serverDevices = null;
+		new Notice(`${name} is now ${remoteOnly ? "remote-only" : "a full device"}. It changes the next time it connects.`);
+		return true;
+	}
+
+	/** Lock or unlock another remote-only key (remote-only.md 5). */
+	async setDeviceLocked(id: string, locked: boolean): Promise<boolean> {
+		const session = this.session;
+		if (!session) {
+			new Notice("Not connected to the sync server.");
+			return false;
+		}
+		const name = session.keyring.devices.find((d) => d.id === id)?.name ?? "The device";
+		try {
+			await session.setLocked(id, locked);
+		} catch (e) {
+			this.fail(e, true);
+			return false;
+		}
+		this.serverDevices = null;
+		new Notice(locked ? `${name} is locked: it can't open its notes or sync until you unlock it.` : `${name} is unlocked.`);
+		return true;
 	}
 
 	/** Remove another key from this vault and rotate the vault key (crypto.md 8.4). */
@@ -906,11 +1088,12 @@ export default class SyncryptionPlugin extends Plugin {
 	 * vault over to a new key (`replaceKey`) instead of joining as a new device.
 	 */
 	canHandOver(slot: string): boolean {
-		return this.session !== null && this.sessionSlot === slot && this.settings.keyId === slot;
+		// A remote-only key can't approve its successor (remote-only.md 4).
+		return this.session !== null && !this.session.remoteOnly && this.sessionSlot === slot && this.settings.keyId === slot;
 	}
 
 	/**
-	 * Replace this device's key (PLAN, Rules: Replace): the connected old key approves the
+	 * Replace this device's key: the connected old key approves the
 	 * new one, the new key is saved, and after a restart the new key removes the old one and
 	 * rotates the vault key. The old key stays in the slot until the new one is approved.
 	 */
@@ -1030,10 +1213,29 @@ export default class SyncryptionPlugin extends Plugin {
 			this.maintenanceNoticed = true;
 			return;
 		}
+		if (isLocked(e)) {
+			// Locked by another device: retried on every tick, so it opens again once unlocked there.
+			this.remote.lock();
+			this.stop();
+			this.detail = LOCKED_TEXT;
+			this.setState("offline");
+			if (this.lastError !== LOCKED_TEXT || userAction) new Notice(`Sync: ${LOCKED_TEXT}`, 10_000);
+			this.lastError = LOCKED_TEXT;
+			return;
+		}
 		let message = e instanceof Error ? e.message : "Sync failed.";
 		if (isDisabled(e)) {
 			message = disabledText(e);
+			this.remote.lock();
 			this.stop(); // until the user reconnects
+		} else if (isRevoked(e)) {
+			// Retrying can't help: the key can never log in again.
+			message = REVOKED_TEXT;
+			this.stop();
+			if (this.remote.flag) {
+				message = "This device was removed from the vault.";
+				void this.wipe();
+			}
 		}
 		// Syncs retry on every wake-up and timer tick: show each error once, not on every retry.
 		const repeated = this.lastError === message;
@@ -1073,6 +1275,21 @@ export default class SyncryptionPlugin extends Plugin {
 		new StatusModal(this.app, this).open();
 	}
 
+	openCompliance(): void {
+		new ComplianceModal(this.app, () => this.remote.report(this.session, this.session?.store as SealedHashStore | null ?? null), {
+			unlocked: () => this.remote.unlocked,
+			lock: () => this.lockRemote(),
+			unlock: () => this.unlockRemote(),
+		}).open();
+	}
+
+	/** A remote-only device was removed: its files and local state go (remote-only.md 5). */
+	private async wipe(): Promise<void> {
+		this.closeLocal();
+		await this.remote.wipe();
+		this.app.saveLocalStorage(LAST_VAULT, null);
+	}
+
 	/** What the status window shows, all from memory. */
 	statusDetails(): StatusDetails {
 		const s = this.settings;
@@ -1089,6 +1306,8 @@ export default class SyncryptionPlugin extends Plugin {
 			vault: s.username && s.vaultName ? `${s.username} / ${this.session?.vault.name ?? s.vaultName}` : "",
 			deviceName: s.deviceName,
 			fingerprint: isConfigured(s) ? fingerprint(parsePublicKeyText(s.publicKey)) : null,
+			remoteOnly: this.isRemoteOnly(),
+			remoteUnlocked: this.remote.unlocked,
 		};
 	}
 

@@ -732,15 +732,41 @@ def kdf_vectors() -> dict:
         pairing.append(
             {"publicKey": pk.hex(), "publicKeyText": pub_text(pk), "code": pairing_code(pk)}
         )
+    # The local key of a remote-only device (crypto.md 11): the local store's content and
+    # the sync state's hashes are sealed under it, with the path in the AD.
+    local = hkdf_empty_salt(index, b"syncryption/v1/local")
+    local_path = "Notes/Projects/Plan.md"
+    content_nonce = fixed("local content nonce", 24)
+    content = "secret plan\n".encode()
+    content_ad = b"syncryption/v1/local-content\x00" + local_path.encode()
+    digest = hashlib.sha256(content).digest()
+    hash_nonce = fixed("local hash nonce", 24)
+    hash_ad = b"syncryption/v1/local-hash\x00" + local_path.encode()
+    sealed_hash = hash_nonce + xchacha_seal(local, hash_nonce, digest, hash_ad)
     return {
-        "description": "Vault key derivations (crypto.md 5) and pairing codes (crypto.md 6.5). "
-        "Strings are UTF-8, binary values hex, fileIdString is b64u.",
+        "description": "Vault key derivations (crypto.md 5), pairing codes (crypto.md 6.5) and "
+        "the remote-only local key (crypto.md 11). Strings are UTF-8, binary values hex, "
+        "fileIdString is b64u.",
         "vdk1": vdk1.hex(),
         "vdk2": vdk2.hex(),
         "indexKey": index.hex(),
         "files": files,
         "invalidPaths": invalid_paths,
         "pairingCodes": pairing,
+        "local": {
+            "localKey": local.hex(),
+            "path": local_path,
+            "content": {
+                "plaintext": content.hex(),
+                "nonce": content_nonce.hex(),
+                "ciphertext": xchacha_seal(local, content_nonce, content, content_ad).hex(),
+            },
+            "hash": {
+                "sha256": digest.hex(),
+                "nonce": hash_nonce.hex(),
+                "sealed": "s1:" + b64u(sealed_hash),
+            },
+        },
     }
 
 
@@ -957,8 +983,11 @@ def keyring_vectors(directory: Path) -> dict:
     vault_name = "Personal"
     vdk1, vdk2 = fixed("keyring vdk 1"), fixed("keyring vdk 2")
 
-    def device(n: str, added: str) -> dict:
-        return {"id": ids[n], "name": n.capitalize(), "publicKey": pks[n], "added": added}
+    def device(n: str, added: str, remote: tuple[str, ...]) -> dict:
+        d = {"id": ids[n], "name": n.capitalize(), "publicKey": pks[n], "added": added}
+        if n in remote:
+            d["policy"] = "remote-only"
+        return d
 
     with_recovery = {
         "recovery": str(recovery.to_public()),
@@ -966,7 +995,14 @@ def keyring_vectors(directory: Path) -> dict:
         "recoverySetBy": ids["alice"],
     }
 
-    def plaintext(version: int, devices: list[str], epochs: int, by: str, **over) -> dict:
+    def plaintext(
+        version: int,
+        devices: list[str],
+        epochs: int,
+        by: str,
+        remote: tuple[str, ...] = (),
+        **over,
+    ) -> dict:
         keys = [{"epoch": 1, "vdk": b64u(vdk1)}] + (
             [{"epoch": 2, "vdk": b64u(vdk2)}] if epochs > 1 else []
         )
@@ -978,7 +1014,7 @@ def keyring_vectors(directory: Path) -> dict:
             "indexKey": b64u(index_key(vdk1)),
             "currentEpoch": epochs,
             "keys": keys,
-            "devices": [device(n, "2026-10-02T12:00:00Z") for n in devices],
+            "devices": [device(n, "2026-10-02T12:00:00Z", remote) for n in devices],
             # The recovery key is set in version 2 (by alice) and kept after that.
             **(with_recovery if version >= 2 else {}),
             "updatedBy": ids[by],
@@ -1012,6 +1048,12 @@ def keyring_vectors(directory: Path) -> dict:
     # Every device is lost: dave recovers the vault with the recovery key.
     v5 = plaintext(5, ["bob", "carol", "dave"], 2, "dave")
     no_recovery = {"recovery": None, "recoverySigner": None, "recoverySetBy": None}
+    # Remote-only devices (remote-only.md 4): carol is approved as remote-only by bob.
+    v3_remote = plaintext(3, ["alice", "bob", "carol"], 1, "bob", remote=("carol",))
+    v4_remote = plaintext(4, ["bob", "carol"], 2, "bob", remote=("carol",))
+    v4_by_remote = plaintext(4, ["bob", "carol"], 2, "carol", remote=("carol",))
+    bad_policy = {**v3_remote, "devices": [dict(d) for d in v3_remote["devices"]]}
+    bad_policy["devices"][2]["policy"] = "read-only"
     blobs = {
         "v1": seal(v1, "alice"),
         "v2": seal(v2, "alice"),
@@ -1084,6 +1126,22 @@ def keyring_vectors(directory: Path) -> dict:
             plaintext(5, ["bob", "carol"], 2, "bob", currentEpoch=3), "bob"
         ),
     }
+    blobs.update(
+        {
+            "v3-remote-only": seal(v3_remote, "bob"),
+            "v4-remote-only": seal(v4_remote, "bob"),
+            "v4-signed-by-remote-only": seal(v4_by_remote, "carol"),
+            "v4-policy-dropped-by-full": seal(plaintext(4, ["bob", "carol"], 2, "bob"), "bob"),
+            "v5-recovery-drops-policy": seal(
+                plaintext(5, ["bob", "carol", "dave"], 2, "dave"), "recovery"
+            ),
+            "v5-recovery-adds-remote-only": seal(
+                plaintext(5, ["bob", "carol", "dave"], 2, "dave", remote=("carol", "dave")),
+                "recovery",
+            ),
+            "v3-bad-policy": seal(bad_policy, "bob"),
+        }
+    )
     # Signature over other bytes: take v2's signature for v2-reencrypted's bytes.
     blobs["v2-signature-mismatch"] = {
         **blobs["v2-reencrypted"],
@@ -1191,6 +1249,49 @@ def keyring_vectors(directory: Path) -> dict:
         ),
     ]
 
+    remote_chain = ["v2", "v3-remote-only", "v4-remote-only"]
+    cases += [
+        case("bob approves carol as remote-only", "v3-remote-only", "bob", ["v2"], "ok"),
+        case("remote-only device, first use", "v3-remote-only", "carol", [], "ok"),
+        case("rotation keeps the policy", "v4-remote-only", "carol", ["v3-remote-only"], "ok"),
+        case(
+            "signed by a remote-only device",
+            "v4-signed-by-remote-only",
+            "bob",
+            ["v2", "v3-remote-only"],
+            "untrusted-signer",
+        ),
+        case(
+            "first use signed by a remote-only device",
+            "v4-signed-by-remote-only",
+            "carol",
+            [],
+            "untrusted-signer",
+        ),
+        case(
+            "policy removed by a full device",
+            "v4-policy-dropped-by-full",
+            "bob",
+            ["v2", "v3-remote-only"],
+            "ok",
+        ),
+        case(
+            "policy removed by the recovery key",
+            "v5-recovery-drops-policy",
+            "bob",
+            remote_chain,
+            "inconsistent",
+        ),
+        case(
+            "recovery key adds a remote-only device",
+            "v5-recovery-adds-remote-only",
+            "bob",
+            remote_chain,
+            "inconsistent",
+        ),
+        case("unknown policy", "v3-bad-policy", "bob", ["v2"], "malformed"),
+    ]
+
     for name in ["v2", "v3", "v4", "v5-recovered"]:
         b = blobs[name]
         assert json.loads(pyrage.decrypt(bytes.fromhex(b["keyring"]), [recovery])) == b["plaintext"]
@@ -1200,7 +1301,9 @@ def keyring_vectors(directory: Path) -> dict:
         "device `as`, after trusting `trustedChain` in order (the first entry on first use). "
         "`expect` is `ok` or a KeyringError code. Keyring files are hex, encrypted by rage, and "
         "signed by the reference sshsig. The recovery key is set from version 2 on; its "
-        "signing seed is HKDF(secret, '', 'syncryption/v1/recovery-signing').",
+        "signing seed is HKDF(secret, '', 'syncryption/v1/recovery-signing'). A device "
+        "entry may have `policy: remote-only`; a remote-only device never signs a keyring, and "
+        "the recovery key sets, changes or removes no policy (remote-only.md 4).",
         "vault": {"id": vault_id, "name": vault_name},
         "devices": {
             n: {"id": ids[n], "seed": seeds[n].hex(), "publicKeyText": pks[n]} for n in names

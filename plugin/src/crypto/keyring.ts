@@ -19,7 +19,11 @@ export interface KeyringDevice {
 	/** `ssh-ed25519 AAAA...` */
 	publicKey: string;
 	added: string;
+	/** Absent for a full device (docs/remote-only.md 4). */
+	policy?: DevicePolicy;
 }
+
+export type DevicePolicy = "remote-only";
 
 export interface KeyringEpoch {
 	epoch: number;
@@ -147,6 +151,22 @@ export function addKeyringDevice(
 		throw new Error("device is already in the keyring");
 	}
 	k.devices.push({ ...device, added: k.updatedAt });
+	return k;
+}
+
+/** The next version, with a device's policy set (`undefined`: a full device). */
+export function setKeyringDevicePolicy(
+	prev: Keyring,
+	deviceId: string,
+	policy: DevicePolicy | undefined,
+	updatedBy: string,
+	now?: string,
+): Keyring {
+	const k = next(prev, updatedBy, now);
+	const d = k.devices.find((x) => x.id === deviceId);
+	if (!d) throw new Error("device is not in the keyring");
+	if (policy === undefined) delete d.policy;
+	else d.policy = policy;
 	return k;
 }
 
@@ -347,6 +367,10 @@ async function open(
 	if (!signer && !byRecovery) {
 		throw new KeyringError("untrusted-signer", "keyring was signed by an unknown device");
 	}
+	// A remote-only device can't manage the vault, so it never signs a keyring.
+	if (signer?.policy !== undefined) {
+		throw new KeyringError("untrusted-signer", "keyring was signed by a remote-only device");
+	}
 	if (trusted) checkConsistent(trusted.keyring, keyring, signer);
 	return { keyring, pin };
 }
@@ -453,6 +477,7 @@ function validate(k: unknown): asserts k is Keyring {
 		} catch {
 			malformed("device public key");
 		}
+		if (dev.policy !== undefined && dev.policy !== "remote-only") malformed("device policy");
 		if (ids.has(dev.id)) malformed("duplicate device");
 		ids.add(dev.id);
 	}
@@ -460,7 +485,8 @@ function validate(k: unknown): asserts k is Keyring {
 
 /**
  * A newer keyring may add epochs and devices, but never change what was trusted. Only a
- * device (`signer`, from `prev`) may change the recovery key, in its own name.
+ * device (`signer`, from `prev`) may change the recovery key, in its own name, or set,
+ * change or remove a device's policy.
  */
 function checkConsistent(prev: Keyring, k: Keyring, signer: KeyringDevice | undefined): void {
 	const fail = (why: string): never => {
@@ -476,6 +502,14 @@ function checkConsistent(prev: Keyring, k: Keyring, signer: KeyringDevice | unde
 	if (changed) {
 		if (!signer) return fail("its recovery key, signed by the recovery key");
 		if (k.recovery !== undefined && k.recoverySetBy !== signer.id) fail("its recovery key in another device's name");
+	}
+	if (!signer) {
+		const before = new Map(prev.devices.map((d) => [d.id, d.policy]));
+		for (const d of k.devices) {
+			if (before.has(d.id) ? before.get(d.id) !== d.policy : d.policy !== undefined) {
+				fail("a device policy, signed by the recovery key");
+			}
+		}
 	}
 }
 

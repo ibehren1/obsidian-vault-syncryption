@@ -47,6 +47,16 @@ def vault_disabled(admin_contact: str = "") -> ApiError:
     return ApiError(403, "vault_disabled", message, _contact(admin_contact))
 
 
+def remote_only() -> ApiError:
+    """A remote-only device can't manage the vault (remote-only.md 4)."""
+    return ApiError(403, "remote_only", "A remote-only device can't manage the vault.")
+
+
+def device_locked() -> ApiError:
+    """A remote-only device locked by another device of the vault (remote-only.md 5)."""
+    return ApiError(403, "device_locked", "This device was locked by another device of the vault.")
+
+
 MAINTENANCE_RETRY = 60
 
 

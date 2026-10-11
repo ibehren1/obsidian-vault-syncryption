@@ -1,7 +1,9 @@
 import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 
+import { deleteDatabase, IndexedDbEntryStore } from "../src/store/entries";
 import { IndexedDbStore } from "../src/store/idb";
+import { SealedHashStore, type HashMode } from "../src/store/sealed";
 import { countFiles, MemoryStore, type SyncStore } from "../src/store/state";
 import { openLastVault, VAULT_ID } from "../src/sync/session";
 
@@ -92,5 +94,50 @@ describe("openLastVault", () => {
 		const store = await openLastVault({ slot: "slot", vaultId: "v1" }, "slot", openStore);
 		expect((await store!.outbox()).map((e) => e.path)).toEqual(["a.md"]);
 		store!.close();
+	});
+});
+
+describe("SealedHashStore", () => {
+	const key = new Uint8Array(32).fill(3);
+	const sha = "ab".repeat(32);
+
+	it("seals hashes while remote-only and opens them on read", async () => {
+		const inner = new MemoryStore();
+		let mode: HashMode = "plain";
+		const store = new SealedHashStore(inner, () => mode);
+		await store.putFile("a.md", { ...file, sha256: sha });
+		expect((await inner.getFile("a.md"))!.sha256).toBe(sha);
+		mode = key;
+		expect(await store.sealAll(key)).toBe(1);
+		expect(await store.plainHashes()).toBe(0);
+		expect((await inner.getFile("a.md"))!.sha256).toMatch(/^s1:/);
+		expect((await store.getFile("a.md"))!.sha256).toBe(sha);
+		await store.putFile("b.md", { ...file, sha256: sha });
+		expect((await inner.getFile("b.md"))!.sha256).toMatch(/^s1:/);
+		await store.putFile("c.md", { ...file, deleted: true, sha256: "" });
+		expect([...(await store.files()).values()].map((f) => f.sha256)).toEqual([sha, sha, ""]);
+
+		mode = "locked";
+		expect((await store.getFile("a.md"))!.sha256).toMatch(/^s1:/);
+		await expect(store.putFile("d.md", { ...file, sha256: sha })).rejects.toThrow();
+
+		expect(await store.openAll(key)).toBe(2);
+		mode = "plain";
+		expect((await inner.getFile("b.md"))!.sha256).toBe(sha);
+	});
+});
+
+describe("IndexedDbEntryStore", () => {
+	it("keeps sealed entries and their info apart", async () => {
+		const factory = new IDBFactory();
+		const store = await IndexedDbEntryStore.open("entries", factory);
+		const entry = { nonce: new Uint8Array(24), data: new Uint8Array([1, 2]), size: 1, mtime: 2, ctime: 3 };
+		await store.put("a.md", entry);
+		expect(await store.get("a.md")).toEqual(entry);
+		expect(await store.infos()).toEqual(new Map([["a.md", { size: 1, mtime: 2, ctime: 3 }]]));
+		await store.delete("a.md");
+		expect((await store.infos()).size).toBe(0);
+		store.close();
+		await deleteDatabase("entries", factory);
 	});
 });

@@ -1,12 +1,12 @@
-/** Settings: endpoint, username, vault name, device name, the device key and the exclude list (docs/PLAN.md). */
+/** Settings: endpoint, username, vault name, device name, the device key and the exclude list (docs/architecture.md 4.4). */
 import { App, type ButtonComponent, Notice, Platform, PluginSettingTab, type Setting, type SettingDefinition, type SettingDefinitionGroup, type SettingDefinitionItem } from "obsidian";
 
-import { normalizeEndpoint } from "./api/client";
+import { type Device, normalizeEndpoint } from "./api/client";
 import { cleanDeviceName, defaultDeviceName, desktopHostname, keyComment } from "./device";
 import { fingerprint, generateDeviceKey, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey } from "./crypto/openssh";
 import { normalizeVaultName, saveKeyText, secretId, storedPublicKey } from "./keys";
 import type SyncryptionPlugin from "./main";
-import { keyDescription, keyServerStatus } from "./ui/keys";
+import { keyDescription, keyServerStatus, type VaultKey } from "./ui/keys";
 import { ConfirmModal, prompt } from "./ui/modals";
 
 export interface SyncryptionSettings {
@@ -140,6 +140,10 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 			{
 				name: "Approve new keys",
 				render: (setting) => {
+					if (this.plugin.isRemoteOnly()) {
+						setting.setDesc("This device is remote-only: approve new keys on a full device of the vault.");
+						return;
+					}
 					setting
 						.setDesc("New keys of this vault wait here until a device that syncs the vault approves them.")
 						.addButton((b) => b.setButtonText("Approve").onClick(() => void this.plugin.openApprovals()));
@@ -212,7 +216,8 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 		if (keys === null) note = "Connect first to see the keys of this vault.";
 		else if (keys.length <= 1) note = "Only this device's key can open this vault.";
 		else note = "Each key is one device's access to this vault. Remove the key of a lost or old device to end its access.";
-		const removable = (keys?.length ?? 0) > 1;
+		// A remote-only device can't remove keys (docs/remote-only.md 4).
+		const removable = (keys?.length ?? 0) > 1 && !this.plugin.isRemoteOnly();
 		return {
 			type: "group",
 			heading: "Vault keys",
@@ -230,6 +235,7 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 								() => {},
 							);
 							if (key.self || !removable) return;
+							this.policyButtons(setting, key, status);
 							setting.addButton((b) =>
 								b
 									.setButtonText("Remove")
@@ -253,10 +259,52 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 		};
 	}
 
+	/** Make another key remote-only or full, and lock or unlock a remote-only one (docs/remote-only.md 4 and 5). */
+	private policyButtons(setting: Setting, key: VaultKey, status: Promise<Map<string, Device>> | null): void {
+		if (key.remoteOnly) {
+			// Enabled once the server says whether the device is locked.
+			let locked = false;
+			setting.addButton((b) => {
+				b.setButtonText("Lock")
+					.setDisabled(true)
+					.onClick(async () => {
+						if (await this.plugin.setDeviceLocked(key.id, !locked)) this.update();
+					});
+				void status?.then(
+					(devices) => {
+						const device = devices.get(key.id);
+						if (device?.status !== "active") return;
+						locked = device.locked === true;
+						b.setButtonText(locked ? "Unlock" : "Lock").setDisabled(false);
+					},
+					() => {},
+				);
+			});
+		}
+		setting.addButton((b) =>
+			b.setButtonText(key.remoteOnly ? "Make full device" : "Make remote-only").onClick(() => {
+				new ConfirmModal(this.app, {
+					title: key.remoteOnly ? `Make ${key.name} a full device?` : `Make ${key.name} remote-only?`,
+					text: key.remoteOnly
+						? "Its files are written back to its disk in plaintext the next time it connects, and it can manage the vault again."
+						: "The next time it connects, its notes and attachments are moved off its disk into its encrypted local store. It can no longer approve or remove keys, and it locks when it can't reach the server for too long.",
+					confirm: key.remoteOnly ? "Make full device" : "Make remote-only",
+					onConfirm: async () => {
+						if (await this.plugin.setDevicePolicy(key.id, !key.remoteOnly)) this.update();
+					},
+				}).open();
+			}),
+		);
+	}
+
 	private renderRecovery(setting: Setting): void {
 		const status = this.plugin.recoveryStatus();
 		if (status === null) {
 			setting.setDesc("Connect first to create or change the recovery key.");
+			return;
+		}
+		if (this.plugin.isRemoteOnly()) {
+			setting.setDesc(`${status.set ? `Set by ${status.setBy}.` : "Not set."} This device is remote-only: manage the recovery key on a full device.`);
 			return;
 		}
 		if (!status.set) {

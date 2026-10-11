@@ -8,7 +8,7 @@ import { KeyringError } from "../crypto/keyring";
 import { ObjectError, type FileMeta } from "../crypto/objects";
 import { countFiles, type OutboxEntry, type SyncedFile, type SyncStore } from "../store/state";
 import { sha256Hex, type VaultCipher } from "./cipher";
-import type { FileStat, VaultFs } from "./fs";
+import { isMissingContent, type FileStat, type VaultFs } from "./fs";
 import { conflictPath, mergeText } from "./merge";
 
 export const CURSOR = "cursor";
@@ -98,9 +98,18 @@ export interface HistoryPage {
 interface LocalFile {
 	exists: boolean;
 	stat: FileStat | null;
-	/** Set when the file exists. */
+	/** Set when the file exists, unless its content is missing. */
 	data?: Uint8Array;
 	sha256: string;
+	/** The file exists, but its content isn't on this device (`MissingContentError`). */
+	missing?: boolean;
+}
+
+/** The engine was closed while a sync was running. */
+class SyncStopped extends Error {
+	constructor() {
+		super("Sync stopped.");
+	}
 }
 
 function emptyReport(): SyncReport {
@@ -111,8 +120,21 @@ export class SyncEngine {
 	private running: Promise<SyncReport> | null = null;
 	private again = false;
 	private report = emptyReport();
+	private closed = false;
 
 	constructor(private readonly opts: EngineOptions) {}
+
+	/**
+	 * Stop for good: a running sync fails at its next write or commit. Called when the plugin
+	 * disconnects or locks, so a sync still running can't commit what it reads after that.
+	 */
+	close(): void {
+		this.closed = true;
+	}
+
+	private checkOpen(): void {
+		if (this.closed) throw new SyncStopped();
+	}
 
 	/**
 	 * Pull, scan, push. Calls made while a sync is running are folded into one more run
@@ -285,7 +307,7 @@ export class SyncEngine {
 				await this.applyRemote(head, deferred);
 			}
 		} catch (e) {
-			if (e instanceof ApiError || e instanceof NetworkError) throw e;
+			if (e instanceof ApiError || e instanceof NetworkError || e instanceof SyncStopped) throw e;
 			failed.push(current);
 			if (first) {
 				const reason = e instanceof Error && e.message ? `: ${e.message}` : "";
@@ -301,12 +323,18 @@ export class SyncEngine {
 		const present = new Set<string>();
 		const files = (await fs.list()).filter((file) => include(file.path));
 		let done = 0;
+		let refetched = 0;
 		for (const file of files) {
 			this.progress({ phase: "scan", done: done++, total: files.length });
 			present.add(file.path);
 			const s = synced.get(file.path);
 			if (s && !s.deleted && s.size === file.size && s.mtime === file.mtime) continue;
 			const local = await this.local(file.path);
+			if (local.missing) {
+				// Never committed as a change: the stub isn't the file's content.
+				if (s && !s.deleted && (await this.refetch(file.path, s))) refetched++;
+				continue;
+			}
 			if (s && !s.deleted && local.sha256 === s.sha256) {
 				// Touched but not changed: remember the new mtime so it isn't hashed again.
 				await store.putFile(file.path, { ...s, mtime: file.mtime });
@@ -317,6 +345,38 @@ export class SyncEngine {
 		for (const [path, s] of synced) {
 			if (!s.deleted && !present.has(path) && include(path)) await store.enqueue(path);
 		}
+		if (refetched > 0) {
+			this.warn(`Downloaded ${refetched === 1 ? "1 file" : `${refetched} files`} again: the content was missing on this device.`);
+		}
+	}
+
+	/**
+	 * Write the head of a synced file whose content is missing here. Returns whether it did.
+	 */
+	private async refetch(path: string, synced: SyncedFile): Promise<boolean> {
+		const { api, vaultId } = this.opts;
+		let head: Revision;
+		try {
+			head = await api.head(vaultId, synced.fileId);
+		} catch (e) {
+			if (e instanceof ApiError && e.status === 404) return false;
+			throw e;
+		}
+		const meta = await this.openRemoteMeta(head);
+		if (meta === null || meta.path !== path) return false;
+		this.checkOpen();
+		if (meta.deleted) {
+			await this.opts.fs.remove(path);
+			await this.record(path, head, meta, null);
+			return true;
+		}
+		try {
+			await this.writeRemote(path, head, meta, await this.download(head, meta));
+		} catch (e) {
+			if (!(e instanceof ObjectError)) throw e;
+			return false;
+		}
+		return true;
 	}
 
 	/** Commit every queued path. A merge after a `409` queues the result for the next round. */
@@ -367,6 +427,8 @@ export class SyncEngine {
 		if (!include(path)) return;
 		const synced = await store.getFile(path);
 		const local = await this.local(path);
+		// The scan downloads it again.
+		if (local.missing) return;
 		if (!local.exists && (!synced || synced.deleted)) return;
 		const unchanged = local.exists && synced && !synced.deleted && local.sha256 === synced.sha256;
 		if (again ? !unchanged : unchanged) return;
@@ -385,6 +447,7 @@ export class SyncEngine {
 		}
 		const fileId = cipher.fileId(path);
 		let revision: Revision;
+		this.checkOpen();
 		try {
 			revision = await api.commit(vaultId, fileId, {
 				parentRev: synced?.rev ?? null,
@@ -439,13 +502,13 @@ export class SyncEngine {
 		}
 		const synced = await store.getFile(path);
 		if (synced && revision.rev <= synced.rev) return;
+		this.checkOpen();
 		// Always hashed: a stat that looks unchanged mustn't let a remote write replace an edit.
 		const local = await this.local(path);
-		const unchanged = synced
-			? synced.deleted
-				? !local.exists
-				: local.exists && local.sha256 === synced.sha256
-			: !local.exists;
+		// Content missing here: nothing to keep, the remote revision replaces the stub.
+		const unchanged =
+			local.missing ||
+			(synced ? (synced.deleted ? !local.exists : local.exists && local.sha256 === synced.sha256) : !local.exists);
 		this.report.pulled++;
 
 		if (meta.deleted) {
@@ -536,6 +599,7 @@ export class SyncEngine {
 	}
 
 	private async writeRemote(path: string, revision: Revision, meta: FileMeta, data: Uint8Array): Promise<void> {
+		this.checkOpen();
 		await this.opts.fs.write(path, data, { mtime: meta.mtime, ctime: meta.ctime });
 		this.noteWrite(path);
 		await this.record(path, revision, meta, await this.opts.fs.stat(path));
@@ -583,7 +647,13 @@ export class SyncEngine {
 	private async local(path: string): Promise<LocalFile> {
 		const stat = await this.opts.fs.stat(path);
 		if (!stat) return { exists: false, stat: null, sha256: "" };
-		const data = await this.opts.fs.read(path);
+		let data: Uint8Array;
+		try {
+			data = await this.opts.fs.read(path);
+		} catch (e) {
+			if (!isMissingContent(e)) throw e;
+			return { exists: true, stat, sha256: "", missing: true };
+		}
 		return { exists: true, stat, data, sha256: sha256Hex(data) };
 	}
 

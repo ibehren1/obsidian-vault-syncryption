@@ -11,6 +11,22 @@ export interface ListedFile extends FileStat {
 	path: string;
 }
 
+/**
+ * A file whose content isn't on this device: a remote-only stub without its sealed content
+ * (docs/remote-only.md 7). The engine downloads it again instead of committing the stub.
+ */
+export class MissingContentError extends Error {
+	constructor() {
+		super("This file's content isn't on this device.");
+		this.name = "MissingContentError";
+	}
+}
+
+/** By name: the error may come back through Obsidian's `Vault`, not as the same class. */
+export function isMissingContent(e: unknown): boolean {
+	return e instanceof Error && e.name === "MissingContentError";
+}
+
 export interface VaultFs {
 	/** Every file in the vault (no folders). The engine filters out excluded paths. */
 	list(): Promise<ListedFile[]>;

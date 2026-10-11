@@ -19,6 +19,10 @@ export interface StatusDetails {
 	vault: string;
 	deviceName: string;
 	fingerprint: string | null;
+	/** Remote-only (docs/remote-only.md): no vault management, and a compliance report. */
+	remoteOnly: boolean;
+	/** The remote-only files can be read: the device is connected and not locked. */
+	remoteUnlocked: boolean;
 }
 
 /** Paths listed under "Waiting to upload"; the rest are counted. */
@@ -139,6 +143,21 @@ export class StatusModal extends Modal {
 		new Setting(el).setName("Vault").setDesc(d.vault || "Not set");
 		new Setting(el).setName("Device name").setDesc(d.deviceName);
 		new Setting(el).setName("Encryption key").setDesc(d.fingerprint ?? "None yet. Generate one in the settings.");
+		const remote = new Setting(el)
+			.setName("Remote-only")
+			.setDesc(
+				!d.remoteOnly
+					? "No: a full device."
+					: `Yes: files are stored on this device only encrypted. ${d.remoteUnlocked ? "Unlocked." : "Locked."}`,
+			);
+		if (d.remoteOnly) {
+			remote.addButton((b) =>
+				d.remoteUnlocked
+					? b.setButtonText("Lock").onClick(() => this.plugin.lockRemote())
+					: b.setButtonText("Unlock").onClick(() => void this.plugin.unlockRemote()),
+			);
+		}
+		remote.addButton((b) => b.setButtonText("Compliance report").onClick(() => this.plugin.openCompliance()));
 
 		new Setting(el).setName("Vault keys").setHeading();
 		const keys = this.plugin.vaultKeys();
@@ -153,14 +172,14 @@ export class StatusModal extends Modal {
 				const server = row.descEl.createDiv();
 				if (status) void status.then((devices) => server.setText(keyServerStatus(devices.get(key.id))), () => {});
 			}
-			el.createEl("p", { cls: "syncryption-note", text: "Remove a lost or old device's key in the plugin settings." });
+			if (!d.remoteOnly) el.createEl("p", { cls: "syncryption-note", text: "Remove a lost or old device's key in the plugin settings." });
 		}
 
 		const recovery = this.plugin.recoveryStatus();
-		if (recovery !== null) {
+		if (recovery !== null && !d.remoteOnly) {
 			new Setting(el).setName("Recovery key").setDesc(recovery.set ? `Set by ${recovery.setBy}.` : "Not set. Create one in the plugin settings.");
 		}
-		if (d.connected && !d.paused) {
+		if (d.connected && !d.paused && !d.remoteOnly) {
 			const approvals = new Setting(el).setName("Keys waiting for approval");
 			approvals.addButton((b) => b.setButtonText("Approve").onClick(() => void this.plugin.openApprovals()));
 			void this.plugin.pendingCount().then(

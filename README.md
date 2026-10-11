@@ -4,6 +4,9 @@
 
 Vault Syncryption is self-hosted, end-to-end encrypted sync for Obsidian. You run the server, your devices hold the keys, and the server stores only ciphertext. There's no subscription, no third-party cloud and no telemetry, and it works on desktop, iPhone, iPad and Android.
 
+> [!NOTE]
+> **Testers wanted on Android and Windows.** Most testing so far has been on macOS and iOS. If you use Vault Syncryption on an Android device or on Windows, please share what works and what doesn't in [GitHub Issues](https://github.com/ibehren1/obsidian-vault-syncryption/issues).
+
 ## Why Vault Syncryption
 - **Your whole setup, everywhere.** Notes, attachments, settings, themes and plugins all sync. Connect a new device and your whole Obsidian setup arrives with it.
 - **A server that can't read your notes.** Everything is encrypted on your devices before upload, including file names and folder paths, so the server stores only ciphertext. Each device has its own Ed25519 encryption key for each vault. It is used both to log in and to unlock the vault, and it never leaves the device.
@@ -12,7 +15,20 @@ Vault Syncryption is self-hosted, end-to-end encrypted sync for Obsidian. You ru
 - **Time travel for every file.** The server keeps your file history: every version for 30 days and at least the last 10, and a deleted file's versions for 90 days. Restore any of them from "Show file history".
 - **Offline-first and fast.** Each device keeps a full local copy and syncs as soon as it's back online. Live updates bring changes from your other devices within moments.
 - **You're in control.** A status window shows what's synced, what's waiting to upload and what's being edited on another device. On a slow or metered connection, pause sync with one click: changes keep queuing and upload when you resume.
+- **Remote-only devices.** Keep a work laptop or a phone you might lose from holding your notes in plaintext. See [Remote-only devices](#remote-only-devices) below.
 - **Share a vault, not a password.** Share a vault by sharing its username and vault name. The other person generates their own key and joins once an existing device approves them.
+
+## Remote-only devices
+Some devices shouldn't keep a readable copy of your vault: a shared or work computer, or a phone that could be lost. Make such a device **remote-only** and its notes and attachments are never stored on it in plaintext. Obsidian still opens, edits, searches and links them as usual.
+- **Encrypted at rest on the device.** Files on disk are empty placeholders. Their content is kept in the plugin's local store, sealed with a key that exists only in memory while the device is connected.
+- **Chosen when you approve.** Approve a new device with "Approve as remote-only", or make any other device remote-only (or a full device again) later from the vault's key list on a full device.
+- **Lock it from here or from elsewhere.** Lock a remote-only device's files on the device itself, or lock the device from another device of the vault. A locked device can't open its notes or sync until it is unlocked, and nothing is deleted.
+- **A lease, not a promise.** A remote-only device locks by itself when it can't reach the server for longer than the vault's grace period (24 hours by default).
+- **Remote wipe.** Removing a remote-only device's key deletes its copy of the vault the next time it connects.
+- **No vault management.** A remote-only device can't approve or remove keys or create a recovery key, so a stolen one can't let anyone else in.
+- **Compliance report.** Each remote-only device can show what it enforces right now: no plaintext on disk, File Recovery off, sealed content hashes and a valid lease.
+
+The config folder (settings, themes, plugins) stays in plaintext so Obsidian can start. See [docs/remote-only.md](docs/remote-only.md) for how it works, a diagram of where data lives in each mode, and the limits.
 
 ## A server you'll actually enjoy running
 - **One container**, configured with a few environment variables in [`backend/docker/docker-compose.yml`](backend/docker/docker-compose.yml).
@@ -27,9 +43,14 @@ See [docs/self-hosting.md](docs/self-hosting.md) to get it running.
 - Obsidian 1.13 or later. The plugin keeps your encryption key in Obsidian's secret storage.
 
 ## Install the plugin
-- **Community plugins:** search for "Vault Syncryption" in Settings → Community plugins (once the listing is approved).
-- **Until then, with [BRAT](https://github.com/TfTHacker/obsidian42-brat):** add the beta plugin `ibehren1/obsidian-vault-syncryption`. This works on desktop and mobile.
+- **Community plugins:** Vault Syncryption is published in Obsidian's community plugins. Search for "Vault Syncryption" in Settings → Community plugins, then install and enable it.
 - **By hand:** download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/ibehren1/obsidian-vault-syncryption/releases/latest) into `<vault>/.obsidian/plugins/vault-syncryption/`.
+
+### Betas
+Beta versions are published to [ibehren1/obsidian-vault-syncryption-beta](https://github.com/ibehren1/obsidian-vault-syncryption-beta). To try one, install [BRAT](https://github.com/TfTHacker/obsidian42-brat) and add the beta plugin `ibehren1/obsidian-vault-syncryption-beta`. This works on desktop and mobile.
+
+> [!WARNING]
+> **Use betas with caution, and at your own peril.** Betas are untested work in progress. They may have bugs that lose or corrupt data, and they may need a newer server than the latest release. Back up your vault first, and try a beta on a test vault before your real one.
 
 ## Get started
 1. Open the plugin settings and enter the server URL, your username and the vault name.
@@ -51,8 +72,8 @@ The plugin syncs the whole vault in place, including the config folder (`.obsidi
 ## Documentation
 - [docs/self-hosting.md](docs/self-hosting.md): running the server
 - [docs/scaling.md](docs/scaling.md): storage growth and capacity
+- [docs/remote-only.md](docs/remote-only.md): remote-only devices
 - [docs/architecture.md](docs/architecture.md), [docs/protocol.md](docs/protocol.md) and [docs/crypto.md](docs/crypto.md): how it works
-- [docs/PLAN.md](docs/PLAN.md): the design
 - [SECURITY.md](SECURITY.md): reporting a vulnerability
 
 ## Repository
@@ -60,7 +81,7 @@ The plugin syncs the whole vault in place, including the config folder (`.obsidi
 |---|---|
 | `plugin/` | Obsidian plugin (TypeScript) |
 | `backend/` | Sync server (Python, uv, FastAPI) and container |
-| `docs/` | Design and specifications |
+| `docs/` | How it works, specifications and self-hosting |
 
 ## License
 [MIT](LICENSE)

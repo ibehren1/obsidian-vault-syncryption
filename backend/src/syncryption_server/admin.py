@@ -4,7 +4,8 @@ Everything needs `ADMIN_TOKEN`: as `Authorization: Bearer <token>`, or entered o
 login form, which starts a browser session (an HttpOnly cookie, plus a CSRF token in every
 form). The page lists users, their vaults with stored sizes, and each vault's devices (one
 encryption key each). Users and vaults can be disabled (no access, data kept), enabled
-again, and purged once disabled. Purging a vault also deletes its devices.
+again, and purged once disabled. Purging a vault also deletes its devices. Each vault has a
+grace period for its remote-only devices (remote-only.md 5).
 Maintenance mode pauses the whole sync API until it is turned off (protocol.md 14.1).
 """
 
@@ -23,7 +24,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from syncryption_server import PROTOCOL_VERSION, __version__
-from syncryption_server.auth import client_ip, limit_key, request_origin
+from syncryption_server.auth import REMOTE_ONLY_GRACE, client_ip, limit_key, request_origin
 from syncryption_server.config import MAX_NOTE, note_problem
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found
@@ -43,6 +44,11 @@ Kind = Literal["users", "vaults"]
 Action = Literal["disable", "enable", "purge"]
 
 router = APIRouter(prefix="/admin", include_in_schema=False)
+
+
+# remote-only.md 5: the grace period of a vault's remote-only devices, in seconds.
+MIN_GRACE = 3600
+MAX_GRACE = 365 * 24 * 3600
 
 
 class AdminError(Exception):
@@ -66,9 +72,20 @@ MESSAGES = {
     "maintenance_on": "Maintenance started. Sync is paused on every device.",
     "maintenance_off": "Maintenance ended. Devices resume syncing by themselves.",
     "bad_message": f"The message must be one line of at most {MAX_NOTE} characters.",
+    "grace_set": "Grace period saved. Remote-only devices get it at their next login.",
+    "bad_grace": f"The grace period is a whole number of hours from 1 to {MAX_GRACE // 3600}, "
+    f"or empty for the default ({REMOTE_ONLY_GRACE // 3600} hours).",
 }
 # Codes that aren't errors, shown in green.
-SUCCESS = ("disabled", "enabled", "purged", "logged_out", "maintenance_on", "maintenance_off")
+SUCCESS = (
+    "disabled",
+    "enabled",
+    "purged",
+    "logged_out",
+    "maintenance_on",
+    "maintenance_off",
+    "grace_set",
+)
 
 
 # Authentication
@@ -138,7 +155,7 @@ ApiAdmin = Annotated[Admin, Depends(api_admin)]
 def overview(state: AppState) -> list[dict]:
     users = state.db.all("SELECT * FROM users ORDER BY username")
     vaults = state.db.all(
-        "SELECT v.id, v.user_id, v.name, v.created_at, v.disabled_at, "
+        "SELECT v.id, v.user_id, v.name, v.created_at, v.disabled_at, v.remote_only_grace, "
         "(SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.vault_id = v.id) AS size, "
         "(SELECT COUNT(*) FROM files f JOIN revisions r ON r.vault_id = f.vault_id "
         "AND r.rev = f.head_rev WHERE f.vault_id = v.id AND r.deleted = 0) AS files, "
@@ -159,6 +176,8 @@ def overview(state: AppState) -> list[dict]:
             "status": d["status"],
             "createdAt": time(d["created_at"]),
             "lastSeenAt": time(d["last_seen_at"]),
+            "remoteOnly": bool(d["remote_only"]),
+            "locked": bool(d["locked"]),
         }
 
     out = []
@@ -182,6 +201,8 @@ def overview(state: AppState) -> list[dict]:
                         "createdAt": time(v["created_at"]),
                         "lastChangeAt": time(v["last_change"]),
                         "disabled": v["disabled_at"] is not None,
+                        # null: the default, REMOTE_ONLY_GRACE
+                        "remoteOnlyGrace": v["remote_only_grace"],
                         "devices": [device(d) for d in mine if d["vault_id"] == v["id"]],
                     }
                     for v in vaults
@@ -292,6 +313,21 @@ async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm
     return "purged"
 
 
+async def set_grace(state: AppState, vault_id: str, seconds: int | None) -> str:
+    """Set a vault's grace period for remote-only devices, None for the default."""
+    if seconds is not None and not MIN_GRACE <= seconds <= MAX_GRACE:
+        raise AdminError("bad_grace")
+    row = await state.db.read(lambda: _row(state, "vaults", vault_id))
+
+    def store() -> None:
+        with state.db.transaction() as db:
+            db.execute("UPDATE vaults SET remote_only_grace = ? WHERE id = ?", (seconds, vault_id))
+
+    await state.db.run(store)
+    log.info("admin: set the grace period of vault %s/%s", row["username"], row["name"])
+    return "grace_set"
+
+
 async def set_maintenance(state: AppState, on: bool, message: str | None = None) -> str:
     """Turn maintenance on (or update its message) or off. Returns the message code."""
     if not on:
@@ -370,6 +406,23 @@ async def api_maintenance(
     return Response(status_code=204)
 
 
+class GraceRequest(BaseModel):
+    graceSeconds: int | None = Field(
+        description=f"{MIN_GRACE} to {MAX_GRACE}, or null for the default ({REMOTE_ONLY_GRACE})."
+    )
+
+
+@router.post("/api/vaults/{vault_id}/grace", status_code=204)
+async def api_grace(vault_id: str, body: GraceRequest, admin: ApiAdmin, state: State) -> Response:
+    try:
+        await set_grace(state, vault_id, body.graceSeconds)
+    except AdminError as e:
+        if e.status == 404:
+            raise not_found() from e
+        raise bad_request(MESSAGES[e.code]) from e
+    return Response(status_code=204)
+
+
 @router.post("/api/{kind}/{item_id}/{action}", status_code=204)
 async def api_action(
     kind: Kind,
@@ -411,6 +464,7 @@ th, td {
   vertical-align: top;
 }
 td.num { text-align: right; }
+pre { background: #f6f6f6; border: 1px solid #ddd; border-radius: 6px; padding: .75rem; }
 .muted { color: #777; }
 .tag { font-size: .8rem; padding: 0 .4rem; border-radius: 4px; background: #c33; color: #fff; }
 form.inline { display: inline; }
@@ -499,6 +553,22 @@ def _actions(admin: Admin, kind: Kind, item: dict, name: str) -> str:
     )
 
 
+def _grace_form(admin: Admin, vault: dict) -> str:
+    """The vault's grace period in hours; empty means the default."""
+    grace = vault["remoteOnlyGrace"]
+    value = str(grace // 3600) if grace is not None else ""
+    csrf = (
+        f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf)}">' if admin.csrf else ""
+    )
+    target = f"/admin/vaults/{html.escape(vault['id'])}/grace"
+    return (
+        f'<form class="inline" method="post" action="{target}">{csrf}'
+        f'<input name="hours" size="4" inputmode="numeric" value="{value}" '
+        f'placeholder="{REMOTE_ONLY_GRACE // 3600}" aria-label="Grace period in hours"> h '
+        "<button>Save</button></form>"
+    )
+
+
 def _maintenance_section(admin: Admin, state: AppState) -> str:
     csrf = f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf or "")}">'
     m = state.maintenance
@@ -560,7 +630,7 @@ def _dashboard(
             parts.append(
                 "<table><tr><th>Vault</th><th>Stored</th><th>Files</th><th>Versions</th>"
                 "<th>Created</th>"
-                "<th>Last change</th><th></th></tr>"
+                "<th>Last change</th><th>Remote-only grace</th><th></th></tr>"
             )
             for v in u["vaults"]:
                 vtag = ' <span class="tag">disabled</span>' if v["disabled"] else ""
@@ -569,6 +639,7 @@ def _dashboard(
                     f'<td class="num">{_size(v["size"])}</td><td class="num">{v["files"]}</td>'
                     f'<td class="num">{v["revisions"]}</td>'
                     f"<td>{_when(v['createdAt'])}</td><td>{_when(v['lastChangeAt'])}</td>"
+                    f"<td>{_grace_form(admin, v)}</td>"
                     f"<td>{_actions(admin, 'vaults', v, v['name'])}</td></tr>"
                 )
             parts.append("</table>")
@@ -585,7 +656,9 @@ def _dashboard(
                 parts.append(
                     f"<tr><td>{html.escape(d['name'])}</td><td>{html.escape(vault)}</td>"
                     f'<td class="muted">{html.escape(d["fingerprint"])}</td>'
-                    f"<td>{html.escape(d['status'])}</td>"
+                    f"<td>{html.escape(d['status'])}"
+                    f"{' <span class="muted">remote-only</span>' if d['remoteOnly'] else ''}"
+                    f"{' <span class="muted">locked</span>' if d['locked'] else ''}</td>"
                     f"<td>{_when(d['createdAt'])}</td><td>{_when(d['lastSeenAt'])}</td></tr>"
                 )
             parts.append("</table>")
@@ -688,6 +761,21 @@ async def form_maintenance(
         if await _form_admin(request, state, form) is None:
             return _login_page("Log in first.", status=401)
         code = await set_maintenance(state, switch == "on", form.get("message"))
+    except AdminError as e:
+        code = e.code
+    return _back(code)
+
+
+@router.post("/vaults/{vault_id}/grace")
+async def form_grace(vault_id: str, request: Request, state: State) -> Response:
+    form = await _form(request)
+    try:
+        if await _form_admin(request, state, form) is None:
+            return _login_page("Log in first.", status=401)
+        hours = form.get("hours", "").strip()
+        if hours and not hours.isdigit():
+            raise AdminError("bad_grace")
+        code = await set_grace(state, vault_id, int(hours) * 3600 if hours else None)
     except AdminError as e:
         code = e.code
     return _back(code)

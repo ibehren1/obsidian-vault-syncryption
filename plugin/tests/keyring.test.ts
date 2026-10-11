@@ -16,6 +16,7 @@ import {
 	recoverySigningSeed,
 	removeKeyringDeviceAndRotate,
 	sealKeyring,
+	setKeyringDevicePolicy,
 	setKeyringRecovery,
 	type KeyringBlob,
 	type KeyringContext,
@@ -179,6 +180,22 @@ describe("keyring round trip", () => {
 		const k4 = addKeyringDevice(k3, c!.device, b!.device.id);
 		const k5 = setKeyringRecovery(k4, recovery, b!.device.id);
 		expect(removeKeyringDeviceAndRotate(k5, c!.device.id, b!.device.id).recovery).toBe(recovery.recipient);
+	});
+
+	it("adds a remote-only device and changes its policy", async () => {
+		const k1 = createKeyring({ vaultId: "vault-1", name: "Work", device: a!.device });
+		const t1 = await openKeyring(await sealKeyring(k1, a!.seed), ctx(a!.seed));
+		const k2 = addKeyringDevice(t1.keyring, { ...b!.device, policy: "remote-only" }, a!.device.id);
+		const b2 = await sealKeyring(k2, a!.seed);
+		const t2 = await openKeyring(b2, ctx(b!.seed));
+		expect(t2.keyring.devices[1]!.policy).toBe("remote-only");
+		// The remote-only device can't sign the next version.
+		const byRemote = await sealKeyring(addKeyringDevice(k2, c!.device, b!.device.id), b!.seed);
+		expect(await errorCode(openKeyring(byRemote, ctx(a!.seed), t2))).toBe("untrusted-signer");
+		// A full device makes it a full device again.
+		const k3 = setKeyringDevicePolicy(k2, b!.device.id, undefined, a!.device.id);
+		const t3 = await openKeyring(await sealKeyring(k3, a!.seed), ctx(b!.seed), t2);
+		expect(t3.keyring.devices[1]!.policy).toBeUndefined();
 	});
 
 	it("refuses to sign with a device outside the keyring", async () => {

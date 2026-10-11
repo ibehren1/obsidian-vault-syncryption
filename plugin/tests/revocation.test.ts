@@ -92,7 +92,7 @@ describe.skipIf(noBackend)("revocation", () => {
 		const [a, b, c] = await threeDevices();
 		await c.session.removeDevice(a.session.deviceId);
 		expect(c.session.keyring.devices.map((d) => d.name)).toEqual(["Phone", "Tablet"]);
-		await expect(a.engine.sync()).rejects.toMatchObject({ status: 403 });
+		await expect(a.engine.sync()).rejects.toMatchObject({ status: 403, code: "device_revoked" });
 		await b.session.refreshKeyring();
 		expect(b.session.keyring.currentEpoch).toBe(2);
 		const status = new Map((await b.session.devices()).map((d) => [d.id, d.status]));

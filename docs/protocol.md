@@ -1,8 +1,8 @@
 # Vault Syncryption HTTP Protocol (v1)
 
-Status: draft for M0. The FastAPI app is the implementation of this document, and the
-plugin's TypeScript types are generated from its OpenAPI schema. Crypto details live in
-[crypto.md](crypto.md).
+The FastAPI app in `backend/` implements this document, at protocol version `1`
+(section 13). The plugin's TypeScript types are generated from the app's OpenAPI schema.
+Crypto details live in [crypto.md](crypto.md).
 
 ## 1. Conventions
 - **Base URL:** the configured endpoint, e.g. `https://notes.example.com`. All paths
@@ -24,19 +24,24 @@ plugin's TypeScript types are generated from its OpenAPI schema. Crypto details 
   { "error": "stale_parent", "message": "human readable", "details": { } }
   ```
   `error` is a stable machine code. `message` never contains plaintext, keys or tokens.
+  A body or query parameter that fails validation returns `400 bad_request` with
+  `details: {"fields": [{"loc": [...], "msg": "..."}]}` (locations and messages only, never
+  the input).
 
 | Status | `error` codes |
 |---|---|
 | 400 | `bad_request`, `bad_signature_format` |
 | 401 | `unauthenticated`, `token_expired`, `challenge_invalid` |
-| 403 | `forbidden`, `join_required`, `device_pending`, `device_revoked`, `user_disabled`, `vault_disabled` |
-| 404 | `not_found` |
-| 409 | `stale_parent`, `exists`, `keyring_version` |
+| 403 | `forbidden`, `join_required`, `device_pending`, `device_revoked`, `device_locked`, `remote_only`, `user_disabled`, `vault_disabled` |
+| 404 | `not_found`, `no_recovery` |
+| 409 | `stale_parent`, `exists`, `keyring_version`, `vault_being_created` |
 | 413 | `too_large` |
-| 422 | `missing_blobs`, `hash_mismatch` |
+| 422 | `missing_blobs`, `hash_mismatch`, `malformed` |
 | 423 | `locked` |
 | 429 | `rate_limited` (with `Retry-After`) |
 | 503 | `maintenance` (with `Retry-After`, section 14.1) |
+
+The admin JSON API (section 14) also returns `409 not_disabled` and `400 confirm`.
 
 `user_disabled` and `vault_disabled` carry `details: {"adminContact": "..."}` when the
 server sets `ADMIN_CONTACT` (free text: an email address, a Slack channel, a phone
@@ -62,9 +67,12 @@ healthcheck, so it stays `200` during maintenance (section 14.1):
 `GET /` (*public*, not in the OpenAPI schema) is a short HTML page (with the admin page's strict headers)
 for people who open the server's URL in a browser: the server version, what the server is,
 how to connect (install the plugin, enter this URL, a username and a vault name, and create
-an encryption key; the first join needs the shared secret, which comes from the
-administrator), the administrator's contact if `ADMIN_CONTACT` is set, and the status (`ok`,
-or maintenance with its start time and message). It never shows the shared secret, and it
+an encryption key; creating a new vault needs the shared secret, which comes from the
+administrator, and a device joining an existing vault is approved by one of its devices
+instead), the administrator's contact if `ADMIN_CONTACT` is set, the status (`ok`,
+or maintenance with its start time and message), and a "Health" section with the current
+`GET /health` body as pretty-printed JSON (`"status": "unavailable"` included when the
+database or blob store is unreachable). It never shows the shared secret, and it
 works during maintenance.
 
 ## 3. Model: users, devices, vaults
@@ -89,8 +97,10 @@ The server tracks identity and data separately:
   vault id and only reserves its vault name until it creates the vault (section 7.2).
 
 Every vault endpoint (`/api/v1/vaults/{vaultId}/...`) requires the caller's device to
-belong to that vault (otherwise `403 forbidden`) and to be active (otherwise
-`403 device_pending`).
+belong to that vault (otherwise `403 forbidden`), the vault to be enabled (otherwise
+`403 vault_disabled`) and the device to be active (otherwise `403 device_pending`). The
+exceptions that also accept a pending device are `POST /vaults/open` (section 7.1) and the
+recovery endpoints (section 7.4).
 
 ## 4. Joining the server (shared secret)
 The server is configured with a `SHARED_SECRET` environment variable. It is handed out by
@@ -153,10 +163,12 @@ The signature is an sshsig over `message` (UTF-8) with namespace `syncryption-au
 
 | Situation | `sharedSecret` | Result |
 |---|---|---|
+| The user exists and is disabled | ignored | `403 user_disabled` |
 | Key is a device of another user or another vault name | ignored | `401 challenge_invalid` |
 | Key is an active device of this user and vault | ignored | log in, `status: "active"` |
 | Key is a pending device of this user and vault | ignored | log in, `status: "pending"` |
 | Key is a revoked device | ignored | `403 device_revoked` |
+| Key is a locked remote-only device | ignored | `403 device_locked` |
 | Key unknown, the vault exists and is enabled | not needed | add the key as a **pending** device of the vault |
 | Key unknown, the vault exists and is disabled | | `403 vault_disabled` |
 | Key unknown, the vault doesn't exist, another new key is creating it | | `409 vault_being_created` |
@@ -185,7 +197,7 @@ also tells whether such a vault exists.
 
 Response `200`:
 ```json
-{ "token": "<b64u 32 bytes>", "expiresAt": "...", "deviceId": "d_...", "vaultId": "<uuid>", "status": "active", "created": true }
+{ "token": "<b64u 32 bytes>", "expiresAt": "...", "deviceId": "d_...", "vaultId": "<uuid>", "status": "active", "created": true, "remoteOnly": false, "graceSeconds": 86400 }
 ```
 - `created` is true when this request created the user or the device.
 - `vaultId` is the device's vault, or `null` for a creating device.
@@ -194,21 +206,30 @@ Response `200`:
   and the recovery endpoints (section 7.4), and everything else returns
   `403 device_pending`. Status is checked on every request, so the same token gains access
   as soon as it is approved.
-- Tokens are random, stored as `SHA-256(token)`, and expire after 1 hour. The client logs
-  in again on `401 token_expired`.
+- Tokens are random, stored as `SHA-256(token)`, and expire after 1 hour, or 5 minutes for
+  a remote-only device. The client logs in again on `401 token_expired`.
+- `remoteOnly` is the server's copy of the device's keyring policy (section 6).
+  `graceSeconds` is the vault's grace period for remote-only devices: how long one may go
+  without a login before it locks ([remote-only.md](remote-only.md) section 5). The default
+  is 86400 (24 hours); the administrator sets it per vault (section 14). It is 86400 for a
+  creating device, which has no vault yet.
 
 ## 6. Devices
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/api/v1/devices/self` | the caller's device, pending tokens allowed |
 | `GET` | `/api/v1/vaults/{id}/devices` | the vault's devices |
-| `POST` | `/api/v1/vaults/{id}/devices/{deviceId}/approve` | pending to active |
+| `POST` | `/api/v1/vaults/{id}/devices/{deviceId}/approve` | pending to active, optional body `{"remoteOnly": true}` |
+| `PUT` | `/api/v1/vaults/{id}/devices/{deviceId}/policy` | `{"remoteOnly": true}` or `false`: change another active device's policy |
+| `PUT` | `/api/v1/vaults/{id}/devices/{deviceId}/lock` | `{"locked": true}` or `false`: lock or unlock another remote-only device |
 | `DELETE` | `/api/v1/vaults/{id}/devices/{deviceId}` | remove (revoke) |
 
 The vault routes need an active device of that vault. `GET .../devices` returns
-`{"devices": [<device object>, ...]}`, oldest first, removed devices included. Approve and
-remove return `200` with the device object; a device that isn't in the vault returns
-`404 not_found`, and approving a removed device returns `400 bad_request`.
+`{"devices": [<device object>, ...]}`, oldest first, removed devices included. Approve,
+policy, lock and remove return `200` with the device object; a device that isn't in the
+vault returns `404 not_found`. Approving a removed device returns `400 bad_request`, and
+approving an active one changes nothing. All four need a full (not remote-only) active
+device of the vault.
 `GET /devices/self` returns the device object plus `vaultId` (`null` for a creating
 device), `vaultName` and `username`.
 
@@ -222,7 +243,9 @@ device), `vaultName` and `username`.
   "pairingCode": "XXXXX-XXXXX",
   "status": "pending",
   "createdAt": "...",
-  "lastSeenAt": "..."
+  "lastSeenAt": "...",
+  "remoteOnly": false,
+  "locked": false
 }
 ```
 - `status` is `pending`, `active` or `revoked`. A vault has at most 5 pending devices, and
@@ -237,7 +260,28 @@ device), `vaultName` and `username`.
   and rejecting a pending device is removing it. Clients then rotate the vault's keyring
   ([crypto.md](crypto.md) section 8.4). The row stays, so the key can't log in or join
   again (`403 device_revoked`). The last active device of a vault can't be removed
-  (`409 exists`).
+  (`409 exists`). Removing a device wakes the vault's long-polls, so the removed device's
+  wait ends at once with `401 unauthenticated` (its session is gone), and its next login
+  gets `403 device_revoked`.
+- **Remote-only devices** ([remote-only.md](remote-only.md)): approving with
+  `{"remoteOnly": true}` makes the device remote-only, and cuts the sessions it already has
+  to 5 minutes. Without a body, or with `false`, it is a full device. The approving client
+  sets the same policy in the keyring, which is what other clients trust. A remote-only
+  device can't manage the vault: approving, removing (itself included), uploading a
+  keyring (`PUT .../keyring`), recovery uploads and the policy and lock calls return
+  `403 remote_only`.
+- **Changing the policy** (`PUT .../policy`) of another active device: the client first
+  uploads a keyring with the new policy, then tells the server. Making a device
+  remote-only cuts its sessions to 5 minutes; making it a full device again clears its
+  lock. A pending or removed device, or the caller itself, returns `400 bad_request`. The
+  change wakes the vault's long-polls, which check their sessions again, and the device
+  follows its new policy at its next keyring refresh.
+- **Locking** (`PUT .../lock`) a remote-only device deletes its sessions, releases its
+  locks and wakes the vault's long-polls, so its wait ends at once with
+  `401 unauthenticated`. Until it is unlocked, its logins return `403 device_locked`. Its
+  remote-only files stay locked, but nothing is deleted. Unlocking (`{"locked": false}`)
+  lets it log in again. A full device, a pending or removed one, or the caller itself
+  returns `400 bad_request`.
 
 ## 7. Vaults and keyring
 
@@ -251,11 +295,12 @@ device), `vaultName` and `username`.
 | `name` is the device's vault | `200 {"vault": <vault object>, "status": "active" \| "pending", "membership": <same as status>}` |
 | The device is creating its vault (no vault id yet) | `404 not_found`, the client then creates it (7.2) |
 | Any other name | `403 forbidden` |
+| `name` is the device's vault, and the vault is disabled | `403 vault_disabled` |
 
 A device only ever opens its own vault, named in its login (section 5). A new key joining
 an existing vault is already pending after verify. The plugin shows its pairing code and
 polls `/vaults/open` (or `/devices/self`) until the status is `active`. `membership` is
-kept for older clients and may be dropped later.
+kept for older clients. An invalid name returns `400 bad_request`.
 
 **Vault object:**
 ```json
@@ -273,8 +318,10 @@ kept for older clients and may be dropped later.
   device, and `name` must be the vault name it registered with (otherwise
   `403 forbidden`). A device that already has a vault, or a vault id or name that is
   taken, gets `409 exists`. On success the device belongs to the new vault. The `vaultId`
-  is chosen by the client (UUIDv4, also inside the keyring plaintext) so the first keyring
-  can be built before the request.
+  is chosen by the client (lowercase UUIDv4, otherwise `400 bad_request`; it is also inside
+  the keyring plaintext) so the first keyring can be built before the request.
+- `GET .../keyring` returns the keyring object; a version that doesn't exist returns
+  `404 not_found`. Remote-only devices may read it.
 
 ### 7.3 Keyring object
 GET response, PUT body, and the `keyring` field of `POST /vaults`:
@@ -289,8 +336,11 @@ GET response, PUT body, and the `keyring` field of `POST /vaults`:
   "createdAt": "..."
 }
 ```
-- `POST /vaults` takes `version: 1`. `PUT` must have `version` = current + 1, otherwise
-  `409 keyring_version` with the current version in `details`.
+- `POST /vaults` takes `version: 1` (otherwise `409 keyring_version` with
+  `details: {"current": 0}`). `PUT` must have `version` = current + 1, otherwise
+  `409 keyring_version` with `details: {"current": <current version>}`.
+- `keyring` must be base64url (otherwise `400 bad_request`) and at most 1 MiB once decoded
+  (otherwise `413 too_large`).
 - The server checks that `signer` is the caller's device (otherwise `403 forbidden`), that
   it is active, and that the signature verifies with namespace
   `syncryption-keyring@v1` under the caller's key (otherwise `400 bad_signature_format`).
@@ -300,7 +350,8 @@ GET response, PUT body, and the `keyring` field of `POST /vaults`:
   every upload, and the server uses it to check recovery uploads (7.4). An invalid or
   non-Ed25519 key gives `400 bad_request`.
 - `byRecovery` (responses only) is true for a version uploaded through `/recover`.
-- `PUT` returns `201` with the stored keyring object.
+- `PUT` returns `201` with the stored keyring object and wakes the vault's long-polls
+  (section 10.2). A remote-only device gets `403 remote_only`.
 - Every version is kept, so clients can verify the chain
   ([crypto.md](crypto.md) section 6.4). Maximum size is 1 MiB.
 
@@ -321,7 +372,10 @@ approve it ([crypto.md](crypto.md) section 9). Both endpoints need a device of t
   `recoverySigner` (otherwise `400 bad_request`). `version` must be current + 1
   (otherwise `409 keyring_version`).
 - On success the server stores the version with `byRecovery: true`, activates the caller's
-  device if it is pending, and returns `201` with the keyring object.
+  device if it is pending, wakes the vault's long-polls and returns `201` with the keyring
+  object.
+- A remote-only device gets `403 remote_only` on `POST .../recover`. Uploads are limited to
+  10 per minute per device (section 12).
 
 ## 8. Blobs
 Blobs are encrypted chunks ([crypto.md](crypto.md) section 8.2), at most
@@ -330,12 +384,14 @@ Blobs are encrypted chunks ([crypto.md](crypto.md) section 8.2), at most
 | Method | Path | Notes |
 |---|---|---|
 | `PUT` | `/api/v1/vaults/{id}/blobs/{blobId}` | raw bytes. `201` if new, `200` if it already exists, both with `{"id", "size"}` |
-| `HEAD` | `/api/v1/vaults/{id}/blobs/{blobId}` | `200` or `404` |
-| `GET` | `/api/v1/vaults/{id}/blobs/{blobId}` | raw bytes |
+| `HEAD` | `/api/v1/vaults/{id}/blobs/{blobId}` | `200` with `Content-Length`, or `404` |
+| `GET` | `/api/v1/vaults/{id}/blobs/{blobId}` | raw bytes, or `404 not_found` |
 | `POST` | `/api/v1/vaults/{id}/blobs/missing` | `{"ids": [...]}` returns `{"missing": [...]}`, at most 1000 ids |
 
 - On `PUT`, the server hashes the body and returns `422 hash_mismatch` if it doesn't
-  equal `blobId`, or `413 too_large` if it exceeds the limit.
+  equal `blobId`, or `413 too_large` if it exceeds the limit (checked against
+  `Content-Length` first, then while the body streams). A malformed `blobId` returns
+  `400 bad_request`.
 - Blobs are partitioned by user and vault. The store key is
   `blobs/<userId>/<vaultId>/<blobId[0:2]>/<blobId>`, using ids rather than names so a
   rename doesn't move data. The layout is the same in `LocalBlobStore` and
@@ -380,22 +436,28 @@ Blobs are encrypted chunks ([crypto.md](crypto.md) section 8.2), at most
 In a single SQLite transaction, the server:
 1. Compares `parentRev` with the current head. `null` means "the file must not exist yet".
    If it doesn't match, it returns `409 stale_parent` with
-   `details: {"head": <revision object>}`, so the client has the remote side for its
-   merge without another round trip.
+   `details: {"head": <revision object>}` (`null` if the file doesn't exist), so the
+   client has the remote side for its merge without another round trip.
 2. Checks that every id in `blobs` exists, or returns `422 missing_blobs` with
    `details: {"missing": [...]}`.
 3. Increments the vault `seq`, inserts the revision with `rev = seq`, moves the head and
    appends to the change feed.
 
-Response `201`: the revision object.
+Response `201`: the revision object. A commit wakes the vault's long-polls.
 
-Other checks: `meta` is at most 64 KiB once decoded (`413 too_large`) and must start with
+`GET .../files/{fileId}` returns the head revision, or `404 not_found` for a file that
+doesn't exist. `GET .../revs/{rev}` returns `404 not_found` for a revision that doesn't
+exist or belongs to another file.
+
+Other checks, before the transaction: a malformed `fileId` or blob id, a `meta` that isn't
+base64url or is empty returns `400 bad_request`. `meta` is at most 64 KiB once decoded
+(`413 too_large`) and must start with
 the object header (crypto.md 8.1: format `0x01`, then an epoch of at least 1), or the
 server returns `422 malformed`. The server keeps the epoch for retention (9.3). A revision has at
 most 10,000 blobs, and a deletion must have an empty `blobs` list (`400 bad_request`).
 
-`GET .../revs` returns `{"revisions": [<revision object>, ...], "more": bool}`. `limit` is
-at most 100 (default 50). To page back, pass the last `rev` as `before`.
+`GET .../revs` returns `{"revisions": [<revision object>, ...], "more": bool}`, deletions
+included. `limit` is 1 to 100 (default 50). To page back, pass the last `rev` as `before`.
 
 Re-creating a deleted file uses the tombstone's `rev` as `parentRev`. Locks are never
 checked here: they are advisory (section 11).
@@ -422,8 +484,9 @@ deletes the blobs no revision references any more. The values are fixed:
 - The server reads the epoch from the clear header of `meta` (crypto.md 8.1). It never
   decrypts anything.
 - Retention changes only what the server keeps. Files on devices are never touched.
-- A merge whose base was removed falls back to a merge without a base, which leaves a conflict copy
-  more often (PLAN, Conflicts).
+- The client merges a text file with diff3 against the base revision
+  ([architecture.md](architecture.md) section 4.2). A merge whose base was removed falls
+  back to a merge without a base, which leaves a conflict copy more often.
 
 ## 10. Change feed and long-poll
 
@@ -441,7 +504,7 @@ deletes the blobs no revision references any more. The values are fixed:
   `meta`, so a client can apply the feed without one request per file.
 - `cursor` is the highest `rev` returned (or `since` if there are none). The client stores
   it in IndexedDB after it has applied the batch.
-- `limit` is at most 1000.
+- `since` defaults to 0. `limit` is 1 to 1000 (default 500).
 - Revisions removed by retention (9.3) no longer appear. Every file's head always does,
   so a client that is behind still reaches the current state. A client that meets a
   revision that was removed meanwhile (`404`) fetches the file's head instead.
@@ -455,8 +518,14 @@ deletes the blobs no revision references any more. The values are fixed:
 { "seq": 1042, "locksSeq": 88, "keyringVersion": 4, "changed": true }
 ```
 - Returns as soon as vault `seq > since`, `locksSeq > locksSince` or, if `keyringSince` is
-  given, the keyring version `> keyringSince`, or after `timeout` seconds (at most 25)
-  with `changed: false`.
+  given, the keyring version `> keyringSince`, or after `timeout` seconds (0 to 25,
+  default 25) with `changed: false`. `since` and `locksSince` default to 0.
+- `seq`, `locksSeq` and `keyringVersion` are the vault's current values.
+- The wait wakes on commits, keyring uploads, lock changes, device removal, policy changes
+  and locking, and the admin's disable, enable and maintenance switches. The session is
+  checked again each time it wakes, so a device removed or locked while it waits gets
+  `401 unauthenticated` at once (its session is gone), and a disabled user or vault gets
+  its `403`.
 - The client then calls `/changes` or `/locks` as needed and loops.
 - On network errors it backs off exponentially, from 1 s up to 60 s. It also backs off
   when a sync after a wake-up didn't reach `seq`, so a failing sync doesn't spin.
@@ -468,16 +537,17 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/v1/vaults/{id}/locks` | active locks, plus `locksSeq` |
+| `GET` | `/api/v1/vaults/{id}/locks` | `{"locks": [<lock object>, ...], "locksSeq": N}`, by `fileId` |
 | `POST` | `/api/v1/vaults/{id}/locks/{fileId}` | acquire or renew |
-| `DELETE` | `/api/v1/vaults/{id}/locks/{fileId}` | release |
+| `DELETE` | `/api/v1/vaults/{id}/locks/{fileId}?clientId=...` | release |
 
 **Lock object:**
 ```json
 { "fileId": "...", "device": "d_...", "clientId": "<b64u 16 bytes>", "deviceName": "Pixel", "expiresAt": "..." }
 ```
 - The holder is the pair `(device, clientId)`, so installations that share a key still
-  see each other's locks.
+  see each other's locks. `clientId` is 22 base64url characters (16 bytes), and a
+  malformed `clientId` or `fileId` returns `400 bad_request`.
 - **Acquire or renew:** body `{"clientId": "...", "ttl": 120}` (seconds, 30 to 300,
   default 120). Returns `200` with the lock object if it is free, expired or already held
   by the caller (which renews it). Returns `423 locked` with
@@ -488,8 +558,9 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
   opens or Obsidian goes to the background, and takes it again when Obsidian comes back.
 - **Release:** `DELETE` with `?clientId=...`, returns `204`. It is idempotent, and only the holder can release.
 - Expired locks are treated as absent and swept lazily.
-- Taking a lock (not renewing one), a release, an expiry seen by the sweeper, or a
-  revocation increments the vault's `locksSeq`. Renewals don't, so they wake no one.
+- Taking a lock (not renewing one), a release, an expiry seen by the sweeper, or removing
+  or locking the holding device increments the vault's `locksSeq`. Renewals don't, so they
+  wake no one.
 
 ## 12. Limits and rate limiting
 | Limit | Value |
@@ -498,12 +569,20 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 | `meta` size | 64 KiB |
 | Keyring size | 1 MiB |
 | Other request bodies | 2 MiB, checked before the body is read (`413 too_large`) |
-| `/auth/*` | 10 requests/min per client address |
-| Wrong shared secrets | 5 per hour per client address, and 50 per hour from all addresses together, then `429`, to stop guessing `SHARED_SECRET`. The server logs a warning when joining pauses. |
-| Pending devices | 5 per vault; they expire after 24 hours |
+| `/auth/*` | 10 requests/min per client address (challenge and verify together) |
+| Wrong shared secrets | 5 per hour per client address, and 50 per hour from all addresses together, then `429` with `Retry-After: 3600`, to stop guessing `SHARED_SECRET`. The server logs a warning when joining pauses. |
+| Pending devices | 5 per vault (then `429` with `Retry-After: 86400`); they expire after 24 hours |
+| Challenges | single use, 60 s |
+| Sessions | 1 hour; 5 minutes for a remote-only device |
+| Remote-only grace period | 24 hours by default, 1 hour to 365 days per vault (section 14) |
 | Creating devices | 1 per vault name; deleted after 24 hours if the vault wasn't created |
 | `POST /vaults/{id}/recover` | 10 requests/min per device |
 | Concurrent `/wait` per device | 2. The oldest is answered with `changed: false`. |
+| `/wait` timeout | 25 s |
+| Blob ids per `/blobs/missing` | 1000 |
+| Blobs per revision | 10,000 |
+| Unreferenced blobs | deleted 24 hours after upload, by the hourly garbage collector |
+| Admin token | 5 wrong tokens per client address in 15 minutes (section 14) |
 | Revision history | every revision for 30 days, at least the last 10 per file; deleted files 90 days; revisions under an old epoch 30 days after a newer one (9.3) |
 
 - A client address is the connecting IP (the last `X-Forwarded-For` entry with
@@ -536,28 +615,39 @@ API. Every route needs `ADMIN_TOKEN`.
   `syncryption_admin` (HttpOnly, Secure over HTTPS, SameSite=Strict, `Path=/admin`,
   12 hours). Every form posted with a cookie session carries the session's `csrf` field.
   `POST /admin/logout` ends the session. The JSON routes take only the Bearer header.
-- **Rate limit:** 5 wrong tokens per IP in 15 minutes. While the limit is full, every
-  attempt from that IP gets `429`, even with the right token.
+- **Rate limit:** 5 wrong tokens per client address (section 12) in 15 minutes. While the
+  limit is full, every attempt from that address gets `429`, even with the right token.
+  Right tokens don't count.
+- **Errors:** a JSON route without a valid Bearer token returns `401 unauthenticated`; an
+  unknown user or vault id returns `404 not_found`. A page without a valid session shows
+  the login form (`401` after a wrong token).
 - **Pages:** `GET /admin` shows the login form or the dashboard;
   `POST /admin/{users|vaults}/{id}/{disable|enable|purge}` and
-  `POST /admin/maintenance/{on|off}` (form field `message` for `on`) act and redirect to
-  `/admin?done=<code>`.
+  `POST /admin/maintenance/{on|off}` (form field `message` for `on`) and
+  `POST /admin/vaults/{id}/grace` (form field `hours`, a whole number from 1 to 8760, empty
+  for the default) act and redirect to `/admin?done=<code>`.
 - **JSON:**
   - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
     with the same values as `/health`.
   - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
     `createdAt`, `lastSeenAt`, `disabled`, `vaults` (`id`, `name`, `size` in stored
-    bytes, `files`, `createdAt`, `lastChangeAt`, `disabled`, and `devices`: `id`, `name`,
-    `fingerprint`, `status`, `createdAt`, `lastSeenAt`) and `creating`
+    bytes, `files` (files that aren't deleted), `revisions`, `createdAt`, `lastChangeAt`,
+    `disabled`, `remoteOnlyGrace` (seconds, or `null` for the default), and `devices`:
+    `id`, `name`, `fingerprint`, `status`, `createdAt`, `lastSeenAt`, `remoteOnly`,
+    `locked`) and `creating`
     (`[{"vaultName", "device"}]`, keys that haven't created their vault yet). Times are
     RFC 3339 or `null`.
   - `POST /admin/api/{users|vaults}/{id}/{disable|enable}` returns `204`.
+  - `POST /admin/api/vaults/{id}/grace` with `{"graceSeconds": <3600 to 31536000 or null>}`
+    sets the vault's grace period for remote-only devices and returns `204`. A value out of
+    range returns `400 bad_request`. Devices get it at their next login.
   - `POST /admin/api/{users|vaults}/{id}/purge` with `{"confirm": "<username or vault
     name>"}` returns `204`. It returns `409 not_disabled` unless the item is disabled
     first, and `400 confirm` if the name doesn't match.
 - **Effect on clients:** a disabled user gets `403 user_disabled` on login and on every
-  request; a disabled vault gets `403 vault_disabled` on open and on every vault request.
-  Waiting long-polls return at once. Purging deletes the blobs first, then the rows, so a
+  request; a disabled vault gets `403 vault_disabled` on open and on every vault request,
+  and a new key can't join it. Disabling and enabling wake the vault's long-polls, so
+  waiting ones answer at once. Purging deletes the blobs first, then the rows, so a
   failed purge can be run again.
 - **Purging removes keys:** purging a vault also deletes all its devices (encryption keys),
   whatever their status, with their sessions, locks and challenges. The keys are unknown

@@ -4,10 +4,10 @@ import sqlite3
 from collections import defaultdict
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
-from syncryption_server.auth import ActiveCaller, Caller, State
+from syncryption_server.auth import ActiveCaller, Caller, State, recheck
 from syncryption_server.encoding import BLOB_ID_RE, FILE_ID_RE, b64u, from_b64u, rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found, too_large
 from syncryption_server.state import AppState
@@ -306,6 +306,7 @@ async def wait(
     vault_id: str,
     caller: ActiveCaller,
     state: State,
+    request: Request,
     since: Annotated[int, Query(ge=0)] = 0,
     locksSince: Annotated[int, Query(ge=0)] = 0,
     keyringSince: Annotated[int | None, Query(ge=0)] = None,
@@ -321,6 +322,8 @@ async def wait(
     async def changed() -> bool:
         if state.maintenance is not None:
             return True
+        # A removed device's session is gone: answer with its 403 now (remote-only.md 5).
+        await recheck(request, state)
         row = await state.db.read(current)
         return (
             row["seq"] > since
@@ -332,6 +335,9 @@ async def wait(
     # Maintenance started while waiting: answer with its 503 now (protocol.md 14.1).
     if (err := state.maintenance_error()) is not None:
         raise err
+    # The device may have been removed while it waited: answer with its 403 now.
+    caller = await recheck(request, state)
+    await state.db.read(lambda: require_member(state, caller, vault_id))
     row = await state.db.read(current)
     return WaitResponse(
         seq=row["seq"],

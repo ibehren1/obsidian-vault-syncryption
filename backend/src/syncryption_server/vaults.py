@@ -10,13 +10,14 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from syncryption_server.auth import ActiveCaller, AnyCaller, Caller, State, vault_name
+from syncryption_server.auth import ActiveCaller, AnyCaller, Caller, FullCaller, State, vault_name
 from syncryption_server.encoding import b64u, from_b64u, is_uuid4, rfc3339
 from syncryption_server.errors import (
     ApiError,
     bad_request,
     forbidden,
     not_found,
+    remote_only,
     too_large,
     vault_disabled,
 )
@@ -226,7 +227,7 @@ def _get_keyring(vault_id: str, caller: Caller, state: AppState, version: int | 
 
 @router.put("/{vault_id}/keyring", status_code=201)
 async def put_keyring(
-    vault_id: str, body: KeyringUpload, caller: ActiveCaller, state: State
+    vault_id: str, body: KeyringUpload, caller: FullCaller, state: State
 ) -> Keyring:
     def store() -> None:
         require_member(state, caller, vault_id)
@@ -322,6 +323,8 @@ async def recover(vault_id: str, body: KeyringUpload, caller: AnyCaller, state: 
     # One unit: the recovery signer checked is the one of the version the insert follows.
     def store() -> None:
         _require_membership(state, caller, vault_id)
+        if caller.remote_only:
+            raise remote_only()
         current = _current_keyring(state.db.conn, vault_id)
         if current["recovery_signer"] is None:
             raise _no_recovery()

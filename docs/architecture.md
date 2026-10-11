@@ -1,7 +1,7 @@
 # Vault Syncryption Architecture
 
-Status: first draft (M0). The design rationale is in [PLAN.md](PLAN.md), the wire format
-in [protocol.md](protocol.md) and the crypto in [crypto.md](crypto.md).
+The wire format is in [protocol.md](protocol.md), the crypto in [crypto.md](crypto.md) and
+remote-only devices in [remote-only.md](remote-only.md).
 
 ## 1. Overview
 ```mermaid
@@ -13,7 +13,7 @@ flowchart LR
         engine["sync engine"]
         crypto["crypto (age, XChaCha)"]
         idb[("IndexedDB state")]
-        adapter["vault.adapter (all files)"]
+        adapter["Vault API (notes) and<br/>vault.adapter (.obsidian*)"]
         secret[("SecretStorage (encryption key)")]
         plugin --- ui & engine
         engine --- crypto & idb & adapter
@@ -50,16 +50,17 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `encoding` | `b64u`, RFC 3339 times, id formats |
 | `sshkeys` | devices' encryption keys (Ed25519 public keys in OpenSSH format): parsing, fingerprints, pairing codes, sshsig verification |
 | `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag |
-| `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens |
-| `devices` | the vault's keys (devices): list, approval, removal, `/devices/self` |
+| `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens (5 minutes for a remote-only device, so each login renews its lease), the grace period sent at login, refusing locked devices and keeping remote-only devices out of the vault's management calls |
+| `devices` | the vault's keys (devices): list, approval (with the remote-only flag), removal, policy changes, locking and unlocking remote-only devices, `/devices/self` |
 | `vaults` | open/create the key's vault by name, keyring versions, recovery |
 | `storage` | `BlobStore` protocol, `LocalBlobStore`, `S3BlobStore` |
 | `blobs` | blob upload, download and `missing`, and the garbage collector |
 | `retention` | hourly pruning of old revisions (protocol.md 9.3) |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
-| `locks` | lease locks and `locksSeq` (M6) |
-| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode) |
-| `migrate` | `MIGRATE_TO_S3` one-shot copy, run by the entrypoint before serving (M3) |
+| `locks` | lease locks and `locksSeq` |
+| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode, each vault's remote-only grace period) |
+| `migrate` | `MIGRATE_TO_S3` one-shot copy, run by the entrypoint before serving |
+| `__main__` | the entrypoint's commands: `check`, `check-data`, `render`, `migrate`, `health`, and `openapi` (the schema `npm run api-types` reads) |
 
 ### 2.1 Data model (SQLite)
 ```mermaid
@@ -90,9 +91,11 @@ erDiagram
         text vault_name
         text public_key UK "one vault per key"
         text name
-        text status
+        text status "pending, active or revoked"
         int created_at
         int last_seen_at
+        bool remote_only "the server's copy of the keyring policy"
+        bool locked "locked by another device"
     }
     sessions {
         text token_hash PK
@@ -117,6 +120,7 @@ erDiagram
         int keyring_version
         int created_at
         int disabled_at "set by the admin page"
+        int remote_only_grace "null for the default (24 h)"
     }
     keyrings {
         text vault_id PK, FK
@@ -124,6 +128,8 @@ erDiagram
         blob keyring
         text signature
         text signer FK
+        text recovery_signer "crypto.md 9"
+        bool by_recovery
         int created_at
     }
     files {
@@ -138,10 +144,10 @@ erDiagram
         int parent_rev
         bool deleted
         blob meta
-        int epoch
         int size
         text device_id FK
         int created_at
+        int epoch "from the meta header, for retention"
     }
     revision_blobs {
         text vault_id PK, FK
@@ -186,6 +192,11 @@ erDiagram
   which gives a total order per vault without extra locking.
 - Ids are text: UUIDv4 for users and vaults, `d_...` for devices. Times are integer Unix
   seconds.
+- The schema version is `PRAGMA user_version`, currently 8. An empty database is created
+  at the current version; a database at version 5 to 7 is migrated step by step, each step
+  in its own transaction. Versions 1 to 4 come from servers before 0.1.4 (one key for every
+  vault of a user) and aren't migrated: the server and the entrypoint's `check-data` refuse
+  them with a message to delete the data.
 - `maintenance` and `admin_sessions` stand alone. The app reads `maintenance` at startup and
   then keeps it in memory; only the admin routes change it (protocol.md 14.1).
 - There is one `sqlite3` connection for writes, used only from one dedicated database
@@ -231,19 +242,20 @@ Each vault has an `asyncio.Condition`. A commit or lock change notifies it after
 transaction commits. `/wait` re-checks `seq`/`locksSeq` under the condition before
 waiting, so no wake-up is lost. There is one container and one uvicorn worker, so this
 in-process mechanism is enough. Turning maintenance on notifies every vault's condition,
-and `/wait` then answers with the maintenance `503`. Running several workers would need a different
-notification path and is out of scope.
+and `/wait` then answers with the maintenance `503`. Locking a device or removing its key
+wakes its `/wait`, which then finds the session gone.
 
 ## 3. Container (`backend/Dockerfile`, `backend/entrypoint.sh`)
 The image is built in three stages: a `ghcr.io/astral-sh/uv` stage that installs the
 locked dependencies into `/app/.venv`, the Litestream 0.5.17 release binary (checked
 against a pinned SHA-256) and the Caddy 2.11 binary from the official image. The runtime
 is `python:3.12-slim-bookworm`. The entrypoint uses small commands from
-`python -m syncryption_server` (`check`, `render`, `migrate`, `health`), so the
-environment rules live in one place (`config.py`).
+`python -m syncryption_server` (`check`, `check-data`, `render`, `migrate`, `health`), so
+the environment rules live in one place (`config.py`).
 
-1. `check` validates the environment (rules in [PLAN.md](PLAN.md), Hosting), prints a
-   one-line summary without secrets, and exits with a clear message on any error.
+1. `check` validates the environment (the rules are in [self-hosting.md](self-hosting.md)
+   section 2), prints a one-line summary without secrets, and exits with a clear message
+   on any error.
 2. `render` writes the generated config into `/run/syncryption`: a `Caddyfile` when
    `BEHIND_PROXY=FALSE` (`admin off`, certificates in `/data/caddy`, `reverse_proxy` to
    uvicorn) and a `litestream.yml` when S3 is enabled. Credentials are not written to
@@ -251,9 +263,11 @@ environment rules live in one place (`config.py`).
    expands when it loads it.
 3. If S3 is enabled: `litestream restore -if-db-not-exists -if-replica-exists`, so a new
    host can be rebuilt from the bucket.
-4. If `MIGRATE_TO_S3=TRUE`: run the migration and stop on failure. The server is not
+4. `check-data` stops the container if `meta.db` was written by a server before 0.1.4
+   (section 2.1).
+5. If `MIGRATE_TO_S3=TRUE`: run the migration and stop on failure. The server is not
    listening yet, so clients see connection errors and back off.
-5. Start the app:
+6. Start the app:
    - `BEHIND_PROXY=FALSE`: uvicorn on `127.0.0.1:8000` with `--proxy-headers
      --forwarded-allow-ips 127.0.0.1` (so client IPs come from Caddy), and Caddy in front
      on 80/443.
@@ -261,7 +275,7 @@ environment rules live in one place (`config.py`).
      reads `X-Forwarded-*` itself.
    - With S3, everything runs under `litestream replicate -exec`, so the database is
      replicated while the app runs and Litestream stops when the app does.
-6. The entrypoint supervises the processes with `wait -n`: if uvicorn or Caddy exits, the
+7. The entrypoint supervises the processes with `wait -n`: if uvicorn or Caddy exits, the
    other is stopped and the container exits with an error. `docker stop` (SIGTERM) shuts
    everything down cleanly and exits 0.
 
@@ -276,13 +290,14 @@ clean stop. CI runs it in the `container` job.
 ## 4. Plugin (`plugin/`)
 | Module | Responsibility |
 |---|---|
-| `main` | plugin lifecycle, commands, status bar, pause and resume, event wiring |
-| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval and reload dialogs, file history and restore, the status window (`ui/status`) |
+| `main`, `compat`, `device` | plugin lifecycle, commands, status bar, pause and resume, event wiring, the first-sync confirmation, the `SecretStorage` check, the default device name |
+| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval, first-sync and reload dialogs, the recovery key dialog, file history and restore, the status window (`ui/status`), the remote-only compliance report (`ui/compliance`) |
 | `obsidian` | `requestUrl` transport, and the `VaultFs` over the Vault API |
-| `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects |
+| `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects, path and key derivation (`kdf`), sealing under a remote-only device's local key (`local`, crypto.md 11) |
 | `api` | typed client over a `Transport` (`requestUrl` in the plugin, `fetch` in tests). `src/api/schema.ts` is generated from the server's OpenAPI with `npm run api-types` (CI checks it is current) |
-| `sync` | vault session (login, join, create or open the vault, pairing, keyring pinning), sync engine, scanner, merge, conflict copies, path filter, the `VaultFs` over `vault.adapter` for the config folders, lock manager, long-poll loop |
-| `store` | IndexedDB: cursor, path table, outbox, pinned keyring |
+| `sync` | vault session (login, join, create or open the vault, pairing, keyring pinning), sync engine, scanner, merge, conflict copies, path filter, file encryption (`cipher`), the `VaultFs` over `vault.adapter` for the config folders and `SplitFs`, which sends hidden paths there and the rest to the Vault API, lock manager, long-poll loop |
+| `store` | IndexedDB (`idb`, behind the `SyncStore` interface in `state`): cursor, path table, outbox, pinned keyring. On a remote-only device, the sealed content hashes (`sealed`) and the store of sealed file content (`entries`) |
+| `remote` | remote-only devices ([remote-only.md](remote-only.md)): the wrapped `vault.adapter` that serves sealed content behind zero-byte stubs (`stub-adapter`), the `VaultFs` that reports the real size and times of those files (`stat-fs`), the lease, the wipe on removal and the Obsidian wiring (`remote-only`), and the compliance report (`compliance`) |
 
 ### 4.1 Local state (IndexedDB)
 One database per Obsidian vault and remote vault: `syncryption-<installId>-<vaultId>`. The
@@ -296,6 +311,10 @@ cleared.
 | `files` | `path → {fileId, rev, deleted, sha256, size, mtime}`: the last synced state of each file |
 | `outbox` | `path → {path, id, queuedAt}`, one entry per path. Whether it is an upload or a deletion is decided when it is pushed, from the file on disk. A push removes the entry only if its `id` is unchanged, so a change made during the push is not lost |
 
+A remote-only device ([remote-only.md](remote-only.md) section 7) stores `files.sha256`
+sealed under its local key, and the content of its notes and attachments in a second
+database, `syncryption-<installId>-<vaultId>-remote`.
+
 There is no store of merge bases: the base is the synced revision, fetched from the server
 with `GET /files/{fileId}/revs/{rev}` when a merge needs it. A merge therefore needs the
 server, which a merge always does anyway (it starts from a remote change).
@@ -305,7 +324,10 @@ server, which a merge always does anyway (it starts from a remote change).
 flowchart TD
     unlock["unlock key (SecretStorage)"] --> login --> open["open vault"]
     open --> keyring["fetch and verify keyring"]
-    keyring --> pull0["pull (changes since cursor)"]
+    keyring --> first{"first sync here?"}
+    first -- "yes: the user confirms" --> policy
+    first -- no --> policy["apply the remote-only policy"]
+    policy --> pull0["pull (changes since cursor)"]
     pull0 --> scan["scan local files"] --> push0["push outbox"]
     push0 --> wait["wait (long-poll)"]
     wait --> pull["pull"] --> push["push"] --> wait
@@ -389,14 +411,26 @@ flowchart TD
   when a revision uses an unknown epoch.
 - **Keyring pinning:** on connect, the pinned version is fetched again and compared with
   the pin, then every later version is checked in order (crypto.md 6.4).
+- **First sync:** when a device connects to a vault it has never synced (no cursor in its
+  local state), a dialog shows the server, the vault, the device name and key fingerprint,
+  the number of local files, whether the server vault is empty and what the sync does.
+  The sync starts only when the user confirms; "Not now" disconnects, and the next connect
+  asks again. The sync then runs in the background, with a notice showing its progress.
+- **Remote-only devices:** on connect, the keyring's policy for this device decides
+  whether it is remote-only. A remote-only device keeps its notes and attachments on disk
+  as zero-byte stubs, with the content sealed under a local key, and can't manage the
+  vault (approve, remove, recovery). Its sessions last 5 minutes, and each login renews
+  its lease; when the grace period passes without a renewal, the files lock. Details are
+  in [remote-only.md](remote-only.md).
 
 ### 4.3 Change detection
 - The Vault API's `create`, `modify`, `delete` and `rename` events cover notes and
   attachments. The undocumented `vault.on('raw')` event covers the hidden config folders;
   only its hidden paths are used.
-- A scan on every sync (and so on startup) compares `mtime`/`size` with `paths`
-  and hashes candidates, as a fallback.
-- Excluded paths ([PLAN.md](PLAN.md), Sync Scope) are filtered before anything is queued.
+- A scan on every sync (and so on startup) compares `mtime`/`size` with `files` and
+  hashes candidates, as a fallback. On a remote-only device the scan sees each file's
+  real size and times, not the stub's.
+- Excluded paths (section 4.4) are filtered before anything is queued.
   A scan doesn't descend into excluded folders such as `node_modules`.
 - **Exclude list:** one pattern per line in the settings, kept per device in the plugin's
   `data.json` (which is itself never synced). A pattern is vault-relative and matches the
@@ -404,8 +438,52 @@ flowchart TD
   segments. Lines starting with `#` are comments. Excluding a synced path stops syncing it
   without deleting it anywhere.
 
+### 4.4 Sync scope
+- The whole vault is synced in place, including `app.vault.configDir`. It is not a nested
+  vault.
+- Notes and attachments go through the Vault API, so Obsidian's index stays current. The
+  hidden `.obsidian*` folders go through `app.vault.adapter`. Both work on desktop and on
+  mobile.
+- Every `.obsidian*` folder at the vault root is synced, so a device can use its own
+  profile through Obsidian's "Override config folder" setting.
+- Never synced (`sync/filter.ts`):
+  - the plugin's own folder, `plugins/vault-syncryption` in every config folder
+  - `workspace.json`, `workspace-mobile.json` and `workspaces.json` at the top of a config
+    folder
+  - `.trash`, `.git` and `node_modules` folders, and `.DS_Store`, `Thumbs.db` and
+    `desktop.ini` files, at any depth
+  - hidden files and folders outside the `.obsidian*` folders (Obsidian doesn't index them)
+  - the paths matched by the device's exclude list (section 4.3)
+- `community-plugins.json` is written last, and the user is asked to reload Obsidian. On a
+  device's first sync, the vault's config files replace the local defaults without
+  conflict copies (section 4.2, Config files).
+
+### 4.5 Mobile
+The plugin uses no Node APIs outside desktop-only code: WebCrypto, `@noble/*`,
+`requestUrl` and long-poll. On phones:
+- **Large files:** a file is read, hashed, encrypted and decrypted whole, on the main
+  thread. Peak memory is about 2x the file size when uploading and about 4x when
+  downloading, so files of a few hundred MB may get the app killed on a phone.
+- **Unicode normalization:** `fileId` uses the NFC form of a path, but files are written
+  under the name as sent. A file named in NFD on one device and NFC on another (rare:
+  macOS keeps both) can show up twice on Android.
+- **Device names:** a phone has no hostname, so its default device name is "iPhone",
+  "iPad", "Android phone" or "Android tablet" (desktops use the hostname). Several phones
+  of the same kind look alike in approvals, conflict copies and "is editing" notices until
+  they are renamed in the settings.
+- **Scans:** every sync scans the vault and the config folders (one `stat` per config
+  file), which costs battery on large vaults.
+- **Passphrases:** a stored encryption key that has a passphrase asks for it on every cold
+  start, and iOS restarts apps often. Keys the plugin generates have no passphrase.
+
 ## 5. Repository and CI
 - `testvectors/` is read by both the pytest and the vitest suites.
-- CI (Gitea Actions) runs `ruff check`, `ruff format --check`, `pytest`, `eslint`,
-  `vitest` and the plugin build on every PR. Interop tests against the Go `age` CLI run in
-  CI from M1.
+- CI (Gitea Actions, `.gitea/workflows/ci.yml`) runs on every PR and on pushes to `main`,
+  in three jobs:
+  - `backend`: `uv sync --locked`, `ruff check`, `ruff format --check`, `pytest`.
+  - `container`: `backend/container-checks.sh` (section 3).
+  - `plugin`: checks that the root `manifest.json` and `versions.json` match the plugin's,
+    then `eslint`, `npm run api-types -- --check`, `vitest` and the build. The tests run
+    against the real backend (started with uv) and against `ssh-keygen` and the Go `age`
+    CLI for interop, and fail rather than skip if either is missing (`REQUIRE_BACKEND=1`,
+    `REQUIRE_AGE=1`).

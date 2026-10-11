@@ -176,6 +176,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/vaults/{vault_id}/devices/{device_id}/lock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Device Locked
+         * @description Lock a remote-only device: its sessions end and it can't log in until unlocked.
+         */
+        put: operations["set_device_locked_api_v1_vaults__vault_id__devices__device_id__lock_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vaults/{vault_id}/devices/{device_id}/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Device Policy
+         * @description Make another active device remote-only, or a full device again (remote-only.md 4).
+         */
+        put: operations["set_device_policy_api_v1_vaults__vault_id__devices__device_id__policy_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/vaults/{vault_id}/files/{file_id}": {
         parameters: {
             query?: never;
@@ -389,6 +429,15 @@ export interface components {
              */
             ttl: number;
         };
+        /** ApproveRequest */
+        ApproveRequest: {
+            /**
+             * Remoteonly
+             * @description Approve as remote-only: short sessions, no vault management (remote-only.md 4). Must match the policy in the keyring.
+             * @default false
+             */
+            remoteOnly: boolean;
+        };
         /** BlobInfo */
         BlobInfo: {
             /** Id */
@@ -457,12 +506,24 @@ export interface components {
             id: string;
             /** Lastseenat */
             lastSeenAt: string | null;
+            /**
+             * Locked
+             * @description A remote-only device locked by another device of the vault.
+             * @default false
+             */
+            locked: boolean;
             /** Name */
             name: string;
             /** Pairingcode */
             pairingCode: string;
             /** Publickey */
             publicKey: string;
+            /**
+             * Remoteonly
+             * @description Approved as remote-only.
+             * @default false
+             */
+            remoteOnly: boolean;
             /** Status */
             status: string;
         };
@@ -526,6 +587,14 @@ export interface components {
             /** Fileid */
             fileId: string;
         };
+        /** LockRequest */
+        LockRequest: {
+            /**
+             * Locked
+             * @description Lock or unlock a remote-only device (remote-only.md 5).
+             */
+            locked: boolean;
+        };
         /** Locks */
         Locks: {
             /** Locks */
@@ -564,6 +633,14 @@ export interface components {
             status: "active" | "pending";
             vault: components["schemas"]["Vault"];
         };
+        /** PolicyRequest */
+        PolicyRequest: {
+            /**
+             * Remoteonly
+             * @description The device's new policy (remote-only.md 4). Must match the keyring.
+             */
+            remoteOnly: boolean;
+        };
         /** Revision */
         Revision: {
             /** Blobs */
@@ -595,12 +672,24 @@ export interface components {
             id: string;
             /** Lastseenat */
             lastSeenAt: string | null;
+            /**
+             * Locked
+             * @description A remote-only device locked by another device of the vault.
+             * @default false
+             */
+            locked: boolean;
             /** Name */
             name: string;
             /** Pairingcode */
             pairingCode: string;
             /** Publickey */
             publicKey: string;
+            /**
+             * Remoteonly
+             * @description Approved as remote-only.
+             * @default false
+             */
+            remoteOnly: boolean;
             /** Status */
             status: string;
             /** Username */
@@ -661,6 +750,18 @@ export interface components {
             deviceId: string;
             /** Expiresat */
             expiresAt: string;
+            /**
+             * Graceseconds
+             * @description How long a remote-only device may go without a login before it locks.
+             * @default 86400
+             */
+            graceSeconds: number;
+            /**
+             * Remoteonly
+             * @description Whether the device was approved as remote-only.
+             * @default false
+             */
+            remoteOnly: boolean;
             /**
              * Status
              * @enum {string}
@@ -1051,7 +1152,83 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ApproveRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Device"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_device_locked_api_v1_vaults__vault_id__devices__device_id__lock_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_id: string;
+                vault_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LockRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Device"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_device_policy_api_v1_vaults__vault_id__devices__device_id__policy_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_id: string;
+                vault_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

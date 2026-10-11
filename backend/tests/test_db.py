@@ -88,6 +88,9 @@ def schema_5_database(path) -> None:
     """A schema 5 database (server 0.1.4): no `revisions.epoch`, with a few revisions."""
     db = Database(path)
     db.migrate()
+    db.conn.execute("ALTER TABLE devices DROP COLUMN remote_only")
+    db.conn.execute("ALTER TABLE devices DROP COLUMN locked")
+    db.conn.execute("ALTER TABLE vaults DROP COLUMN remote_only_grace")
     db.conn.execute("DROP INDEX revisions_file_epoch")
     db.conn.execute("ALTER TABLE revisions DROP COLUMN epoch")
     db.conn.execute("PRAGMA foreign_keys = OFF")
@@ -102,16 +105,18 @@ def schema_5_database(path) -> None:
     db.close()
 
 
-def test_schema_5_migrates_to_6_with_epochs(tmp_path):
+def test_schema_5_migrates_to_8_with_epochs_and_remote_only(tmp_path):
     schema_5_database(tmp_path / "meta.db")
     db = Database(tmp_path / "meta.db")
     db.migrate()
-    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 6
+    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 8
     assert BASE_VERSION + len(MIGRATIONS) == SCHEMA_VERSION
     epochs = [r[0] for r in db.all("SELECT epoch FROM revisions ORDER BY rev")]
     assert epochs == [1, 3, 65536, 1]  # a header that can't be read keeps the default
     indexes = {r[0] for r in db.all("SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "revisions_file_epoch" in indexes
+    assert {"remote_only", "locked"} <= {r[1] for r in db.all("PRAGMA table_info(devices)")}
+    assert "remote_only_grace" in {r[1] for r in db.all("PRAGMA table_info(vaults)")}
     db.close()
 
 
@@ -121,7 +126,7 @@ def test_schema_5_data_is_accepted_and_migrated_on_start(settings, clock):
     with TestClient(create_app(settings, clock=clock)):
         pass
     db = Database(settings.db_path)
-    assert db.one("PRAGMA user_version")[0] == 6
+    assert db.one("PRAGMA user_version")[0] == 8
     db.close()
 
 

@@ -1,4 +1,4 @@
-"""`MIGRATE_TO_S3`: copy local blobs to S3 before the server starts (docs/PLAN.md, Hosting).
+"""`MIGRATE_TO_S3`: copy local blobs to S3 before the server starts (docs/self-hosting.md 7).
 
 Blobs are content addressed, so the copy is idempotent: a blob that is already in the
 bucket with the right size is skipped, and a run that was killed partway simply continues.

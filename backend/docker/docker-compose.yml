@@ -1,5 +1,6 @@
 # Vault Syncryption server. Every setting is an environment variable below (no .env file).
-# See docs/self-hosting.md.
+# See docs/self-hosting.md. The container refuses to start, saying which variable is wrong,
+# if a required one is missing or a value is invalid.
 services:
   vault-syncryption:
     image: ibehren1/vault-syncryption:latest
@@ -7,19 +8,49 @@ services:
     ports:
       - "80:80"        # Let's Encrypt HTTP-01 and the redirect to HTTPS (BEHIND_PROXY=FALSE)
       - "443:443"      # HTTPS (BEHIND_PROXY=FALSE)
-      # - "8080:8080"  # plain HTTP for your own proxy (BEHIND_PROXY=TRUE)
+      # - "8080:8080"  # plain HTTP for your own proxy (BEHIND_PROXY=TRUE); remove 80 and 443
     volumes:
-      - ./data:/data   # the database, and the encrypted files unless S3 is set (the default)
+      - ./data:/data   # the database, certificates, and the encrypted files unless S3 is set
     environment:
+      # TRUE or FALSE.
+      #   FALSE: the container serves HTTPS on 80/443 and gets its own Let's Encrypt
+      #          certificate for URL. The DNS name must point at this host, and ports 80 and
+      #          443 must be reachable from the internet.
+      #   TRUE:  plain HTTP on 8080 for your reverse proxy, which terminates TLS and passes
+      #          X-Forwarded-Proto and X-Forwarded-Host. Allow requests of at least 30 s.
       BEHIND_PROXY: "FALSE"
-      URL: "https://notes.example.com"   # required when BEHIND_PROXY=FALSE
-      SHARED_SECRET: "change-me"         # required; people need it to join the server
-      ADMIN_TOKEN: ""                    # required: 32+ characters for /admin (openssl rand -hex 32)
-      ADMIN_CONTACT: ""                  # optional: how users reach you, shown on / and /health (email, Slack, phone, ...)
-      # S3 is optional: leave these empty to keep everything in ./data (the default), or set
-      # all three S3_* variables to store files in a bucket, for effectively unlimited storage.
-      S3_BUCKET: ""
-      S3_ACCESS_KEY: ""
+
+      # The public address: scheme and host only, no path, e.g. https://notes.example.com.
+      # Required when BEHIND_PROXY=FALSE. Optional when TRUE (the proxy's headers are used).
+      URL: "https://notes.example.com"
+
+      # Required. Needed only to create a new user or vault; joining an existing vault
+      # doesn't need it. Give it only to people who may create vaults.
+      # Generate one with: openssl rand -base64 24
+      SHARED_SECRET: ""
+
+      # Required, at least 32 characters. Opens /admin (sign in on the page, or send
+      # "Authorization: Bearer <token>" to /admin/api). Keep it private.
+      # Generate one with: openssl rand -hex 32
+      ADMIN_TOKEN: ""
+
+      # Optional. How your users reach you (email, Slack channel, phone, ...): one line, at
+      # most 500 characters. Public: shown on /, in /health, and in the plugin during
+      # maintenance or when an account is disabled. Example: "admin@example.com"
+      ADMIN_CONTACT: ""
+
+      # Storage. Leave all of these empty to keep everything in ./data (the default), or set
+      # all three of S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY to store the encrypted files
+      # in a bucket, for effectively unlimited storage. With S3, the database stays in
+      # ./data and Litestream replicates it to the same bucket under litestream/.
+      S3_BUCKET: ""                      # an existing bucket used only by this server
+      S3_ACCESS_KEY: ""                  # an access key that can read, write, list and delete in it
       S3_SECRET_KEY: ""
-      S3_ENDPOINT: ""                    # optional: MinIO, B2, R2, ...; empty means AWS
-      MIGRATE_TO_S3: "FALSE"             # TRUE copies ./data to the bucket on startup; then FALSE again
+      # Optional, for S3-compatible providers, e.g. https://s3.us-west-004.backblazeb2.com,
+      # https://<account>.r2.cloudflarestorage.com or http://minio:9000. Empty means AWS
+      # (the region is read from the bucket).
+      S3_ENDPOINT: ""
+
+      # TRUE or FALSE. TRUE copies the files already in ./data to the bucket on startup
+      # (needs the S3 variables). Set it back to FALSE once the migration has finished.
+      MIGRATE_TO_S3: "FALSE"

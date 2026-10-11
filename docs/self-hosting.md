@@ -21,7 +21,7 @@ it into an empty folder on the host. `./data` below is relative to that folder.
 
 ## 2. Configure
 Everything is in `docker-compose.yml`, with the variables written inline. There is no
-`.env` file.
+`.env` file. This is the whole file, with a comment on every variable:
 
 ```yaml
 services:
@@ -29,20 +29,53 @@ services:
     image: ibehren1/vault-syncryption:latest
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "80:80"        # Let's Encrypt HTTP-01 and the redirect to HTTPS (BEHIND_PROXY=FALSE)
+      - "443:443"      # HTTPS (BEHIND_PROXY=FALSE)
+      # - "8080:8080"  # plain HTTP for your own proxy (BEHIND_PROXY=TRUE); remove 80 and 443
     volumes:
-      - ./data:/data
+      - ./data:/data   # the database, certificates, and the encrypted files unless S3 is set
     environment:
+      # TRUE or FALSE.
+      #   FALSE: the container serves HTTPS on 80/443 and gets its own Let's Encrypt
+      #          certificate for URL. The DNS name must point at this host, and ports 80 and
+      #          443 must be reachable from the internet.
+      #   TRUE:  plain HTTP on 8080 for your reverse proxy, which terminates TLS and passes
+      #          X-Forwarded-Proto and X-Forwarded-Host. Allow requests of at least 30 s.
       BEHIND_PROXY: "FALSE"
+
+      # The public address: scheme and host only, no path, e.g. https://notes.example.com.
+      # Required when BEHIND_PROXY=FALSE. Optional when TRUE (the proxy's headers are used).
       URL: "https://notes.example.com"
-      SHARED_SECRET: "a-long-random-string"
-      ADMIN_TOKEN: "at-least-32-random-characters"
-      ADMIN_CONTACT: "admin@example.com or #notes-help on Slack"
-      S3_BUCKET: ""
-      S3_ACCESS_KEY: ""
+
+      # Required. Needed only to create a new user or vault; joining an existing vault
+      # doesn't need it. Give it only to people who may create vaults.
+      # Generate one with: openssl rand -base64 24
+      SHARED_SECRET: ""
+
+      # Required, at least 32 characters. Opens /admin (sign in on the page, or send
+      # "Authorization: Bearer <token>" to /admin/api). Keep it private.
+      # Generate one with: openssl rand -hex 32
+      ADMIN_TOKEN: ""
+
+      # Optional. How your users reach you (email, Slack channel, phone, ...): one line, at
+      # most 500 characters. Public: shown on /, in /health, and in the plugin during
+      # maintenance or when an account is disabled. Example: "admin@example.com"
+      ADMIN_CONTACT: ""
+
+      # Storage. Leave all of these empty to keep everything in ./data (the default), or set
+      # all three of S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY to store the encrypted files
+      # in a bucket, for effectively unlimited storage. With S3, the database stays in
+      # ./data and Litestream replicates it to the same bucket under litestream/.
+      S3_BUCKET: ""                      # an existing bucket used only by this server
+      S3_ACCESS_KEY: ""                  # an access key that can read, write, list and delete in it
       S3_SECRET_KEY: ""
+      # Optional, for S3-compatible providers, e.g. https://s3.us-west-004.backblazeb2.com,
+      # https://<account>.r2.cloudflarestorage.com or http://minio:9000. Empty means AWS
+      # (the region is read from the bucket).
       S3_ENDPOINT: ""
+
+      # TRUE or FALSE. TRUE copies the files already in ./data to the bucket on startup
+      # (needs the S3 variables). Set it back to FALSE once the migration has finished.
       MIGRATE_TO_S3: "FALSE"
 ```
 
@@ -92,13 +125,16 @@ updates use long-polling). Don't expose port 8080 to the internet directly.
 
 Check it's up: `curl https://notes.example.com/health`. It answers 200 with
 `"status": "ok"`, or `"status": "maintenance"` while maintenance mode is on (section 5),
-and includes `ADMIN_CONTACT` as `adminContact`.
+together with the server `version`, the `protocol` version, the `maintenance` details
+(`since` and `message`, or `null`) and `ADMIN_CONTACT` as `adminContact`. If the database
+or the blob store can't be reached it answers 503 with `"status": "unavailable"`.
 
 Opening `https://notes.example.com/` in a browser shows a short page for your users:
 what the service is (self-hosted, end-to-end encrypted Obsidian sync; the server holds
 only ciphertext), how to connect (install the plugin, enter this URL, a username and a
 vault name, and create an encryption key), that creating a vault needs the shared secret from you,
-your `ADMIN_CONTACT`, and whether the server is in maintenance.
+your `ADMIN_CONTACT`, whether the server is in maintenance, and the current `/health`
+response as pretty-printed JSON.
 
 ## 4. Giving people access
 Anyone who has the **endpoint URL**, chooses a **username**, and knows the
@@ -134,8 +170,10 @@ it.
 ## 5. Admin page
 `https://notes.example.com/admin` lists every user with their vaults and each vault's
 keys: the stored (encrypted) size of each vault, its number of files and of kept revisions, when it was created
-and last changed, and each key's fingerprint, device name and when it was last seen. File names and contents stay encrypted, so
-the page can't show them.
+and last changed, and each key's fingerprint, device name, status (pending, active or revoked),
+whether it is a remote-only device and whether it is locked, and when it joined and was
+last seen. Keys that registered to create a vault that doesn't exist yet are listed as
+"being created". File names and contents stay encrypted, so the page can't show them.
 
 - **Logging in:** the page asks for `ADMIN_TOKEN` and keeps you logged in for 12 hours
   (an HttpOnly, SameSite=Strict cookie). Five wrong tokens from one address block that
@@ -144,8 +182,8 @@ the page can't show them.
   The plugin stops syncing and tells the person the administrator disabled it. Enable
   restores access.
 - **Purge:** only for something already disabled. You type its name to confirm. Purge
-  deletes the vault's encrypted files and history (for a user: all their vaults and
-  devices) and **can't be undone**. The username or vault name can then be used again.
+  deletes the vault's encrypted files, history and devices (for a user: all their vaults
+  and devices) and **can't be undone**. The username or vault name can then be used again.
 - **Maintenance mode:** turn it on before maintenance work (a backup, a move, an
   upgrade), with an optional message for your users, and turn it off when you're done.
   It stays on across restarts until you turn it off. While it's on, the sync API answers
@@ -153,6 +191,11 @@ the page can't show them.
   tells the person to contact you if needed, and resumes by itself once it's off. Edits
   made meanwhile stay on the device and sync afterwards. `/`, `/health` (still 200, with
   `"status": "maintenance"`) and `/admin` keep working.
+- **Remote-only grace period:** each vault has a grace period for its remote-only devices
+  (devices that keep the vault's contents only as ciphertext, [remote-only.md](remote-only.md)):
+  how long such a device may go without reaching the server before it locks its files. The
+  default is 24 hours. Enter a whole number of hours from 1 to 8760 in the vault's row, or
+  leave it empty for the default. Devices get the new value at their next login.
 - Admin actions are written to the container log.
 
 The same data is available as JSON for scripts:
@@ -165,8 +208,13 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: applicati
   https://notes.example.com/admin/api/maintenance/on
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   https://notes.example.com/admin/api/maintenance/off
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"graceSeconds": 172800}' \
+  https://notes.example.com/admin/api/vaults/<vault id>/grace
 ```
-The message is optional: `maintenance/on` also works without a body. The API is
+The message is optional: `maintenance/on` also works without a body. `graceSeconds` is
+3600 to 31536000, or `null` for the default. `GET /admin/api/status` returns the version,
+maintenance state and `adminContact`. The API is
 described in [protocol.md](protocol.md), sections 2 and 14.
 
 ## 6. Data and backups
@@ -201,9 +249,16 @@ Your notes are also on every device, so the server is never the only copy.
 4. Once you're satisfied, delete `./data/blobs`. The migration never deletes it for you.
 
 ## 8. Recovery without the server
-Every vault's key file can be decrypted with standard tools and the vault's recovery key:
+A vault's keyring holds its vault keys, and can be decrypted with standard tools and the
+vault's recovery key. The server stores it in `meta.db`; to extract the current version
+(`sqlite3` on the host, with the vault's username and vault name):
 ```
+sqlite3 ./data/meta.db "SELECT writefile('keyring.age', k.keyring) FROM keyrings k
+  JOIN vaults v ON v.id = k.vault_id JOIN users u ON u.id = v.user_id
+  WHERE u.username = 'alice' AND v.name = 'Personal' ORDER BY k.version DESC LIMIT 1"
 age -d -i recovery.txt keyring.age
 ```
-where `recovery.txt` holds the recovery key (`AGE-SECRET-KEY-1...`). A standalone export and decrypt tool is
-planned for M7.
+where `recovery.txt` holds the recovery key (`AGE-SECRET-KEY-1...`). The output is the
+keyring JSON ([crypto.md](crypto.md), section 6). There is no export or decrypt tool for
+file contents: the file and metadata format is specified in [crypto.md](crypto.md),
+section 8.

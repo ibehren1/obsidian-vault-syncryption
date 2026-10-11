@@ -2,7 +2,17 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { describe, expect, it } from "vitest";
 
 import { ApiClient, checkChallenge, normalizeEndpoint } from "../src/api/client";
-import { ApiError, disabledText, isDisabled, isMaintenance, maintenanceText, NetworkError, type HttpResponse, type Transport } from "../src/api/http";
+import {
+	ApiError,
+	disabledText,
+	isDisabled,
+	isMaintenance,
+	isRevoked,
+	maintenanceText,
+	NetworkError,
+	type HttpResponse,
+	type Transport,
+} from "../src/api/http";
 import { fingerprint } from "../src/crypto/openssh";
 import { client, newSeed, noBackend, SHARED_SECRET, uniqueName } from "./harness";
 
@@ -187,6 +197,14 @@ describe("ApiClient without a server", () => {
 			timeoutMs: 20,
 		});
 		await expect(api.login()).rejects.toBeInstanceOf(NetworkError);
+	});
+});
+
+describe("isRevoked", () => {
+	it("matches only a removed key", () => {
+		expect(isRevoked(new ApiError(403, "device_revoked", "x"))).toBe(true);
+		expect(isRevoked(new ApiError(403, "user_disabled", "x"))).toBe(false);
+		expect(isRevoked(new NetworkError("x"))).toBe(false);
 	});
 });
 

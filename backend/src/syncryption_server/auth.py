@@ -20,7 +20,14 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from syncryption_server.encoding import b64u, from_b64u, new_device_id, rfc3339
-from syncryption_server.errors import ApiError, bad_request, user_disabled, vault_disabled
+from syncryption_server.errors import (
+    ApiError,
+    bad_request,
+    device_locked,
+    remote_only,
+    user_disabled,
+    vault_disabled,
+)
 from syncryption_server.sshkeys import (
     NAMESPACE_AUTH,
     KeyFormatError,
@@ -34,6 +41,8 @@ from syncryption_server.state import AppState, get_state
 
 CHALLENGE_TTL = 60
 SESSION_TTL = 3600
+REMOTE_ONLY_SESSION_TTL = 300  # remote-only.md 5: the lease is renewed at each login
+REMOTE_ONLY_GRACE = 24 * 3600  # the default grace period, settable per vault on /admin
 PENDING_DEVICE_TTL = 24 * 3600
 MAX_PENDING_DEVICES = 5  # per vault
 CREATING_DEVICE_TTL = 24 * 3600  # a key that registered to create a vault and never did
@@ -81,6 +90,13 @@ class VerifyResponse(BaseModel):
     )
     status: Literal["active", "pending"]
     created: bool
+    remoteOnly: bool = Field(
+        default=False, description="Whether the device was approved as remote-only."
+    )
+    graceSeconds: int = Field(
+        default=REMOTE_ONLY_GRACE,
+        description="How long a remote-only device may go without a login before it locks.",
+    )
 
 
 def vault_name(name: str) -> str:
@@ -300,7 +316,10 @@ def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
             raise _invalid()
         if device["status"] == "revoked":
             raise ApiError(403, "device_revoked", "This device has been revoked.")
+        if device["locked"]:
+            raise device_locked()
         device_id, status, vault_id = device["id"], device["status"], device["vault_id"]
+        remote = bool(device["remote_only"])
     else:
         vault = (
             state.db.one(
@@ -326,6 +345,7 @@ def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
                 raise ApiError(403, "join_required", JOIN_MESSAGE)
             status, vault_id = "active", None
         device_id = new_device_id()
+        remote = False
         try:
             with state.db.transaction() as db:
                 if user is None:
@@ -362,7 +382,7 @@ def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
         created = True
 
     token = secrets.token_bytes(32)
-    expires = now + SESSION_TTL
+    expires = now + (REMOTE_ONLY_SESSION_TTL if remote else SESSION_TTL)
     with state.db.transaction() as db:
         db.execute(
             "INSERT INTO sessions (token_hash, device_id, expires_at) VALUES (?, ?, ?)",
@@ -376,7 +396,21 @@ def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
         vaultId=vault_id,
         status=status,
         created=created,
+        remoteOnly=remote,
+        graceSeconds=grace_seconds(state, vault_id),
     )
+
+
+def grace_seconds(state: AppState, vault_id: str | None) -> int:
+    """The vault's grace period for remote-only devices (remote-only.md 5)."""
+    row = (
+        state.db.one("SELECT remote_only_grace FROM vaults WHERE id = ?", vault_id)
+        if vault_id
+        else None
+    )
+    if row is None or row[0] is None:
+        return REMOTE_ONLY_GRACE
+    return row[0]
 
 
 @dataclass(frozen=True)
@@ -389,6 +423,7 @@ class Caller:
     # The device's vault: None while the key creates it (then `vault_name` is reserved).
     vault_id: str | None
     vault_name: str
+    remote_only: bool = False
 
 
 def _caller(request: Request, state: AppState) -> tuple[Caller, bool]:
@@ -403,7 +438,7 @@ def _caller(request: Request, state: AppState) -> tuple[Caller, bool]:
         raise ApiError(401, "unauthenticated", "Log in first.") from e
     row = state.db.one(
         "SELECT s.expires_at, d.id, d.user_id, d.public_key, d.status, d.last_seen_at, "
-        "d.vault_id, d.vault_name, "
+        "d.vault_id, d.vault_name, d.remote_only, d.locked, "
         "u.username, u.disabled_at FROM sessions s JOIN devices d ON d.id = s.device_id "
         "JOIN users u ON u.id = d.user_id WHERE s.token_hash = ?",
         token_hash,
@@ -415,6 +450,8 @@ def _caller(request: Request, state: AppState) -> tuple[Caller, bool]:
         raise ApiError(401, "token_expired", "The session has expired. Log in again.")
     if row["status"] == "revoked":
         raise ApiError(403, "device_revoked", "This device has been revoked.")
+    if row["locked"]:
+        raise device_locked()
     if row["disabled_at"] is not None:
         raise user_disabled(state.settings.admin_contact)
     seen = (row["last_seen_at"] or 0) + LAST_SEEN_RESOLUTION <= now
@@ -426,6 +463,7 @@ def _caller(request: Request, state: AppState) -> tuple[Caller, bool]:
         status=row["status"],
         vault_id=row["vault_id"],
         vault_name=row["vault_name"],
+        remote_only=bool(row["remote_only"]),
     ), seen
 
 
@@ -444,6 +482,12 @@ async def _authenticate(request: Request, state: AppState) -> Caller:
     return caller
 
 
+async def recheck(request: Request, state: AppState) -> Caller:
+    """The caller again, for a request that waited: its session may have ended meanwhile."""
+    caller, _ = await state.db.read(lambda: _caller(request, state))
+    return caller
+
+
 async def any_caller(request: Request, state: Annotated[AppState, Depends(get_state)]) -> Caller:
     """A logged-in device, pending or active."""
     return await _authenticate(request, state)
@@ -456,6 +500,15 @@ async def active_caller(request: Request, state: Annotated[AppState, Depends(get
     return caller
 
 
+async def full_caller(request: Request, state: Annotated[AppState, Depends(get_state)]) -> Caller:
+    """An active device that isn't remote-only: the vault's management calls."""
+    caller = await active_caller(request, state)
+    if caller.remote_only:
+        raise remote_only()
+    return caller
+
+
 AnyCaller = Annotated[Caller, Depends(any_caller)]
 ActiveCaller = Annotated[Caller, Depends(active_caller)]
+FullCaller = Annotated[Caller, Depends(full_caller)]
 State = Annotated[AppState, Depends(get_state)]

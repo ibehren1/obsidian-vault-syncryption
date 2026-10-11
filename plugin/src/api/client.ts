@@ -107,6 +107,8 @@ export class ApiClient {
 	/** Set after login. */
 	deviceId: string | null = null;
 	deviceStatus: "active" | "pending" | null = null;
+	/** The last successful login: a remote-only device's lease (remote-only.md 5). */
+	lastLogin: { at: number; remoteOnly: boolean; graceSeconds: number } | null = null;
 	/** The vault named at login (protocol.md 5), NFC and trimmed. */
 	readonly vaultName: string;
 
@@ -143,6 +145,7 @@ export class ApiClient {
 		this.token = result.token;
 		this.deviceId = result.deviceId;
 		this.deviceStatus = result.status;
+		this.lastLogin = { at: Date.now(), remoteOnly: result.remoteOnly ?? false, graceSeconds: result.graceSeconds ?? 0 };
 		return result;
 	}
 
@@ -162,8 +165,20 @@ export class ApiClient {
 	async devices(vaultId: string): Promise<Device[]> {
 		return (await this.call<Schemas["DeviceList"]>("GET", `${vaultPath(vaultId)}/devices`)).devices;
 	}
-	approveDevice(vaultId: string, deviceId: string): Promise<Device> {
-		return this.call("POST", `${vaultPath(vaultId)}/devices/${enc(deviceId)}/approve`);
+	/** `remoteOnly`: approve it as remote-only (remote-only.md 4), matching its keyring policy. */
+	approveDevice(vaultId: string, deviceId: string, remoteOnly = false): Promise<Device> {
+		const body: Schemas["ApproveRequest"] = { remoteOnly };
+		return this.call("POST", `${vaultPath(vaultId)}/devices/${enc(deviceId)}/approve`, { json: body });
+	}
+	/** Change another active key's policy (remote-only.md 4). The keyring is updated first. */
+	setDevicePolicy(vaultId: string, deviceId: string, remoteOnly: boolean): Promise<Device> {
+		const body: Schemas["PolicyRequest"] = { remoteOnly };
+		return this.call("PUT", `${vaultPath(vaultId)}/devices/${enc(deviceId)}/policy`, { json: body });
+	}
+	/** Lock or unlock another remote-only key: a locked one can't log in (remote-only.md 5). */
+	setDeviceLocked(vaultId: string, deviceId: string, locked: boolean): Promise<Device> {
+		const body: Schemas["LockRequest"] = { locked };
+		return this.call("PUT", `${vaultPath(vaultId)}/devices/${enc(deviceId)}/lock`, { json: body });
 	}
 	/** Revoke a key of the vault (it may be this one) and end its sessions. 409 for the last active key. */
 	async removeDevice(vaultId: string, deviceId: string): Promise<void> {

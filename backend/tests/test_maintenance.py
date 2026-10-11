@@ -39,6 +39,9 @@ def test_home_page(client):
     assert "encryption key" in text and "shared secret" in text
     assert f"Administrator: {CONTACT}" in text
     assert "Status: ok" in text
+    assert "<code>GET /health</code>" in text
+    assert "<pre><code>{\n  &quot;status&quot;: &quot;ok&quot;," in text
+    assert f"&quot;version&quot;: &quot;{__version__}&quot;" in text
     assert "SSH" not in text and SECRET not in text
     assert "/" not in client.get("/openapi.json").json()["paths"]
 
@@ -47,6 +50,7 @@ def test_home_page_escapes(client):
     assert maintenance(client, "on", "<b>soon</b>").status_code == 204
     text = client.get("/").text
     assert "&lt;b&gt;soon&lt;/b&gt;" in text and "<b>soon</b>" not in text
+    assert "&quot;status&quot;: &quot;maintenance&quot;" in text
 
 
 def test_home_page_without_a_contact(tmp_path):

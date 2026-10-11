@@ -1,4 +1,4 @@
-/** Which paths are synced (docs/PLAN.md, Sync Scope). */
+/** Which paths are synced (docs/architecture.md 4.4). */
 
 /** Folders that are never synced, at any depth. */
 const EXCLUDED_FOLDERS = new Set([".trash", ".git", "node_modules"]);

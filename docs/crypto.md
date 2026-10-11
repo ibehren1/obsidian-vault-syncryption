@@ -1,8 +1,8 @@
 # Vault Syncryption Crypto Specification (v1)
 
-Status: v1, implemented in the plugin and backend since M1–M4. Parts that aren't built yet
-are marked with their milestone. Both the plugin (TypeScript) and the backend (Python)
-implement against this document, and every primitive below has a vector in `testvectors/`.
+This is the v1 specification that both the plugin (TypeScript) and the backend (Python)
+implement. Every primitive below has a vector in `testvectors/` (section 10), and both
+test suites check against them.
 
 ## Overview
 Each device has its own encryption key, an Ed25519 key in OpenSSH format. A vault has one
@@ -58,8 +58,9 @@ flowchart LR
   material.
 - The server does learn: the username, **vault names** (needed to look vaults up, see
   protocol.md section 3), device names and public keys, which devices belong to which
-  vault, file count, the ciphertext size of each revision and chunk, timestamps and the
-  order of commits, lock state, and which `fileId`s change together. This leakage is
+  vault and which of them are remote-only, the recovery key's signing public key (section 9),
+  file count, the ciphertext size of each revision and chunk, timestamps and the order of
+  commits, lock state, and which `fileId`s change together. This leakage is
   accepted.
 - The `SHARED_SECRET` only controls who may register on the server. It is not key
   material and protects no data: a user who knows it still can't read any vault they
@@ -68,7 +69,9 @@ flowchart LR
   be told apart or revoked separately. Sharing through separate keys under the same
   username (each paired into the vault) avoids that.
 - A device whose key leaks can read everything that device could read. Revocation
-  (section 8) protects data written **after** the revocation.
+  (section 8) protects data written **after** the revocation. Remote-only devices
+  ([remote-only.md](remote-only.md)) also make the device's own local copy unreadable
+  after revocation, but not data copied while the device was still a member.
 - A malicious server can deny service or roll the whole vault back to an older state it
   has seen. Clients detect rollback of the keyring (section 6.4). Detecting rollback of
   individual files is out of scope for v1.
@@ -89,8 +92,8 @@ flowchart LR
 
 Libraries (plugin): `@noble/ciphers` (XChaCha20-Poly1305, AES-CTR fallback),
 `@noble/hashes` (SHA-2, HKDF, HMAC), `bcrypt-pbkdf` (pure JS), `@noble/curves`
-(Ed25519, X25519), `age-encryption` (typage). WebCrypto may be used where it is available
-and faster, but results must match the noble implementations byte for byte. No Node APIs.
+(Ed25519, X25519), `age-encryption` (typage), `@scure/base` (bech32). Random bytes come from
+`crypto.getRandomValues`. No Node APIs, so the same code runs on desktop and mobile.
 
 Libraries (backend): `cryptography`. The backend verifies sshsig signatures itself
 (ed25519 and sha512 only, section 7) rather than through a general sshsig package, so it
@@ -116,8 +119,8 @@ The fingerprint is `"SHA256:" + base64(SHA-256(pubWire))` with standard base64 a
 padding stripped, which is what `ssh-keygen -l` prints.
 
 ### 3.2 OpenSSH private key parsing
-The plugin parses the `openssh-key-v1` format itself (see `docs/PLAN.md` for why `sshpk`
-is not used).
+The plugin parses the `openssh-key-v1` format itself rather than through `sshpk`, which
+depends on Node APIs and doesn't run on mobile.
 
 ```
 -----BEGIN OPENSSH PRIVATE KEY-----
@@ -151,11 +154,11 @@ base64( "openssh-key-v1\0"
 - The only secret the plugin keeps is `seed32`.
 
 ### 3.3 Generated device keys and local storage
-- Every device generates its own key: `seed32 = RAND(32)`. There is no import (removed in
-  plugin 0.1.3): a new device pairs, and the recovery key (section 9) covers losing every
+- Every device generates its own key: `seed32 = RAND(32)`. There is no import: a new device
+  pairs, and the recovery key (section 9) covers losing every
   device.
 - The private key is stored **only** in Obsidian's
-  `SecretStorage` (`app.secretStorage`, Obsidian 1.11.4 and later), **in OpenSSH format**
+  `SecretStorage` (`app.secretStorage`, Obsidian 1.13.0 and later), **in OpenSSH format**
   (so it stays compatible with `age -d -i` and `ssh-keygen`, though the plugin doesn't export it). It is
   never written to `data.json` or anywhere else in the vault folder, so backups and other
   sync tools that copy the vault can't pick it up.
@@ -170,14 +173,14 @@ base64( "openssh-key-v1\0"
 - Optional local passphrase, as an extra layer on top of `SecretStorage`:
   `ciphername = aes256-ctr`, `kdfname = bcrypt`, `salt = RAND(16)`, `rounds = 16` (the
   `ssh-keygen` default). Without one: `none`/`none`. The key writer supports it, but the
-  settings' Generate button doesn't ask for a passphrase. Keys imported by plugin versions
-  before 0.1.3 were stored as imported and may have one; the plugin still unlocks them.
+  settings' Generate button doesn't ask for a passphrase, so generated keys have none. A
+  stored key that has one is unlocked by asking for the passphrase.
 - The unlocked seed
   is kept only in memory for the lifetime of the Obsidian session. Session tokens and
   decrypted VDKs are also memory only.
-- Whether `SecretStorage` is backed by the iOS Keychain and Android Keystore, and whether
-  other plugins can read it, is checked during mobile QA (M7). Any Obsidian plugin runs
-  with full access to the app, so no storage choice protects against a malicious plugin.
+- How `SecretStorage` stores secrets on each platform is up to Obsidian. Any Obsidian
+  plugin runs with full access to the app, so no storage choice protects against a
+  malicious plugin.
 
 ### 3.4 Ed25519 to X25519 conversion
 Used by the age stanza (section 4).
@@ -244,10 +247,12 @@ flowchart LR
 
 ### 5.2 Path normalisation (`normPath`)
 1. Path relative to the vault root, as returned by `app.vault.adapter`.
-2. Separator `/`. No leading or trailing `/`. No `.` or `..` segments.
+2. Separator `/`. No leading or trailing `/`, no empty segments, no `.` or `..` segments.
+   A path that breaks these rules is rejected, not rewritten.
 3. Unicode NFC.
-4. Case is preserved. Two paths that differ only in case are different files. (On
-   case-insensitive file systems the client reports such pairs as conflicts.)
+4. Case is preserved. Two paths that differ only in case are different files. (On a
+   case-insensitive file system the client can't write the second one: it keeps that
+   revision, warns once, and tries again on the next pull.)
 
 The client must check `HMAC(indexKey, utf8(meta.path)) == fileId` after decrypting any
 metadata, so the server can't move metadata between `fileId`s.
@@ -286,6 +291,9 @@ The keyring plaintext is UTF-8 JSON:
 - `recovery` is an optional native age X25519 recipient, `recoverySigner` the Ed25519 key
   derived from the same recovery key, and `recoverySetBy` the device that set it
   (section 9). The three are either all present or all absent.
+- A device entry may have `"policy": "remote-only"` (absent: a full device). A remote-only
+  device keeps only ciphertext on disk ([remote-only.md](remote-only.md)), and reads its own
+  policy from this entry, never from the server. No other value is valid.
 
 ### 6.2 Encryption
 `keyring.age` is a standard age v1 file whose payload is the plaintext above. Its
@@ -324,12 +332,18 @@ On every keyring fetch the client checks:
   has pinned locally
 - if the version is higher, the signer was in the pinned keyring's `devices`. If the
   client is several versions behind, it walks the history (`GET .../keyring?version=N`)
-  and checks each link in turn.
-- `currentEpoch` is in `keys`, and no epoch has changed its `vdk`
+  and checks each link in turn: a version more than one ahead of the pin is rejected.
+- `currentEpoch` is in `keys` and never decreases, no epoch has changed its `vdk`, and
+  `indexKey` is unchanged and equals the derivation from `VDK[1]` (5.1)
 - if `recovery`, `recoverySigner` or `recoverySetBy` differ from the previous version, the
   new version was signed by a device (not by the recovery signer), and the fields are
   either all absent or `recoverySetBy` is that signing device's `id`. So a recovery key
   can't replace itself, and the device that set it is always known (section 9).
+- the signer isn't a remote-only device (its entry in the authority keyring, the pinned one
+  or, on first use, the keyring itself, has no `policy`). A remote-only device can't manage
+  the vault, so it never signs a keyring.
+- a version signed by the recovery signer changes no existing device's `policy` and adds
+  only devices without one. So only a full device sets, changes or removes a policy.
 
 The client then pins `{version, sha256(keyring.age)}`.
 
@@ -531,12 +545,12 @@ under the new epoch (protocol.md 9.3), so the old copies don't stay on the serve
 keyring keeps every epoch (6.4): a VDK is 32 bytes, and once the old ciphertext is gone it
 opens nothing on the server.
 
-Status: implemented. The epochs and the chain checks are tested with `keyring.json`, and
-the revocation flow and background re-encryption against the real backend
-(`plugin/tests/revocation.test.ts`).
+The epochs and the chain checks are tested with `keyring.json`, and the revocation flow and
+background re-encryption against the real backend (`plugin/tests/revocation.test.ts`).
 
 ## 9. Recovery key
-- Optional, offered when the vault is created and in settings.
+- Optional. A full device connected to a vault without one offers to create it once, and
+  the settings can create or replace it at any time.
 - It is a native age X25519 identity (`AGE-SECRET-KEY-1...`) generated by the plugin and
   shown once for the user to store offline. Only public keys are kept, in the keyring.
 - The same 32-byte X25519 secret (the bech32 payload of the identity) also gives an
@@ -568,14 +582,35 @@ values (nonces, ephemeral keys, salts) as inputs.
 
 | File | Covers | Source |
 |---|---|---|
-| `openssh-keys.json` | unencrypted and `aes256-ctr`/bcrypt keys, wrong passphrase, bad checkint | `ssh-keygen` |
+| `openssh-keys.json` | unencrypted and `aes256-ctr`/bcrypt keys, wrong or missing passphrase, bad checkint, bad padding, mismatched public keys, RSA and ECDSA keys, unsupported cipher, truncated | `ssh-keygen` |
 | `ed25519-to-x25519.json` | public and private conversion | libsodium (`pynacl`) |
 | `age-ssh-ed25519.json` | deterministic wraps, malformed and foreign stanzas, files encrypted by rage and Go `age` to known keys; plugin output (files and keyrings) checked by `age -d` in CI | reference script, rage (`pyrage`), Go `age` |
 | `sshsig.json` | signatures in both namespaces, plus wrong-namespace, wrong-hash, wrong-key-type and tampered cases; plugin signatures checked by `ssh-keygen -Y verify` | `ssh-keygen -Y sign`, reference script |
-| `kdf.json` | `indexKey`, `fileId` (including NFC cases), `fileKey`, invalid paths, pairing codes | reference script |
+| `kdf.json` | `indexKey`, `fileId` (including NFC cases), `fileKey`, invalid paths, pairing codes, the local key with sealed content and a sealed hash | reference script |
 | `objects.json` | meta and chunk objects with fixed nonces, and tampered-header cases | reference script |
-| `keyring.json` | a keyring chain (genesis, recovery key set, pairing, rotation, recovery) with the recovery key and its signing key, and rollback, chain-gap, wrong-vault, wrong-signer and inconsistency cases | reference script, rage (`pyrage`) |
+| `keyring.json` | a keyring chain (genesis, recovery key set, pairing, rotation, recovery) with the recovery key and its signing key, remote-only policies, and rollback, chain-gap, wrong-vault, wrong-signer, policy and inconsistency cases | reference script, rage (`pyrage`) |
 
 The reference script is a small Python program (`testvectors/generate.py`) using
 `cryptography`, `bcrypt`, `pynacl` and `pyrage`, independent of the plugin code. The Go `age`
 files need the `age` binary, from `$AGE` or `PATH`.
+
+## 11. Remote-only local key
+A remote-only device ([remote-only.md](remote-only.md)) keeps its notes and attachments on
+disk only as ciphertext, under a key derived from the keyring:
+```
+localKey = HKDF(indexKey, "", "syncryption/v1/local")
+```
+`indexKey` never changes and is only in the keyring, so the device can derive `localKey`
+only while the server hands it the keyring. It lives only in memory and is dropped when
+the device locks. Once the key is removed from the vault, the local copy can't be opened.
+
+Everything under it is XChaCha20-Poly1305 with a random 24-byte nonce:
+- **file content** in the local store (remote-only.md 7), with
+  `AD = "syncryption/v1/local-content" || 0x00 || utf8(path)`;
+- **plaintext hashes** in the sync state (`SyncedFile.sha256`), which would otherwise let
+  anyone confirm a guess of a file's content, with
+  `AD = "syncryption/v1/local-hash" || 0x00 || utf8(path)`. The 32-byte hash is stored as
+  `"s1:" || b64u(nonce || ciphertext)`.
+
+The path in the AD stops an entry being moved to another path. `kdf.json` has the key and
+one example of each.

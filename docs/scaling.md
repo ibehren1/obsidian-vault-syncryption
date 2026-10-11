@@ -78,18 +78,3 @@ In the order they would show up:
 - **Not the target:** thousands of active users, or more than one app container. The
   design runs exactly one container, because long-poll notifications and blob locks are
   in-process.
-
-## 7. If it needs to go further
-1. **Run SQLite queries on worker threads.** Done in server 0.1.6 and 0.1.7: the event
-   loop stays responsive while a query runs, and five read-only connections serve the
-   handlers that only read. SQLite, the schema and backups stay as they are.
-2. **Postgres.** It would allow concurrent writers and, together with shared
-   notifications and locks, more than one app process. It is a large change:
-   - about 110 query sites rewritten for an async driver, with row locks where
-     the single writer is relied on today, plus SQL dialect changes;
-   - a Postgres server in the container (initialisation, a process supervisor, major
-     version upgrades);
-   - Litestream replaced (WAL-G or pgBackRest for the S3 replica and restore), a
-     SQLite-to-Postgres migration for existing data, and `MIGRATE_TO_S3` reworked.
-
-   It doesn't reduce storage. That is what retention is for.

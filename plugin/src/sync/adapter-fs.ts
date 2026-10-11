@@ -1,6 +1,6 @@
 /**
- * The config folders, read and written through `app.vault.adapter` (docs/PLAN.md, Sync
- * Scope): Obsidian doesn't index hidden folders, so the Vault API can't see them.
+ * The config folders, read and written through `app.vault.adapter` (docs/architecture.md
+ * 4.4): Obsidian doesn't index hidden folders, so the Vault API can't see them.
  */
 import { isConfigFolder } from "./filter";
 import type { FileStat, ListedFile, VaultFs } from "./fs";

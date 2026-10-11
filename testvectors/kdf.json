@@ -1,5 +1,5 @@
 {
-  "description": "Vault key derivations (crypto.md 5) and pairing codes (crypto.md 6.5). Strings are UTF-8, binary values hex, fileIdString is b64u.",
+  "description": "Vault key derivations (crypto.md 5), pairing codes (crypto.md 6.5) and the remote-only local key (crypto.md 11). Strings are UTF-8, binary values hex, fileIdString is b64u.",
   "vdk1": "6ff42288771ea608e5d2db3755d04d26e22388e5ea56e7dedbf088b860615ea4",
   "vdk2": "de2a41c0bdfb2fe36e48e0e35487b00827d2dfdb7d56caaa2aa648fbf7e2677a",
   "indexKey": "6f199d67f74d8809d10032e53e66c78ab406122de4049c4e379e20cc7677b7ad",
@@ -99,5 +99,19 @@
       "publicKeyText": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBzksNLTuh/5+ERxbEsofe7s9aXgtujkckRhKLB6YLYh",
       "code": "YMNB9-7FQ49"
     }
-  ]
+  ],
+  "local": {
+    "localKey": "8184f6ea540604ebc148ed2d92dec786b4dceadbe1e07d76621ecdbeb1c36f52",
+    "path": "Notes/Projects/Plan.md",
+    "content": {
+      "plaintext": "73656372657420706c616e0a",
+      "nonce": "b01f15cb2f6386f011314f13738ca7f4269f3c580dcaa4dc",
+      "ciphertext": "1bb3455d7893515be43d45ce36aea4bc02f1570e4c25ce4d253275e7"
+    },
+    "hash": {
+      "sha256": "59b3b0c79e8676afd6604023eadb014031eceeefb0eb745808836c8d2d7a392b",
+      "nonce": "88602311d19be3f8592bccd6c4093037cb98f3f18f331e44",
+      "sealed": "s1:iGAjEdGb4_hZK8zWxAkwN8uY8_GPMx5EkzW5OTGhUVqqHWSTu7EKdOKMbTqmLGL--qsasC3mPnrxlqhKl2bCUSDNlFyl0Bp2"
+    }
+  }
 }

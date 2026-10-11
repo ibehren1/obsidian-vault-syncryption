@@ -20,6 +20,7 @@ import {
 	recoverySigningSeed,
 	removeKeyringDeviceAndRotate,
 	sealKeyring,
+	setKeyringDevicePolicy,
 	setKeyringRecovery,
 	type Keyring,
 	type KeyringBlob,
@@ -126,18 +127,49 @@ export class VaultSession {
 			.map((device) => ({ device, code: pairingCode(parsePublicKeyText(device.publicKey)) }));
 	}
 
+	/** This device's policy in the keyring (remote-only.md 4). The server's copy isn't trusted. */
+	get remoteOnly(): boolean {
+		return this.keyring.devices.find((d) => d.id === this.deviceId)?.policy === "remote-only";
+	}
+
 	/**
 	 * Pairing, active side (crypto.md 6.5): add the key to the keyring, upload it signed,
-	 * then approve it. The user must have compared the pairing codes.
+	 * then approve it. The user must have compared the pairing codes. `remoteOnly` approves
+	 * it as a remote-only device (remote-only.md 4).
 	 */
-	async approve(device: Pick<Device, "id" | "name" | "publicKey">): Promise<void> {
+	async approve(device: Pick<Device, "id" | "name" | "publicKey">, opts: { remoteOnly?: boolean } = {}): Promise<void> {
 		const key = publicKeyText(parsePublicKeyText(device.publicKey));
-		await this.update((k) =>
-			k.devices.some((d) => d.publicKey === key)
-				? null
-				: addKeyringDevice(k, { id: device.id, name: device.name, publicKey: key }, this.deviceId),
-		);
-		await this.api.approveDevice(this.vault.id, device.id);
+		const policy = opts.remoteOnly ? ("remote-only" as const) : undefined;
+		await this.update((k) => {
+			const existing = k.devices.find((d) => d.publicKey === key);
+			if (!existing) {
+				const entry = { id: device.id, name: device.name, publicKey: key, ...(policy ? { policy } : {}) };
+				return addKeyringDevice(k, entry, this.deviceId);
+			}
+			// Approved before, but the approval didn't reach the server: follow this choice.
+			return existing.policy === policy ? null : setKeyringDevicePolicy(k, existing.id, policy, this.deviceId);
+		});
+		await this.api.approveDevice(this.vault.id, device.id, opts.remoteOnly ?? false);
+	}
+
+	/**
+	 * Make another active device remote-only, or a full device again (remote-only.md 4): the
+	 * keyring first, which is what the device follows, then the server.
+	 */
+	async setPolicy(deviceId: string, remoteOnly: boolean): Promise<void> {
+		if (deviceId === this.deviceId) throw new Error("This device can't change its own policy.");
+		const policy = remoteOnly ? ("remote-only" as const) : undefined;
+		await this.update((k) => {
+			const entry = k.devices.find((d) => d.id === deviceId);
+			if (!entry) throw new Error("That device isn't in the keyring.");
+			return entry.policy === policy ? null : setKeyringDevicePolicy(k, deviceId, policy, this.deviceId);
+		});
+		await this.api.setDevicePolicy(this.vault.id, deviceId, remoteOnly);
+	}
+
+	/** Lock or unlock another remote-only device (remote-only.md 5). Only the server knows. */
+	async setLocked(deviceId: string, locked: boolean): Promise<void> {
+		await this.api.setDeviceLocked(this.vault.id, deviceId, locked);
 	}
 
 	/**
@@ -363,7 +395,7 @@ async function create(
 }
 
 /**
- * Replace this device's key, active side (PLAN, Rules: Replace). `old` is the connected
+ * Replace this device's key, active side. `old` is the connected
  * session of the current key, `api` a client for the new key, which isn't saved yet.
  *
  * 1. The new key logs in once, so the server knows it as a pending key of the vault.

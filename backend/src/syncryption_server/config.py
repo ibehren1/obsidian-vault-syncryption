@@ -1,4 +1,4 @@
-"""Settings from environment variables (docs/PLAN.md, Hosting).
+"""Settings from environment variables (docs/self-hosting.md 2).
 
 The container is configured only through the variables in `backend/docker/docker-compose.yml`.
 `SYNCRYPTION_DATA_DIR` is a development override for `/data` and is not part of the

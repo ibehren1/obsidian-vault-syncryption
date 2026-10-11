@@ -8,6 +8,7 @@ import { concat, toB64u, utf8 } from "./bytes";
 const EMPTY = new Uint8Array(0);
 const INDEX_INFO = utf8("syncryption/v1/index");
 const FILE_INFO = utf8("syncryption/v1/file");
+const LOCAL_INFO = utf8("syncryption/v1/local");
 
 /**
  * `normPath` (crypto.md 5.2): relative, `/`-separated, no empty, `.` or `..` segments,
@@ -40,4 +41,12 @@ export function fileIdString(fileId: Uint8Array): string {
 /** `fileKey[e] = HKDF(VDK[e], "", "syncryption/v1/file" || fileId)`. */
 export function deriveFileKey(vdk: Uint8Array, fileId: Uint8Array): Uint8Array {
 	return hkdf(sha256, vdk, EMPTY, concat(FILE_INFO, fileId), 32);
+}
+
+/**
+ * `localKey = HKDF(indexKey, "", "syncryption/v1/local")` (crypto.md 11): seals a
+ * remote-only device's local copy. It lives only in memory, like the keyring.
+ */
+export function deriveLocalKey(indexKey: Uint8Array): Uint8Array {
+	return hkdf(sha256, indexKey, EMPTY, LOCAL_INFO, 32);
 }
