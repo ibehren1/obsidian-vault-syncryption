@@ -605,12 +605,17 @@ only while the server hands it the keyring. It lives only in memory and is dropp
 the device locks. Once the key is removed from the vault, the local copy can't be opened.
 
 Everything under it is XChaCha20-Poly1305 with a random 24-byte nonce:
-- **file content** in the local store (remote-only.md 7), with
-  `AD = "syncryption/v1/local-content" || 0x00 || utf8(path)`;
+- **file content** in the local store (remote-only.md 7), in chunks of up to 4 MiB. Chunk
+  `index` of `count`, of the entry with the random 16-byte `entryId`, has
+  `AD = "syncryption/v1/local-chunk" || 0x00 || u32be(index) || u32be(count) || entryId || utf8(path)`.
+  The index and count stop chunks being reordered or dropped, the entry id stops chunks of
+  two versions of a file being mixed, and a missing or extra chunk fails the read. Entries
+  from before chunks are one sealed value with
+  `AD = "syncryption/v1/local-content" || 0x00 || utf8(path)`, read but no longer written;
 - **plaintext hashes** in the sync state (`SyncedFile.sha256`), which would otherwise let
   anyone confirm a guess of a file's content, with
   `AD = "syncryption/v1/local-hash" || 0x00 || utf8(path)`. The 32-byte hash is stored as
   `"s1:" || b64u(nonce || ciphertext)`.
 
 The path in the AD stops an entry being moved to another path. `kdf.json` has the key and
-one example of each.
+one example of each, with a two-chunk entry.

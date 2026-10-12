@@ -6,7 +6,9 @@ import { normalizePath, TFile, TFolder, type App } from "obsidian";
 
 import type { FileStat, ListedFile, VaultFs } from "../sync/fs";
 
+/** The bytes as an `ArrayBuffer`, without a copy when `data` already spans its whole buffer. */
 function buffer(data: Uint8Array): ArrayBuffer {
+	if (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength) return data.buffer as ArrayBuffer;
 	return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 }
 

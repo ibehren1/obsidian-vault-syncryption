@@ -298,7 +298,7 @@ clean stop. CI runs it in the `container` job.
 | `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects, path and key derivation (`kdf`), sealing under a remote-only device's local key (`local`, crypto.md 11) |
 | `api` | typed client over a `Transport` (`requestUrl` in the plugin, `fetch` in tests). `src/api/schema.ts` is generated from the server's OpenAPI with `npm run api-types` (CI checks it is current) |
 | `sync` | vault session (login, join, create or open the vault, pairing, keyring pinning), sync engine, scanner, merge, conflict copies, path filter, file encryption (`cipher`), the `VaultFs` over `vault.adapter` for the config folders and `SplitFs`, which sends hidden paths there and the rest to the Vault API, lock manager, long-poll loop |
-| `store` | IndexedDB (`idb`, behind the `SyncStore` interface in `state`): cursor, path table, outbox, pinned keyring. On a remote-only device, the sealed content hashes (`sealed`) and the store of sealed file content (`entries`) |
+| `store` | IndexedDB (`idb`, behind the `SyncStore` interface in `state`): cursor, path table, outbox, pinned keyring. On a remote-only device, the sealed content hashes (`sealed`) and the store of sealed file content in chunks (`entries`) |
 | `remote` | remote-only devices ([remote-only.md](remote-only.md)): the wrapped `vault.adapter` that serves sealed content behind zero-byte stubs (`stub-adapter`), the `VaultFs` that reports the real size and times of those files (`stat-fs`), the lease, the wipe on removal and the Obsidian wiring (`remote-only`), and the compliance report (`compliance`) |
 
 ### 4.1 Local state (IndexedDB)
@@ -344,7 +344,9 @@ flowchart TD
   is shown once, and the pull goes on; every later pull tries it again.
 - **Deletions:** a remote deletion of a file edited here keeps the edit and commits it on
   top of the deletion. A local deletion of a file edited elsewhere loses to the edit.
-- **Push:** for each outbox entry, read the file, encrypt the chunks, upload the missing
+- **Push:** for each outbox entry, skip a file whose size and mtime match its synced state
+  (as the scan does: Obsidian's events queue every file a pull writes, and those need no
+  upload), otherwise read the file, encrypt the chunks, upload the missing
   blobs, then commit with `parentRev` from `files`. On `409`, apply or merge the head
   returned in the error, which queues the result for the next push round (at most 5 per
   sync). A `400`, `413` or `422` for one file keeps it queued and the sync goes on.
@@ -354,7 +356,11 @@ flowchart TD
   back to the foreground or the network returns, the loop's backoff ends and a sync runs;
   if connecting failed for want of a network, the plugin connects again then and on the
   timer. Every request gives up after 60 seconds (`NetworkError`), so one that hangs while
-  a mobile app is suspended doesn't stall later syncs.
+  a mobile app is suspended doesn't stall later syncs. A chunk download that can't reach
+  the server is tried twice more, after 1 and 4 seconds, before the sync stops. On mobile,
+  which has no status bar, a sync that stops for want of the server says so in a notice,
+  once until the next good sync. While a sync receives changes, the status shows the path
+  of the file it is on.
 - **Locks:** `LockManager` holds a soft lock on the mergeable note in the active editor
   and renews it every `ttl / 2`. The `clientId` is 16 random bytes in the app's local
   storage. If another device holds the note, a notice says so once, and a status-bar item
@@ -463,9 +469,16 @@ flowchart TD
 ### 4.5 Mobile
 The plugin uses no Node APIs outside desktop-only code: WebCrypto, `@noble/*`,
 `requestUrl` and long-poll. On phones:
-- **Large files:** a file is read, hashed, encrypted and decrypted whole, on the main
-  thread. Peak memory is about 2x the file size when uploading and about 4x when
-  downloading, so files of a few hundred MB may get the app killed on a phone.
+- **Large files:** downloads are checked and decrypted one 4 MiB chunk at a time, on the
+  main thread. On a remote-only device each chunk goes straight into the local store, so
+  memory doesn't grow with the file (remote-only.md 7). A full device collects the chunks
+  into one buffer of the file's size, so a download needs about 1x the file. Uploads read,
+  hash and encrypt a file whole, about 2x its size, and so does opening a file in
+  Obsidian, so files of several hundred MB may still get the app killed on a phone.
+- **Storage:** a remote-only device asks the browser to keep its storage
+  (`navigator.storage.persist()`), as the local store is its only copy. When IndexedDB is
+  full, the sync stops with one notice that says so, with the usage and quota the browser
+  reports, instead of failing file by file.
 - **Unicode normalization:** `fileId` uses the NFC form of a path, but files are written
   under the name as sent. A file named in NFD on one device and NFC on another (rare:
   macOS keeps both) can show up twice on Android.

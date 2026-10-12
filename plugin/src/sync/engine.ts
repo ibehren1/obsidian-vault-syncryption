@@ -8,7 +8,7 @@ import { KeyringError } from "../crypto/keyring";
 import { ObjectError, type FileMeta } from "../crypto/objects";
 import { countFiles, type OutboxEntry, type SyncedFile, type SyncStore } from "../store/state";
 import { sha256Hex, type VaultCipher } from "./cipher";
-import { isMissingContent, type FileStat, type VaultFs } from "./fs";
+import { collect, hashFile, isMissingContent, writeChunked, type FileStat, type VaultFs } from "./fs";
 import { conflictPath, mergeText } from "./merge";
 
 export const CURSOR = "cursor";
@@ -20,6 +20,8 @@ export const FAILED = "failed";
 const MAX_PUSH_ROUNDS = 5;
 /** Statuses that refuse one file's upload, not the whole sync. */
 const REFUSED = new Set([400, 413, 422]);
+/** Waits before each retry of a chunk download that failed to reach the server. */
+const BLOB_RETRIES_MS = [1000, 4000];
 
 export interface EngineOptions {
 	api: ApiClient;
@@ -49,15 +51,18 @@ export interface EngineOptions {
 	onWarning?: (message: string) => void;
 	/** Called as a sync goes through the change feed, the local files and the outbox. */
 	onProgress?: (progress: SyncProgress) => void;
+	/** Waits before each retry of a chunk download (default 1 s, then 4 s). */
+	blobRetriesMs?: number[];
 }
 
 /**
  * How far a sync is. `pull`: `done` revisions of the change feed read since cursor `since`,
- * the last one `rev` (revisions are numbered by the vault's `seq`). `scan`: local files checked. `push`:
- * queued paths committed in this round.
+ * the last one `rev` (revisions are numbered by the vault's `seq`), and `path` while that
+ * revision's file is being received. `scan`: local files checked. `push`: queued paths
+ * committed in this round.
  */
 export type SyncProgress =
-	| { phase: "pull"; done: number; since: number; rev: number }
+	| { phase: "pull"; done: number; since: number; rev: number; path?: string }
 	| { phase: "scan" | "push"; done: number; total: number };
 
 export interface SyncReport {
@@ -105,6 +110,19 @@ interface LocalFile {
 	missing?: boolean;
 }
 
+/** The device has no room left for the local store or the sync state: the sync stops. */
+export class StorageFullError extends Error {
+	constructor() {
+		super("This device's storage for Obsidian is full. Free some space, or exclude large files on this device.");
+		this.name = "StorageFullError";
+	}
+}
+
+/** A quota error from IndexedDB, possibly wrapped by Obsidian's Vault on the way. */
+function isQuotaError(e: unknown): boolean {
+	return e instanceof Error && (e.name === "QuotaExceededError" || /quota/i.test(e.message));
+}
+
 /** The engine was closed while a sync was running. */
 class SyncStopped extends Error {
 	constructor() {
@@ -121,6 +139,8 @@ export class SyncEngine {
 	private again = false;
 	private report = emptyReport();
 	private closed = false;
+	/** The pull's position, for the progress of the file being received. */
+	private pulling = { done: 0, since: 0 };
 
 	constructor(private readonly opts: EngineOptions) {}
 
@@ -262,13 +282,15 @@ export class SyncEngine {
 		const failed: Revision[] = [];
 		const since = cursor;
 		let done = 0;
+		this.pulling = { done, since };
 		for (;;) {
 			const page = await api.changes(vaultId, cursor);
 			const keyring = this.opts.keyring;
 			if (keyring && page.keyringVersion > keyring.version()) await keyring.refresh();
 			for (const revision of page.changes) {
 				await this.applyOrKeep(revision, failed, deferred);
-				this.progress({ phase: "pull", done: ++done, since, rev: revision.rev });
+				this.pulling.done = ++done;
+				this.progress({ phase: "pull", done, since, rev: revision.rev });
 			}
 			// Saved before the cursor moves past them, so they aren't lost if the sync stops here.
 			await store.setMeta(DEFERRED, deferred);
@@ -308,6 +330,8 @@ export class SyncEngine {
 			}
 		} catch (e) {
 			if (e instanceof ApiError || e instanceof NetworkError || e instanceof SyncStopped) throw e;
+			// Every later file would fail the same way: stop, and say why once.
+			if (isQuotaError(e)) throw new StorageFullError();
 			failed.push(current);
 			if (first) {
 				const reason = e instanceof Error && e.message ? `: ${e.message}` : "";
@@ -329,7 +353,7 @@ export class SyncEngine {
 			present.add(file.path);
 			const s = synced.get(file.path);
 			if (s && !s.deleted && s.size === file.size && s.mtime === file.mtime) continue;
-			const local = await this.local(file.path);
+			const local = await this.local(file.path, false);
 			if (local.missing) {
 				// Never committed as a change: the stub isn't the file's content.
 				if (s && !s.deleted && (await this.refetch(file.path, s))) refetched++;
@@ -426,6 +450,21 @@ export class SyncEngine {
 		const { api, vaultId, cipher, store, include } = this.opts;
 		if (!include(path)) return;
 		const synced = await store.getFile(path);
+		if (!again && synced && !synced.deleted && synced.mtime !== 0) {
+			// Same size and time as synced (a file the pull just wrote): unchanged, as in the scan.
+			const stat = await this.opts.fs.stat(path);
+			if (stat && stat.size === synced.size && stat.mtime === synced.mtime) return;
+			// Touched, maybe not changed: hash in chunks first, so an unchanged remote-only file
+			// isn't read whole.
+			if (this.opts.fs.hash) {
+				const peek = await this.local(path, false);
+				if (peek.missing) return;
+				if (peek.exists && peek.sha256 === synced.sha256) {
+					await store.putFile(path, { ...synced, mtime: peek.stat!.mtime });
+					return;
+				}
+			}
+		}
 		const local = await this.local(path);
 		// The scan downloads it again.
 		if (local.missing) return;
@@ -503,8 +542,9 @@ export class SyncEngine {
 		const synced = await store.getFile(path);
 		if (synced && revision.rev <= synced.rev) return;
 		this.checkOpen();
+		this.progress({ phase: "pull", done: this.pulling.done, since: this.pulling.since, rev: revision.rev, path });
 		// Always hashed: a stat that looks unchanged mustn't let a remote write replace an edit.
-		const local = await this.local(path);
+		const local = await this.local(path, false);
 		// Content missing here: nothing to keep, the remote revision replaces the stub.
 		const unchanged =
 			local.missing ||
@@ -530,29 +570,33 @@ export class SyncEngine {
 			await this.record(path, revision, meta, local.stat);
 			return;
 		}
+		const rejected = (e: unknown): boolean => {
+			if (!(e instanceof ObjectError)) return false;
+			this.report.rejected++;
+			this.warn(`Skipped a remote change whose content failed its integrity check (revision ${revision.rev}).`);
+			return true;
+		};
+		// Deleted here but edited there: the edit wins. And a device's first sync: its own
+		// defaults in the config folder give way to the vault's settings, without conflict copies.
+		if (unchanged || !local.exists || (!synced && this.inConfig(path))) {
+			// Streamed: received, checked and written one chunk at a time.
+			try {
+				await this.writeRemoteChunks(path, revision, meta);
+			} catch (e) {
+				if (!rejected(e)) throw e;
+			}
+			return;
+		}
 		let remote: Uint8Array;
 		try {
 			remote = await this.download(revision, meta);
 		} catch (e) {
-			if (!(e instanceof ObjectError)) throw e;
-			this.report.rejected++;
-			this.warn(`Skipped a remote change whose content failed its integrity check (revision ${revision.rev}).`);
-			return;
-		}
-		if (unchanged || !local.exists) {
-			// Deleted here but edited there: the edit wins.
-			await this.writeRemote(path, revision, meta, remote);
-			return;
-		}
-		if (!synced && this.inConfig(path)) {
-			// A device's first sync: its own defaults give way to the vault's settings, without
-			// conflict copies in the config folder.
-			await this.writeRemote(path, revision, meta, remote);
+			if (!rejected(e)) throw e;
 			return;
 		}
 
 		// Both sides changed.
-		const localData = local.data!;
+		const localData = local.data ?? (await this.opts.fs.read(path));
 		const base = synced && !synced.deleted ? await this.base(revision.fileId, synced.rev) : null;
 		const merged = mergeText(path, base, localData, remote);
 		if (merged !== null) {
@@ -605,6 +649,15 @@ export class SyncEngine {
 		await this.record(path, revision, meta, await this.opts.fs.stat(path));
 	}
 
+	/** Download and write a revision chunk by chunk. Throws `ObjectError` before writing if a check fails. */
+	private async writeRemoteChunks(path: string, revision: Revision, meta: FileMeta): Promise<void> {
+		this.checkOpen();
+		const times = { mtime: meta.mtime, ctime: meta.ctime };
+		await writeChunked(this.opts.fs, path, meta.size, meta.chunks.length, this.chunks(revision, meta), times);
+		this.noteWrite(path);
+		await this.record(path, revision, meta, await this.opts.fs.stat(path));
+	}
+
 	/** Remember `revision` as the synced state of `path`. */
 	private async record(path: string, revision: Revision, meta: FileMeta, stat: FileStat | null): Promise<void> {
 		const file: SyncedFile = {
@@ -620,10 +673,35 @@ export class SyncEngine {
 	}
 
 	private async download(revision: Revision, meta: FileMeta): Promise<Uint8Array> {
-		const { api, vaultId, cipher } = this.opts;
-		const objects: Uint8Array[] = [];
-		for (const chunk of meta.chunks) objects.push(await api.getBlob(vaultId, chunk.id));
-		return cipher.openContent(revision.fileId, meta, objects);
+		return collect(meta.size, this.chunks(revision, meta));
+	}
+
+	/**
+	 * A revision's plaintext, one chunk at a time. Each chunk is checked as it comes, and the
+	 * file's hash after the last one: the generator throws `ObjectError` instead of finishing.
+	 */
+	private async *chunks(revision: Revision, meta: FileMeta): AsyncGenerator<Uint8Array> {
+		const opener = this.opts.cipher.contentOpener(revision.fileId, meta);
+		for (const [i, chunk] of meta.chunks.entries()) {
+			this.checkOpen();
+			yield opener.open(i, await this.blob(chunk.id));
+		}
+		opener.finish();
+	}
+
+	/** One blob, tried again after a short wait when the server can't be reached. */
+	private async blob(id: string): Promise<Uint8Array> {
+		const { api, vaultId } = this.opts;
+		const waits = this.opts.blobRetriesMs ?? BLOB_RETRIES_MS;
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await api.getBlob(vaultId, id);
+			} catch (e) {
+				if (!(e instanceof NetworkError) || attempt >= waits.length) throw e;
+				await new Promise((resolve) => window.setTimeout(resolve, waits[attempt]));
+				this.checkOpen();
+			}
+		}
 	}
 
 	/** The content of a revision, or null for a deletion. */
@@ -643,18 +721,23 @@ export class SyncEngine {
 		}
 	}
 
-	/** The local state and content of `path`. */
-	private async local(path: string): Promise<LocalFile> {
+	/**
+	 * The local state of `path`, and its content unless `withData` is false. Without it, a
+	 * file system that can hash in chunks (a remote-only device) never reads the file whole.
+	 */
+	private async local(path: string, withData = true): Promise<LocalFile> {
 		const stat = await this.opts.fs.stat(path);
 		if (!stat) return { exists: false, stat: null, sha256: "" };
-		let data: Uint8Array;
 		try {
-			data = await this.opts.fs.read(path);
+			if (!withData && this.opts.fs.hash) {
+				return { exists: true, stat, sha256: await hashFile(this.opts.fs, path, sha256Hex) };
+			}
+			const data = await this.opts.fs.read(path);
+			return { exists: true, stat, data, sha256: sha256Hex(data) };
 		} catch (e) {
 			if (!isMissingContent(e)) throw e;
 			return { exists: true, stat, sha256: "", missing: true };
 		}
-		return { exists: true, stat, data, sha256: sha256Hex(data) };
 	}
 
 	private inConfig(path: string): boolean {

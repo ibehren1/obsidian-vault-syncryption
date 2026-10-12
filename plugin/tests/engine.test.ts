@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { ApiError } from "../src/api/http";
+import { ApiError, NetworkError } from "../src/api/http";
 import { MemoryStore } from "../src/store/state";
 import { CURSOR, DEFERRED, FAILED } from "../src/sync/engine";
 import { MemoryFs } from "../src/sync/fs";
@@ -69,8 +69,61 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		]);
 		await b.engine.sync();
 		const pulls = b.progress.filter((p) => p.phase === "pull");
-		expect(pulls.map((p) => p.done)).toEqual([1, 2]);
+		// Each file twice: while it is received (with its path), and once it is done.
+		expect(pulls.map((p) => p.done)).toEqual([0, 1, 1, 2]);
+		expect(pulls.map((p) => p.phase === "pull" && p.path !== undefined)).toEqual([true, false, true, false]);
 		expect(pulls.every((p) => p.phase === "pull" && p.since === 0 && p.rev > 0)).toBe(true);
+	});
+
+	it("tries a chunk download again when the server can't be reached", async () => {
+		const [a, b] = await twoDevices();
+		a.fs.set("photo.png", new Uint8Array([1, 2, 3]));
+		await a.engine.sync();
+		const api = b.session.api;
+		const getBlob = api.getBlob.bind(api);
+		let failures = 1;
+		api.getBlob = async (vaultId, id) => {
+			if (failures-- > 0) throw new NetworkError("Can't reach the server.");
+			return getBlob(vaultId, id);
+		};
+		await b.engine.sync();
+		expect([...b.fs.files.get("photo.png")!.data]).toEqual([1, 2, 3]);
+	});
+
+	it("writes nothing of a file whose chunk was tampered with", async () => {
+		const [a, b] = await twoDevices();
+		a.fs.set("photo.png", new Uint8Array([1, 2, 3]));
+		await a.engine.sync();
+		const api = b.session.api;
+		const getBlob = api.getBlob.bind(api);
+		api.getBlob = async (vaultId, id) => {
+			const blob = await getBlob(vaultId, id);
+			blob[blob.length - 1]! ^= 1;
+			return blob;
+		};
+		const report = await b.engine.sync();
+		expect(report.rejected).toBe(1);
+		expect(b.fs.files.has("photo.png")).toBe(false);
+		expect(b.warnings.join(" ")).toContain("integrity check");
+	});
+
+	it("doesn't read back a file it just received to upload it", async () => {
+		const [a, b] = await twoDevices();
+		a.fs.set("Note.md", "hello\n");
+		await a.engine.sync();
+		await b.engine.sync();
+		// Obsidian's events queue every file the pull writes.
+		await b.store.enqueue("Note.md");
+		let reads = 0;
+		const read = b.fs.read.bind(b.fs);
+		b.fs.read = async (path) => {
+			reads++;
+			return read(path);
+		};
+		const report = await b.engine.sync();
+		expect(report.pushed).toBe(0);
+		expect(reads).toBe(0);
+		expect(await b.store.outbox()).toEqual([]);
 	});
 
 	it("doesn't push files that were only touched", async () => {

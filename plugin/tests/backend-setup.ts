@@ -44,6 +44,10 @@ export default async function setup(project: TestProject): Promise<() => void> {
 			"--port",
 			"0",
 			"--no-proxy-headers",
+			// Longer than fetch keeps an idle connection, so a request after a slow step (sealing
+			// a large file on a slow CI runner) never reuses one the server just closed.
+			"--timeout-keep-alive",
+			"75",
 		],
 		{
 			env: {

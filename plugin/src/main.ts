@@ -1,4 +1,4 @@
-import { debounce, Notice, Plugin, requireApiVersion, setIcon, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
+import { debounce, Notice, Platform, Plugin, requireApiVersion, setIcon, TAbstractFile, TFile, type EventRef, type Vault } from "obsidian";
 
 import { ApiClient, type Device } from "./api/client";
 import {
@@ -35,7 +35,7 @@ import { IndexedDbStore } from "./store/idb";
 import { SealedHashStore } from "./store/sealed";
 import { AdapterFs, isHiddenPath, SplitFs } from "./sync/adapter-fs";
 import { VaultCipher } from "./sync/cipher";
-import { CURSOR, SyncEngine, type SyncProgress, type SyncReport } from "./sync/engine";
+import { CURSOR, StorageFullError, SyncEngine, type SyncProgress, type SyncReport } from "./sync/engine";
 import { parseExcludes, pathFilter, type PathFilter } from "./sync/filter";
 import { LiveLoop } from "./sync/live";
 import { LockManager, newClientId } from "./sync/locks";
@@ -111,6 +111,10 @@ export default class SyncryptionPlugin extends Plugin {
 	private retryAt = 0;
 	/** The maintenance notice was shown: once per maintenance period, not on every retry. */
 	private maintenanceNoticed = false;
+	/** An offline notice was shown on mobile (no status bar there) since the last good sync. */
+	private offlineNoticed = false;
+	/** The latest progress held back by `PROGRESS_MS`, shown when that time is up. */
+	private progressTimer = 0;
 	/** What the running sync is doing, for the status text. */
 	private progress = "";
 	private progressAt = 0;
@@ -420,6 +424,7 @@ export default class SyncryptionPlugin extends Plugin {
 	}
 
 	private stop(): void {
+		window.clearTimeout(this.progressTimer);
 		this.abort?.abort();
 		this.abort = null;
 		this.stopLive();
@@ -809,6 +814,7 @@ export default class SyncryptionPlugin extends Plugin {
 		try {
 			const report = await engine.sync();
 			if (this.engine !== engine) return;
+			window.clearTimeout(this.progressTimer);
 			this.progress = "";
 			this.progressPhase = null;
 			this.lastSync = new Date();
@@ -832,6 +838,7 @@ export default class SyncryptionPlugin extends Plugin {
 			if (!session?.remoteOnly) await this.checkApprovals();
 		} catch (e) {
 			if (this.engine !== engine) return;
+			window.clearTimeout(this.progressTimer);
 			this.progress = "";
 			this.progressPhase = null;
 			this.hideProgress();
@@ -843,7 +850,12 @@ export default class SyncryptionPlugin extends Plugin {
 	private showProgress(engine: SyncEngine, progress: SyncProgress): void {
 		if (this.engine !== engine) return;
 		const now = Date.now();
-		if (progress.phase === this.progressPhase && now - this.progressAt < PROGRESS_MS) return;
+		window.clearTimeout(this.progressTimer);
+		if (progress.phase === this.progressPhase && now - this.progressAt < PROGRESS_MS) {
+			// Shown once the time is up, so a long file's path isn't hidden behind the one before.
+			this.progressTimer = window.setTimeout(() => this.showProgress(engine, progress), PROGRESS_MS);
+			return;
+		}
 		this.progressAt = now;
 		this.progressPhase = progress.phase;
 		this.progress = this.progressText(progress);
@@ -858,7 +870,7 @@ export default class SyncryptionPlugin extends Plugin {
 				this.seq = Math.max(this.seq, progress.rev);
 				const total = this.seq - progress.since;
 				const percent = total > 0 ? Math.floor(((progress.rev - progress.since) / total) * 100) : 100;
-				return `receiving changes, ${percent}%`;
+				return progress.path ? `receiving changes, ${percent}% · ${progress.path}` : `receiving changes, ${percent}%`;
 			}
 			case "scan":
 				return `checking local files, ${progress.done} of ${progress.total}`;
@@ -1206,6 +1218,18 @@ export default class SyncryptionPlugin extends Plugin {
 		if (e instanceof NetworkError) {
 			this.detail = e.message;
 			this.setState("offline");
+			// No status bar on mobile: say it once, or the sync seems to stop for no reason.
+			if (Platform.isMobile && (!this.offlineNoticed || userAction)) {
+				new Notice(`Sync: ${e.message} It tries again automatically.`, 8000);
+				this.offlineNoticed = true;
+			}
+			return;
+		}
+		if (e instanceof StorageFullError) {
+			this.detail = e.message;
+			this.setState("error");
+			if (this.lastError !== e.message || userAction) void this.storageFullNotice(e.message);
+			this.lastError = e.message;
 			return;
 		}
 		if (isMaintenance(e)) {
@@ -1249,11 +1273,26 @@ export default class SyncryptionPlugin extends Plugin {
 		if (!repeated || userAction) new Notice(`Sync: ${message}`);
 	}
 
+	/** The storage-full notice, with how much this device lets Obsidian store when it says. */
+	private async storageFullNotice(message: string): Promise<void> {
+		let usage = "";
+		try {
+			const { usage: used, quota } = (await navigator.storage?.estimate?.()) ?? {};
+			if (used !== undefined && quota !== undefined) usage = ` (${megabytes(used)} of ${megabytes(quota)} used)`;
+		} catch {
+			// No estimate: the message alone.
+		}
+		new Notice(`Sync: ${message}${usage}`, 15_000);
+	}
+
 	private setState(state: State): void {
 		if (state !== "maintenance" && state !== "syncing" && state !== "connecting") {
 			// Back from maintenance (or stopped): no retry pending, notice again next time.
 			this.clearRetry();
-			if (state === "idle" || state === "off") this.maintenanceNoticed = false;
+			if (state === "idle" || state === "off") {
+				this.maintenanceNoticed = false;
+				this.offlineNoticed = false;
+			}
 		}
 		this.state = state;
 		this.render();
@@ -1358,4 +1397,8 @@ function statusBarText(item: HTMLElement, icon: string, text: string, kind: "war
 
 function plural(n: number, word: string): string {
 	return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function megabytes(bytes: number): string {
+	return `${Math.round(bytes / 1_000_000).toLocaleString()} MB`;
 }

@@ -36,6 +36,44 @@ export interface VaultFs {
 	write(path: string, data: Uint8Array, times: { mtime: number; ctime?: number }): Promise<void>;
 	/** Delete a file because it was deleted on another device. */
 	remove(path: string): Promise<void>;
+	/** The hex SHA-256 of a file, where it can be had without reading the file whole. */
+	hash?(path: string): Promise<string>;
+	/**
+	 * Write a file of `size` bytes that arrives in `count` chunks, where that can be done
+	 * without holding it whole. If `chunks` throws, nothing is written.
+	 */
+	writeChunks?(path: string, size: number, count: number, chunks: AsyncIterable<Uint8Array>, times: { mtime: number; ctime?: number }): Promise<void>;
+}
+
+/** Collect chunks into one buffer of `size` bytes. Throws if they don't add up to it. */
+export async function collect(size: number, chunks: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+	const out = new Uint8Array(size);
+	let offset = 0;
+	for await (const chunk of chunks) {
+		if (offset + chunk.length > size) throw new Error("The chunks are larger than the file.");
+		out.set(chunk, offset);
+		offset += chunk.length;
+	}
+	if (offset !== size) throw new Error("The chunks are smaller than the file.");
+	return out;
+}
+
+/** `fs.hash`, or a whole read where the file system has none. */
+export async function hashFile(fs: VaultFs, path: string, sha256Hex: (data: Uint8Array) => string): Promise<string> {
+	return fs.hash ? fs.hash(path) : sha256Hex(await fs.read(path));
+}
+
+/** `fs.writeChunks`, or the chunks collected and written whole. */
+export async function writeChunked(
+	fs: VaultFs,
+	path: string,
+	size: number,
+	count: number,
+	chunks: AsyncIterable<Uint8Array>,
+	times: { mtime: number; ctime?: number },
+): Promise<void> {
+	if (fs.writeChunks) return fs.writeChunks(path, size, count, chunks, times);
+	await fs.write(path, await collect(size, chunks), times);
 }
 
 export class MemoryFs implements VaultFs {

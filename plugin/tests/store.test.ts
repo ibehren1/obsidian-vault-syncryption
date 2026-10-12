@@ -140,4 +140,53 @@ describe("IndexedDbEntryStore", () => {
 		store.close();
 		await deleteDatabase("entries", factory);
 	});
+
+	it("keeps chunks per entry and drops them with the entry", async () => {
+		const factory = new IDBFactory();
+		const store = await IndexedDbEntryStore.open("chunks", factory);
+		const piece = (n: number) => ({ nonce: new Uint8Array(24), data: new Uint8Array([n]) });
+		const one = new Uint8Array(16).fill(1);
+		const two = new Uint8Array(16).fill(2);
+		await store.putChunk(one, 0, piece(10));
+		await store.putChunk(one, 1, piece(11));
+		await store.put("a.pdf", { id: one, count: 2, size: 2, mtime: 1, ctime: 1 });
+		expect(await store.getChunk(one, 1)).toEqual(piece(11));
+		expect(await store.infos()).toEqual(new Map([["a.pdf", { size: 2, mtime: 1, ctime: 1, id: "01".repeat(16) }]]));
+
+		// A new version: the old chunks go with the entry that replaces them.
+		await store.putChunk(two, 0, piece(20));
+		await store.put("a.pdf", { id: two, count: 1, size: 1, mtime: 2, ctime: 1 });
+		expect(await store.getChunk(one, 0)).toBeUndefined();
+		expect(await store.chunkIds()).toEqual(new Set(["02".repeat(16)]));
+
+		await store.putChunk(one, 0, piece(30));
+		await store.deleteChunks(one);
+		await store.delete("a.pdf");
+		expect(await store.chunkIds()).toEqual(new Set());
+		expect((await store.infos()).size).toBe(0);
+		store.close();
+		await deleteDatabase("chunks", factory);
+	});
+
+	it("opens a store from before chunks and keeps its entries", async () => {
+		const factory = new IDBFactory();
+		const old = factory.open("v1", 1);
+		old.onupgradeneeded = () => {
+			old.result.createObjectStore("entries");
+			old.result.createObjectStore("info");
+		};
+		await new Promise((resolve) => (old.onsuccess = resolve));
+		const entry = { nonce: new Uint8Array(24), data: new Uint8Array([1]), size: 1, mtime: 2, ctime: 3 };
+		const tx = old.result.transaction(["entries", "info"], "readwrite");
+		tx.objectStore("entries").put(entry, "a.md");
+		tx.objectStore("info").put({ size: 1, mtime: 2, ctime: 3 }, "a.md");
+		await new Promise((resolve) => (tx.oncomplete = resolve));
+		old.result.close();
+
+		const store = await IndexedDbEntryStore.open("v1", factory);
+		expect(await store.get("a.md")).toEqual(entry);
+		expect(await store.chunkIds()).toEqual(new Set());
+		store.close();
+		await deleteDatabase("v1", factory);
+	});
 });

@@ -187,6 +187,39 @@ export function sealChunks(
 }
 
 /**
+ * Decrypts a file's chunks one at a time, in metadata order, so a large file is never whole
+ * in memory. `finish` checks the reassembled file against `meta.sha256`: until it passes,
+ * the chunks must not be used as the file's content.
+ */
+export class ChunkOpener {
+	private next = 0;
+	private readonly hash = sha256.create();
+
+	constructor(
+		private readonly fileKey: Uint8Array,
+		private readonly fileId: Uint8Array,
+		private readonly meta: FileMeta,
+	) {}
+
+	/** Decrypt `object`, the blob for `meta.chunks[index]`. Chunks must come in order. */
+	open(index: number, object: Uint8Array): Uint8Array {
+		const ref = this.meta.chunks[index];
+		if (ref === undefined || index !== this.next) throw new ObjectError("chunk out of order");
+		if (blobId(object) !== ref.id) throw new ObjectError("chunk does not match its id");
+		const plain = openObject(this.fileKey, chunkDomain(this.fileId, index), object);
+		if (plain.length !== ref.size) throw new ObjectError("chunk has the wrong size");
+		this.hash.update(plain);
+		this.next++;
+		return plain;
+	}
+
+	finish(): void {
+		if (this.next !== this.meta.chunks.length) throw new ObjectError("wrong number of chunks");
+		if (hex(this.hash.digest()) !== this.meta.sha256) throw new ObjectError("file hash does not match");
+	}
+}
+
+/**
  * Decrypt chunks in metadata order and check the reassembled file against `meta.sha256`.
  * `objects[i]` must be the blob for `meta.chunks[i]`.
  */
@@ -197,14 +230,8 @@ export function openChunks(
 	objects: Uint8Array[],
 ): Uint8Array {
 	if (objects.length !== meta.chunks.length) throw new ObjectError("wrong number of chunks");
-	const parts = objects.map((object, i) => {
-		const ref = meta.chunks[i]!;
-		if (blobId(object) !== ref.id) throw new ObjectError("chunk does not match its id");
-		const plain = openObject(fileKey, chunkDomain(fileId, i), object);
-		if (plain.length !== ref.size) throw new ObjectError("chunk has the wrong size");
-		return plain;
-	});
-	const data = concat(...parts);
-	if (hex(sha256(data)) !== meta.sha256) throw new ObjectError("file hash does not match");
+	const opener = new ChunkOpener(fileKey, fileId, meta);
+	const data = concat(...objects.map((object, i) => opener.open(i, object)));
+	opener.finish();
 	return data;
 }

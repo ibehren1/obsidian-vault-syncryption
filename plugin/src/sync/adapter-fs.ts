@@ -3,7 +3,8 @@
  * 4.4): Obsidian doesn't index hidden folders, so the Vault API can't see them.
  */
 import { isConfigFolder } from "./filter";
-import type { FileStat, ListedFile, VaultFs } from "./fs";
+import { sha256Hex } from "./cipher";
+import { hashFile, writeChunked, type FileStat, type ListedFile, type VaultFs } from "./fs";
 
 /** The part of Obsidian's `DataAdapter` used here, so tests can fake it. */
 export interface Adapter {
@@ -126,5 +127,11 @@ export class SplitFs implements VaultFs {
 	}
 	remove(path: string): Promise<void> {
 		return this.fs(path).remove(path);
+	}
+	hash(path: string): Promise<string> {
+		return hashFile(this.fs(path), path, sha256Hex);
+	}
+	writeChunks(path: string, size: number, count: number, chunks: AsyncIterable<Uint8Array>, times: { mtime: number; ctime?: number }): Promise<void> {
+		return writeChunked(this.fs(path), path, size, count, chunks, times);
 	}
 }

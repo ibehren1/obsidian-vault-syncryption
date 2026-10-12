@@ -5,6 +5,7 @@ import { fromB64u, hex, toB64u } from "../crypto/bytes";
 import { deriveFileId, deriveFileKey, fileIdString } from "../crypto/kdf";
 import { epochKey, indexKey, type Keyring } from "../crypto/keyring";
 import {
+	ChunkOpener,
 	objectEpoch,
 	openChunks,
 	openMeta,
@@ -59,6 +60,32 @@ export class VaultCipher {
 		const epoch = objects.length ? objectEpoch(objects[0]!) : this.keyring().currentEpoch;
 		if (objects.some((o) => objectEpoch(o) !== epoch)) throw new Error("chunks from different epochs");
 		return openChunks(this.fileKey(id, epoch), id, meta, objects);
+	}
+
+	/**
+	 * Decrypt a revision's chunks one at a time. The epoch comes from the first chunk, and
+	 * every later one must have the same.
+	 */
+	contentOpener(fileId: string, meta: FileMeta): { open(index: number, object: Uint8Array): Uint8Array; finish(): void } {
+		const id = fromB64u(fileId);
+		let opener: ChunkOpener | null = null;
+		let epoch = 0;
+		return {
+			open: (index, object) => {
+				const e = objectEpoch(object);
+				if (opener === null) {
+					epoch = e;
+					opener = new ChunkOpener(this.fileKey(id, epoch), id, meta);
+				} else if (e !== epoch) {
+					throw new Error("chunks from different epochs");
+				}
+				return opener.open(index, object);
+			},
+			finish: () => {
+				// No chunks: only an empty file, checked against its hash.
+				(opener ?? new ChunkOpener(new Uint8Array(32), id, meta)).finish();
+			},
+		};
 	}
 
 	/** Encrypt a file, or a deletion when `data` is null, under the current epoch. */

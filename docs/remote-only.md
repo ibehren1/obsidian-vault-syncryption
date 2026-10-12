@@ -223,7 +223,14 @@ For every note and attachment:
   store. It wraps `read`, `readBinary`, `write`, `writeBinary`, `append`, `appendBinary`,
   `process`, `stat` (the real size and times), `copy`, `rename`, `remove`, `trashSystem`,
   `trashLocal` and `getResourcePath`. For images, PDFs, audio and video,
-  `getResourcePath` returns a `blob:` URL.
+  `getResourcePath` returns a `blob:` URL. It is synchronous, so a resource not decrypted
+  yet gets the stub's URL and is decrypted in the background (the embeds of an opened note
+  are started first). Every view that got the stub's URL is shown the resource once it is
+  ready, including when it was already being decrypted and when the sync only brings the
+  file later: reading view renders again, and in Live Preview, which keeps the embeds it
+  rendered, the image, video and audio elements still showing the stub's URL get the
+  `blob:` URL directly. A resource decrypted from content that was written over
+  meanwhile is dropped.
 - Writes go only to the store. The stub stays empty.
 - Paths in `configDir` go to the real adapter unchanged.
 - After the plugin loads, it makes Obsidian index the files again, because the startup
@@ -236,15 +243,31 @@ those can change in any update. Stubs need only the documented `DataAdapter` met
 methods are wrapped, which is still fragile, but it is far less code.
 
 ## 7. Local store
-- **Content:** a database of its own, `syncryption-<installId>-<vaultId>-remote`, with two
-  object stores keyed by path: `entries` (the content sealed under the local key,
-  [crypto.md](crypto.md) section 11) and `info` (size and times, so listing doesn't load
-  the content). A database of its own, so the wipe can delete it whole.
+- **Content:** a database of its own, `syncryption-<installId>-<vaultId>-remote`, so the
+  wipe can delete it whole. Three object stores:
+  - `entries`, keyed by path: each file's entry, with a random 16-byte entry id and its
+    chunk count;
+  - `chunks`, keyed by `[entry id, index]`: the content in chunks of up to 4 MiB, each
+    sealed under the local key ([crypto.md](crypto.md) section 11), one transaction per
+    chunk;
+  - `info`, keyed by path: size, times and the entry id, so listing doesn't load the
+    content.
+- **Chunks, so no file is ever whole in memory while it syncs.** A write seals its chunks
+  under a new entry id first and writes the entry last, in a transaction that also drops
+  the previous version's chunks. A crash in between leaves chunks no entry names, and
+  they are deleted at the next load. Entries written before chunks hold their content
+  sealed whole; they stay readable and are chunked at their next write.
 - **Sync goes through the wrapper.** The engine reads and writes notes through the Vault
-  API like on a full device, and the Vault API goes through the wrapped adapter. A pulled
-  file is sealed into the store and leaves a stub; an upload reads the store. A
+  API like on a full device, and the Vault API goes through the wrapped adapter. A
   `VaultFs` decorator (`RemoteStatFs`) reports the stored size and times, as `TFile.stat`
   has the stub's (size 0) and the scan would hash every file on every sync.
+- **Downloads are streamed into the store.** Each chunk is downloaded, checked, decrypted
+  and sealed under the local key before the next one is fetched. The file's hash is
+  checked after the last chunk, and only then does an empty write through the Vault API
+  commit the entry and touch the stub, so Obsidian sees the change as for any other write.
+  A chunk or hash that fails its check leaves nothing behind. Hashing a stored file (the
+  scan, and the check before a remote change replaces it) reads it one chunk at a time
+  too. A file is read whole only when Obsidian opens it, or when it is uploaded.
 - **Sync state:** the same database as a full device. Its plaintext content hashes
   (`files.sha256`) would let anyone confirm a guess of a file's content, so a remote-only
   device stores them sealed (`s1:`, crypto.md 11). Storing a file fails while locked.

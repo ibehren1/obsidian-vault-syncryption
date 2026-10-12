@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { fromHex, hex } from "../src/crypto/bytes";
 import { deriveFileId, deriveFileKey, deriveIndexKey, deriveLocalKey, fileIdString, normPath } from "../src/crypto/kdf";
-import { openHash, openLocal, sealHash, sealLocal } from "../src/crypto/local";
+import { openHash, openLocal, openLocalChunk, sealHash, sealLocal, sealLocalChunk } from "../src/crypto/local";
 import { pairingCode } from "../src/crypto/openssh";
 import { loadVectors } from "./vectors";
 
@@ -25,6 +25,7 @@ const v = loadVectors<{
 		localKey: string;
 		path: string;
 		content: { plaintext: string; nonce: string; ciphertext: string };
+		chunked: { entryId: string; count: number; chunks: { index: number; plaintext: string; nonce: string; ciphertext: string }[] };
 		hash: { sha256: string; nonce: string; sealed: string };
 	};
 }>("kdf.json");
@@ -69,6 +70,22 @@ describe("kdf", () => {
 			expect(hex(openLocal(key, "local-content", path, nonce, sealed.data))).toBe(content.plaintext);
 			expect(() => openLocal(key, "local-content", "other.md", nonce, sealed.data)).toThrow();
 			expect(() => openLocal(key, "local-hash", path, nonce, sealed.data)).toThrow();
+		});
+
+		it("seals chunks bound to their entry, position and count", () => {
+			const { entryId, count, chunks } = v.local.chunked;
+			const id = fromHex(entryId);
+			for (const c of chunks) {
+				const sealed = sealLocalChunk(key, path, id, c.index, count, fromHex(c.plaintext), fromHex(c.nonce));
+				expect(hex(sealed.data)).toBe(c.ciphertext);
+				const nonce = fromHex(c.nonce);
+				const data = fromHex(c.ciphertext);
+				expect(hex(openLocalChunk(key, path, id, c.index, count, nonce, data))).toBe(c.plaintext);
+				expect(() => openLocalChunk(key, "other.md", id, c.index, count, nonce, data)).toThrow();
+				expect(() => openLocalChunk(key, path, id, c.index + 1, count, nonce, data)).toThrow();
+				expect(() => openLocalChunk(key, path, id, c.index, count + 1, nonce, data)).toThrow();
+				expect(() => openLocalChunk(key, path, new Uint8Array(16), c.index, count, nonce, data)).toThrow();
+			}
 		});
 
 		it("seals hashes", () => {

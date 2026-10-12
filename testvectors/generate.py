@@ -743,6 +743,27 @@ def kdf_vectors() -> dict:
     hash_nonce = fixed("local hash nonce", 24)
     hash_ad = b"syncryption/v1/local-hash\x00" + local_path.encode()
     sealed_hash = hash_nonce + xchacha_seal(local, hash_nonce, digest, hash_ad)
+    # Chunked content (store v2): each chunk bound to its index, the count, the entry id and
+    # the path.
+    entry_id = fixed("local entry id", 16)
+    parts = [b"first chunk of the plan, ", b"second chunk\n"]
+    chunks = []
+    for i, part in enumerate(parts):
+        nonce = fixed(f"local chunk nonce {i}", 24)
+        ad = (
+            b"syncryption/v1/local-chunk\x00"
+            + struct.pack(">II", i, len(parts))
+            + entry_id
+            + local_path.encode()
+        )
+        chunks.append(
+            {
+                "index": i,
+                "plaintext": part.hex(),
+                "nonce": nonce.hex(),
+                "ciphertext": xchacha_seal(local, nonce, part, ad).hex(),
+            }
+        )
     return {
         "description": "Vault key derivations (crypto.md 5), pairing codes (crypto.md 6.5) and "
         "the remote-only local key (crypto.md 11). Strings are UTF-8, binary values hex, "
@@ -761,6 +782,7 @@ def kdf_vectors() -> dict:
                 "nonce": content_nonce.hex(),
                 "ciphertext": xchacha_seal(local, content_nonce, content, content_ad).hex(),
             },
+            "chunked": {"entryId": entry_id.hex(), "count": len(parts), "chunks": chunks},
             "hash": {
                 "sha256": digest.hex(),
                 "nonce": hash_nonce.hex(),

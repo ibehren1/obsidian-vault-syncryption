@@ -116,6 +116,42 @@ describe("RemoteStatFs", () => {
 });
 
 describe.skipIf(noBackend)("remote-only approval", () => {
+	it("receives a large file into the store chunk by chunk, and doesn't read it back", async () => {
+		const username = uniqueName("remote");
+		const vaultName = uniqueName("Vault ");
+		const a = await device(username, vaultName, "Laptop");
+		const b = await pairedDevice(a, username, vaultName, "Phone", undefined, { remoteOnly: true });
+		// Two server chunks of 4 MiB.
+		const data = new Uint8Array(5 * 1024 * 1024).map((_, i) => (i * 7) & 0xff);
+		a.fs.set("Decks/big.pdf", data);
+		await a.engine.sync();
+
+		const disk = new FakeDisk();
+		const store = new MemoryEntryStore();
+		const { stub } = wrap(disk, store);
+		const fs = new RemoteStatFs(new StubFs(disk, disk), () => stub);
+		let reads = 0;
+		const read = fs.read.bind(fs);
+		fs.read = async (path) => {
+			reads++;
+			return read(path);
+		};
+		const warnings: string[] = [];
+		const engine = engineFor(b.session, fs, "Phone", warnings);
+		await engine.sync();
+		expect(store.chunks.size).toBe(2);
+		expect(disk.files.get("Decks/big.pdf")!.data.length).toBe(0);
+		expect(stub.info("Decks/big.pdf")!.size).toBe(data.length);
+		expect(new Uint8Array(await disk.readBinary("Decks/big.pdf"))).toEqual(data);
+
+		// Queued by Obsidian's events for the write: skipped without reading the file.
+		await b.session.store.enqueue("Decks/big.pdf");
+		reads = 0;
+		expect((await engine.sync()).pushed).toBe(0);
+		expect(reads).toBe(0);
+		expect(warnings).toEqual([]);
+	}, 60_000);
+
 	it("puts the policy in the keyring and the server refuses management", async () => {
 		const username = uniqueName("remote");
 		const vaultName = uniqueName("Vault ");

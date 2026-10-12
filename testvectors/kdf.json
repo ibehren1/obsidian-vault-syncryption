@@ -108,6 +108,24 @@
       "nonce": "b01f15cb2f6386f011314f13738ca7f4269f3c580dcaa4dc",
       "ciphertext": "1bb3455d7893515be43d45ce36aea4bc02f1570e4c25ce4d253275e7"
     },
+    "chunked": {
+      "entryId": "16055377cc2a682abc2c449f172544b8",
+      "count": 2,
+      "chunks": [
+        {
+          "index": 0,
+          "plaintext": "6669727374206368756e6b206f662074686520706c616e2c20",
+          "nonce": "0fbd33414ecd317f8d131b7c4f0fbf6b742f8d3d7b149b45",
+          "ciphertext": "0e340646e1287608710e969406bd3f066dc314a9201fd2815667719781af93fd5869ef216282510318"
+        },
+        {
+          "index": 1,
+          "plaintext": "7365636f6e64206368756e6b0a",
+          "nonce": "1863ec918d7d71750f9a2a8587b2d142cf505038d70d216b",
+          "ciphertext": "a418e46e0e0b0013958d49a69b37a8af6489c6685587b58f58eafc5f1f"
+        }
+      ]
+    },
     "hash": {
       "sha256": "59b3b0c79e8676afd6604023eadb014031eceeefb0eb745808836c8d2d7a392b",
       "nonce": "88602311d19be3f8592bccd6c4093037cb98f3f18f331e44",
