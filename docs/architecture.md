@@ -1,7 +1,8 @@
 # Vault Syncryption Architecture
 
-The wire format is in [protocol.md](protocol.md), the crypto in [crypto.md](crypto.md) and
-remote-only devices in [remote-only.md](remote-only.md).
+The wire format is in [protocol.md](protocol.md), the endpoint reference in
+[api.md](api.md), the crypto in [crypto.md](crypto.md) and remote-only devices in
+[remote-only.md](remote-only.md).
 
 ## 1. Overview
 ```mermaid

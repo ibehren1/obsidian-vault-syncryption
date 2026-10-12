@@ -116,6 +116,9 @@ def meta_epoch(meta: bytes) -> int:
 async def commit(
     vault_id: str, file_id: str, body: CommitRequest, caller: ActiveCaller, state: State
 ) -> Revision:
+    """Commit a new revision of one file. `parentRev` must be the current head, or `null` for
+    a file that must not exist yet; otherwise the answer is `409 stale_parent` with the head,
+    so the client can merge without another round trip. Every blob must be uploaded first."""
     rev = await state.db.run(lambda: _commit(vault_id, file_id, body, caller, state))
     await state.notifier.notify(vault_id)
     return await state.db.read(lambda: _revision(state, vault_id, rev))
@@ -210,6 +213,7 @@ def _commit(
 async def head_revision(
     vault_id: str, file_id: str, caller: ActiveCaller, state: State
 ) -> Revision:
+    """The file's current revision, deletions (tombstones) included."""
     return await state.db.read(lambda: _head_revision(vault_id, file_id, caller, state))
 
 
@@ -232,6 +236,8 @@ async def history(
     before: Annotated[int | None, Query(ge=1)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> History:
+    """One page of the file's revisions, newest first. To page back, pass the last `rev` as
+    `before`. What the server keeps is fixed by retention (protocol.md 9.3)."""
     return await state.db.read(lambda: _history(vault_id, file_id, caller, state, before, limit))
 
 
@@ -254,6 +260,8 @@ def _history(
 async def get_revision(
     vault_id: str, file_id: str, rev: int, caller: ActiveCaller, state: State
 ) -> Revision:
+    """One revision of the file, used as a merge base and to restore an old version. A
+    revision retention removed, or one of another file, is `404 not_found`."""
     return await state.db.read(lambda: _get_revision(vault_id, file_id, rev, caller, state))
 
 
@@ -280,6 +288,9 @@ async def changes(
     since: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
 ) -> Changes:
+    """The vault's change feed: every revision with `rev > since`, oldest first, with its
+    `meta`, so a client applies a batch without one request per file. It stores `cursor`
+    once the batch is applied."""
     return await state.db.read(lambda: _changes(vault_id, caller, state, since, limit))
 
 
@@ -312,6 +323,9 @@ async def wait(
     keyringSince: Annotated[int | None, Query(ge=0)] = None,
     timeout: Annotated[float, Query(ge=0, le=MAX_WAIT)] = MAX_WAIT,  # noqa: ASYNC109
 ) -> WaitResponse:
+    """Long-poll for live updates: answers as soon as the vault's `seq`, `locksSeq` or
+    keyring version has passed what the client knows, or after `timeout` seconds with
+    `changed: false`. The client then calls `/changes` or `/locks` and waits again."""
     await state.db.read(lambda: require_member(state, caller, vault_id))
 
     def current() -> sqlite3.Row:

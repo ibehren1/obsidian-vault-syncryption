@@ -100,6 +100,8 @@ def _vault_device(state: AppState, vault_id: str, device_id: str) -> sqlite3.Row
 
 @router.get("/devices/self")
 async def self_device(caller: AnyCaller, state: State) -> SelfDevice:
+    """The calling device, with its vault and username. A pending device may call it, so it
+    can poll for its approval."""
     return await state.db.read(lambda: _self_device(caller, state))
 
 
@@ -115,6 +117,8 @@ def _self_device(caller: Caller, state: AppState) -> SelfDevice:
 
 @router.get("/vaults/{vault_id}/devices")
 async def list_devices(vault_id: str, caller: ActiveCaller, state: State) -> DeviceList:
+    """Every encryption key of the vault, oldest first, removed ones included. They are the
+    vault's access-control list."""
     return await state.db.run(lambda: _list_devices(vault_id, caller, state))
 
 
@@ -135,6 +139,9 @@ async def approve_device(
     state: State,
     body: ApproveRequest | None = None,
 ) -> Device:
+    """Make a pending device active, as a full device or, with `{"remoteOnly": true}`, as a
+    remote-only one. The caller must also add the device to the keyring: approval alone
+    grants no decryption (crypto.md 6.5)."""
     remote = body.remoteOnly if body else False
     return await state.db.run(lambda: _approve_device(vault_id, device_id, remote, caller, state))
 

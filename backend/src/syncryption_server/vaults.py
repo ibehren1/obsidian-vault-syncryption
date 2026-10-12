@@ -161,6 +161,8 @@ def _open_vault(body: OpenRequest, caller: Caller, state: AppState) -> OpenRespo
 
 @router.post("", status_code=201)
 async def create_vault(body: CreateRequest, caller: ActiveCaller, state: State) -> Vault:
+    """Create the vault the calling key registered with, together with its first keyring.
+    The client picks the vault id, so it can build that keyring before the request."""
     return await state.db.run(lambda: _create_vault(body, caller, state))
 
 
@@ -210,6 +212,8 @@ async def get_keyring(
     state: State,
     version: Annotated[int | None, Query(ge=1)] = None,
 ) -> Keyring:
+    """The vault's keyring, the latest version or the one asked for. Every version is kept,
+    so a client can verify the chain (crypto.md 6.4). Remote-only devices may read it."""
     return await state.db.read(lambda: _get_keyring(vault_id, caller, state, version))
 
 
@@ -229,6 +233,9 @@ def _get_keyring(vault_id: str, caller: Caller, state: AppState, version: int | 
 async def put_keyring(
     vault_id: str, body: KeyringUpload, caller: FullCaller, state: State
 ) -> Keyring:
+    """Store the next keyring version, signed by the calling device. The server checks the
+    signature and the version, never the plaintext, and it wakes the vault's long-polls."""
+
     def store() -> None:
         require_member(state, caller, vault_id)
         data = _check_keyring(caller, body)

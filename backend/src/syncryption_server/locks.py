@@ -91,6 +91,8 @@ def _model(row) -> Lock:
 
 @router.get("")
 async def list_locks(vault_id: str, caller: ActiveCaller, state: State) -> Locks:
+    """The vault's live locks, by `fileId`. Expired ones are swept first, so they never
+    appear."""
     await _sweep(state, caller, vault_id)
 
     def read() -> Locks:
@@ -109,6 +111,8 @@ async def list_locks(vault_id: str, caller: ActiveCaller, state: State) -> Locks
 async def acquire(
     vault_id: str, file_id: str, body: AcquireRequest, caller: ActiveCaller, state: State
 ) -> Lock:
+    """Take the file's lease lock, or renew one the caller already holds. Another holder
+    gives `423 locked` with the lock, which only warns: locks never block a commit."""
     await state.db.read(lambda: require_member(state, caller, vault_id))
     file_id = _file_id(file_id)
     client_id = _client_id(body.clientId)
@@ -153,6 +157,7 @@ async def release(
     state: State,
     clientId: Annotated[str, Query()],
 ) -> Response:
+    """Release the lock. Idempotent, and only its holder `(device, clientId)` can do it."""
     file_id = _file_id(file_id)
     client_id = _client_id(clientId)
 

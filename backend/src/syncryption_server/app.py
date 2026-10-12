@@ -29,6 +29,7 @@ from syncryption_server.config import Settings, load_settings
 from syncryption_server.db import Database, OldDataError
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import error_response, install_error_handlers, too_large
+from syncryption_server.openapi import install_openapi
 from syncryption_server.state import AppState, load_maintenance
 from syncryption_server.storage import BlobStore, LocalBlobStore, S3BlobStore
 
@@ -42,6 +43,22 @@ ICONS = {
     "/icon-256.png": "image/png",
 }
 ICON_CACHE = "public, max-age=86400"
+
+# The groups of the API, in the order the reference (docs/api.md) lists them.
+TAGS = [
+    {"name": "auth", "description": "Logging in, and joining the server with a new key."},
+    {
+        "name": "devices",
+        "description": "The encryption keys of a vault: list, approve, policy, lock and remove.",
+    },
+    {"name": "vaults", "description": "Opening or creating a vault, its keyring and recovery."},
+    {"name": "blobs", "description": "The encrypted chunks files are stored as."},
+    {
+        "name": "sync",
+        "description": "Committing revisions, history, the change feed and the long-poll.",
+    },
+    {"name": "locks", "description": "Soft lease locks on the file someone is editing."},
+]
 
 VERSION_HEADER = "X-Syncryption-Version"
 PROTOCOL_HEADER = "X-Syncryption-Protocol"
@@ -209,7 +226,9 @@ def create_app(
             await blob_store.close()
             await asyncio.to_thread(db.close)
 
-    app = FastAPI(title="Vault Syncryption", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="Vault Syncryption", version=__version__, lifespan=lifespan, openapi_tags=TAGS
+    )
     install_error_handlers(app)
     app.add_middleware(BodyLimit, limit=MAX_BODY_SIZE)
 
@@ -230,6 +249,9 @@ def create_app(
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
+        """`200` with `{status, version, protocol, maintenance, adminContact}` once the
+        database and the blob store answer, `503` with `"status": "unavailable"` otherwise.
+        Needs no token, and stays `200` during maintenance, which only pauses `/api/v1`."""
         body, status = await health_report(request.app.state.ctx)
         return JSONResponse(body, status_code=status)
 
@@ -251,4 +273,5 @@ def create_app(
 
     for module in (auth, devices, vaults, blobs, sync, locks, admin):
         app.include_router(module.router)
+    install_openapi(app)
     return app

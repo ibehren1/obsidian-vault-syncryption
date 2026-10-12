@@ -23,6 +23,15 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/vaults/{vault_id}/blobs", tags=["blobs"])
 
 
+class OctetStream(Response):
+    """Only so the OpenAPI schema (and `docs/api.md`) says `application/octet-stream`."""
+
+    media_type = "application/octet-stream"
+
+
+RAW_BODY = {"requestBody": {"required": True, "content": {"application/octet-stream": {}}}}
+
+
 class BlobInfo(BaseModel):
     id: str
     size: int
@@ -54,10 +63,18 @@ async def _read_body(request: Request) -> bytes:
     return bytes(body)
 
 
-@router.put("/{blob_id}", status_code=201, response_model=BlobInfo)
+@router.put(
+    "/{blob_id}",
+    status_code=201,
+    response_model=BlobInfo,
+    openapi_extra=RAW_BODY,
+    responses={200: {"model": BlobInfo, "description": "The blob was already stored."}},
+)
 async def put_blob(
     vault_id: str, blob_id: str, request: Request, caller: ActiveCaller, state: State
 ) -> Response | BlobInfo:
+    """Upload one encrypted chunk as raw bytes. The server hashes the body and refuses it
+    with `422 hash_mismatch` unless the hash equals `blob_id`."""
     vault = await state.db.read(lambda: require_member(state, caller, vault_id))
     _blob_id(blob_id)
     data = await _read_body(request)
@@ -92,8 +109,9 @@ async def put_blob(
     return BlobInfo(id=blob_id, size=len(data))
 
 
-@router.head("/{blob_id}")
+@router.head("/{blob_id}", response_class=OctetStream)
 async def head_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: State) -> Response:
+    """Whether the blob is stored: `200` with its `Content-Length`, or `404` with no body."""
     return await state.db.read(lambda: _head_blob(vault_id, blob_id, caller, state))
 
 
@@ -111,8 +129,10 @@ def _head_blob(vault_id: str, blob_id: str, caller: Caller, state: AppState) -> 
     )
 
 
-@router.get("/{blob_id}")
+@router.get("/{blob_id}", response_class=OctetStream)
 async def get_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: State) -> Response:
+    """Download one encrypted chunk as raw bytes."""
+
     def find() -> sqlite3.Row:
         vault = require_member(state, caller, vault_id)
         if not state.db.one(
@@ -134,6 +154,8 @@ async def get_blob(vault_id: str, blob_id: str, caller: ActiveCaller, state: Sta
 async def missing_blobs(
     vault_id: str, body: MissingRequest, caller: ActiveCaller, state: State
 ) -> MissingResponse:
+    """Of the blob ids sent, the ones the vault doesn't have yet, so a client uploads only
+    what is missing."""
     return await state.db.read(lambda: _missing_blobs(vault_id, body, caller, state))
 
 

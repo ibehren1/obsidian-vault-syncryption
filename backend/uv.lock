@@ -2038,7 +2038,7 @@ wheels = [
 
 [[package]]
 name = "syncryption-server"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },

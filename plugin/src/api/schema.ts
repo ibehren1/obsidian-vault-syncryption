@@ -10,7 +10,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Challenge */
+        /**
+         * Challenge
+         * @description Start a login: the message the device signs with its encryption key. It is issued for
+         *     any well-formed key, username and vault name, is single use and expires after 60 s. The
+         *     client checks every line of the message before it signs (protocol.md 5.1).
+         */
         post: operations["challenge_api_v1_auth_challenge_post"];
         delete?: never;
         options?: never;
@@ -27,7 +32,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Verify */
+        /**
+         * Verify
+         * @description Finish a login with the signature over the challenge, and return a session token. A
+         *     key the server doesn't know joins here: as a pending device when the vault exists, or
+         *     with the shared secret as the device that creates it (protocol.md 5.2).
+         */
         post: operations["verify_api_v1_auth_verify_post"];
         delete?: never;
         options?: never;
@@ -42,7 +52,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Self Device */
+        /**
+         * Self Device
+         * @description The calling device, with its vault and username. A pending device may call it, so it
+         *     can poll for its approval.
+         */
         get: operations["self_device_api_v1_devices_self_get"];
         put?: never;
         post?: never;
@@ -61,7 +75,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create Vault */
+        /**
+         * Create Vault
+         * @description Create the vault the calling key registered with, together with its first keyring.
+         *     The client picks the vault id, so it can build that keyring before the request.
+         */
         post: operations["create_vault_api_v1_vaults_post"];
         delete?: never;
         options?: never;
@@ -76,14 +94,24 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Blob */
+        /**
+         * Get Blob
+         * @description Download one encrypted chunk as raw bytes.
+         */
         get: operations["get_blob_api_v1_vaults__vault_id__blobs__blob_id__get"];
-        /** Put Blob */
+        /**
+         * Put Blob
+         * @description Upload one encrypted chunk as raw bytes. The server hashes the body and refuses it
+         *     with `422 hash_mismatch` unless the hash equals `blob_id`.
+         */
         put: operations["put_blob_api_v1_vaults__vault_id__blobs__blob_id__put"];
         post?: never;
         delete?: never;
         options?: never;
-        /** Head Blob */
+        /**
+         * Head Blob
+         * @description Whether the blob is stored: `200` with its `Content-Length`, or `404` with no body.
+         */
         head: operations["head_blob_api_v1_vaults__vault_id__blobs__blob_id__head"];
         patch?: never;
         trace?: never;
@@ -97,7 +125,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Missing Blobs */
+        /**
+         * Missing Blobs
+         * @description Of the blob ids sent, the ones the vault doesn't have yet, so a client uploads only
+         *     what is missing.
+         */
         post: operations["missing_blobs_api_v1_vaults__vault_id__blobs_missing_post"];
         delete?: never;
         options?: never;
@@ -112,7 +144,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Changes */
+        /**
+         * Changes
+         * @description The vault's change feed: every revision with `rev > since`, oldest first, with its
+         *     `meta`, so a client applies a batch without one request per file. It stores `cursor`
+         *     once the batch is applied.
+         */
         get: operations["changes_api_v1_vaults__vault_id__changes_get"];
         put?: never;
         post?: never;
@@ -129,7 +166,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Devices */
+        /**
+         * List Devices
+         * @description Every encryption key of the vault, oldest first, removed ones included. They are the
+         *     vault's access-control list.
+         */
         get: operations["list_devices_api_v1_vaults__vault_id__devices_get"];
         put?: never;
         post?: never;
@@ -168,7 +209,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Approve Device */
+        /**
+         * Approve Device
+         * @description Make a pending device active, as a full device or, with `{"remoteOnly": true}`, as a
+         *     remote-only one. The caller must also add the device to the keyring: approval alone
+         *     grants no decryption (crypto.md 6.5).
+         */
         post: operations["approve_device_api_v1_vaults__vault_id__devices__device_id__approve_post"];
         delete?: never;
         options?: never;
@@ -223,9 +269,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Head Revision */
+        /**
+         * Head Revision
+         * @description The file's current revision, deletions (tombstones) included.
+         */
         get: operations["head_revision_api_v1_vaults__vault_id__files__file_id__get"];
-        /** Commit */
+        /**
+         * Commit
+         * @description Commit a new revision of one file. `parentRev` must be the current head, or `null` for
+         *     a file that must not exist yet; otherwise the answer is `409 stale_parent` with the head,
+         *     so the client can merge without another round trip. Every blob must be uploaded first.
+         */
         put: operations["commit_api_v1_vaults__vault_id__files__file_id__put"];
         post?: never;
         delete?: never;
@@ -241,7 +295,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** History */
+        /**
+         * History
+         * @description One page of the file's revisions, newest first. To page back, pass the last `rev` as
+         *     `before`. What the server keeps is fixed by retention (protocol.md 9.3).
+         */
         get: operations["history_api_v1_vaults__vault_id__files__file_id__revs_get"];
         put?: never;
         post?: never;
@@ -258,7 +316,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Revision */
+        /**
+         * Get Revision
+         * @description One revision of the file, used as a merge base and to restore an old version. A
+         *     revision retention removed, or one of another file, is `404 not_found`.
+         */
         get: operations["get_revision_api_v1_vaults__vault_id__files__file_id__revs__rev__get"];
         put?: never;
         post?: never;
@@ -275,9 +337,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Keyring */
+        /**
+         * Get Keyring
+         * @description The vault's keyring, the latest version or the one asked for. Every version is kept,
+         *     so a client can verify the chain (crypto.md 6.4). Remote-only devices may read it.
+         */
         get: operations["get_keyring_api_v1_vaults__vault_id__keyring_get"];
-        /** Put Keyring */
+        /**
+         * Put Keyring
+         * @description Store the next keyring version, signed by the calling device. The server checks the
+         *     signature and the version, never the plaintext, and it wakes the vault's long-polls.
+         */
         put: operations["put_keyring_api_v1_vaults__vault_id__keyring_put"];
         post?: never;
         delete?: never;
@@ -293,7 +363,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Locks */
+        /**
+         * List Locks
+         * @description The vault's live locks, by `fileId`. Expired ones are swept first, so they never
+         *     appear.
+         */
         get: operations["list_locks_api_v1_vaults__vault_id__locks_get"];
         put?: never;
         post?: never;
@@ -312,9 +386,16 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Acquire */
+        /**
+         * Acquire
+         * @description Take the file's lease lock, or renew one the caller already holds. Another holder
+         *     gives `423 locked` with the lock, which only warns: locks never block a commit.
+         */
         post: operations["acquire_api_v1_vaults__vault_id__locks__file_id__post"];
-        /** Release */
+        /**
+         * Release
+         * @description Release the lock. Idempotent, and only its holder `(device, clientId)` can do it.
+         */
         delete: operations["release_api_v1_vaults__vault_id__locks__file_id__delete"];
         options?: never;
         head?: never;
@@ -368,7 +449,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Wait */
+        /**
+         * Wait
+         * @description Long-poll for live updates: answers as soon as the vault's `seq`, `locksSeq` or
+         *     keyring version has passed what the client knows, or after `timeout` seconds with
+         *     `changed: false`. The client then calls `/changes` or `/locks` and waits again.
+         */
         get: operations["wait_api_v1_vaults__vault_id__wait_get"];
         put?: never;
         post?: never;
@@ -405,7 +491,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Health */
+        /**
+         * Health
+         * @description `200` with `{status, version, protocol, maintenance, adminContact}` once the
+         *     database and the blob store answer, `503` with `"status": "unavailable"` otherwise.
+         *     Needs no token, and stays `200` during maintenance, which only pauses `/api/v1`.
+         */
         get: operations["health_health_get"];
         put?: never;
         post?: never;
@@ -532,17 +623,24 @@ export interface components {
             /** Devices */
             devices: components["schemas"]["Device"][];
         };
+        /**
+         * Error
+         * @description Every error response. `error` is a stable machine code, and `message` never contains plaintext, keys or tokens. The codes are listed in protocol.md 1.
+         */
+        Error: {
+            /** Details */
+            details: Record<string, never>;
+            /** Error */
+            error: string;
+            /** Message */
+            message: string;
+        };
         /** History */
         History: {
             /** More */
             more: boolean;
             /** Revisions */
             revisions: components["schemas"]["Revision"][];
-        };
-        /** HTTPValidationError */
-        HTTPValidationError: {
-            /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
         };
         /** Keyring */
         Keyring: {
@@ -699,19 +797,6 @@ export interface components {
             /** Vaultname */
             vaultName: string;
         };
-        /** ValidationError */
-        ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>;
-            /** Input */
-            input?: unknown;
-            /** Location */
-            loc: (string | number)[];
-            /** Message */
-            msg: string;
-            /** Error Type */
-            type: string;
-        };
         /** Vault */
         Vault: {
             /** Createdat */
@@ -817,13 +902,13 @@ export interface operations {
                     "application/json": components["schemas"]["ChallengeResponse"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -850,13 +935,13 @@ export interface operations {
                     "application/json": components["schemas"]["VerifyResponse"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -903,13 +988,13 @@ export interface operations {
                     "application/json": components["schemas"]["Vault"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -932,16 +1017,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/octet-stream": string;
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -956,8 +1041,21 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/octet-stream": unknown;
+            };
+        };
         responses: {
+            /** @description The blob was already stored. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BlobInfo"];
+                };
+            };
             /** @description Successful Response */
             201: {
                 headers: {
@@ -967,13 +1065,13 @@ export interface operations {
                     "application/json": components["schemas"]["BlobInfo"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -996,16 +1094,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/octet-stream": string;
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1034,13 +1132,13 @@ export interface operations {
                     "application/json": components["schemas"]["MissingResponse"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1068,13 +1166,13 @@ export interface operations {
                     "application/json": components["schemas"]["Changes"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1099,13 +1197,13 @@ export interface operations {
                     "application/json": components["schemas"]["DeviceList"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1131,13 +1229,13 @@ export interface operations {
                     "application/json": components["schemas"]["Device"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1167,13 +1265,13 @@ export interface operations {
                     "application/json": components["schemas"]["Device"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1203,13 +1301,13 @@ export interface operations {
                     "application/json": components["schemas"]["Device"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1239,13 +1337,13 @@ export interface operations {
                     "application/json": components["schemas"]["Device"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1271,13 +1369,13 @@ export interface operations {
                     "application/json": components["schemas"]["Revision"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1307,13 +1405,13 @@ export interface operations {
                     "application/json": components["schemas"]["Revision"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1342,13 +1440,13 @@ export interface operations {
                     "application/json": components["schemas"]["History"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1375,13 +1473,13 @@ export interface operations {
                     "application/json": components["schemas"]["Revision"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1408,13 +1506,13 @@ export interface operations {
                     "application/json": components["schemas"]["Keyring"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1443,13 +1541,13 @@ export interface operations {
                     "application/json": components["schemas"]["Keyring"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1474,13 +1572,13 @@ export interface operations {
                     "application/json": components["schemas"]["Locks"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1510,13 +1608,13 @@ export interface operations {
                     "application/json": components["schemas"]["Lock"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1542,13 +1640,13 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1577,13 +1675,13 @@ export interface operations {
                     "application/json": components["schemas"]["Keyring"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1608,13 +1706,13 @@ export interface operations {
                     "application/json": components["schemas"]["Keyring"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1644,13 +1742,13 @@ export interface operations {
                     "application/json": components["schemas"]["WaitResponse"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -1677,13 +1775,13 @@ export interface operations {
                     "application/json": components["schemas"]["OpenResponse"];
                 };
             };
-            /** @description Validation Error */
-            422: {
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

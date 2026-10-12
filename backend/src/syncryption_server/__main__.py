@@ -7,6 +7,7 @@
 - `migrate`: the `MIGRATE_TO_S3` copy.
 - `health`: the container healthcheck, a GET of `/health` on the local app port.
 - `openapi`: print the OpenAPI schema, from which the plugin's API types are generated.
+- `apidocs`: print the API reference in `docs/api.md`, rendered from that schema.
 """
 
 import argparse
@@ -20,6 +21,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from syncryption_server import apidocs
 from syncryption_server.config import ConfigError, Settings, load_settings
 from syncryption_server.db import OldDataError, check_file
 from syncryption_server.migrate import MigrationError, migrate_to_s3
@@ -92,11 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("migrate")
     commands.add_parser("health")
     commands.add_parser("openapi")
+    commands.add_parser("apidocs")
     args = parser.parse_args(argv)
     if args.command == "health":
         return _health()
     if args.command == "openapi":
         print(json.dumps(_openapi(), indent=2, sort_keys=True))
+        return 0
+    if args.command == "apidocs":
+        print(apidocs.render(_openapi()), end="")
         return 0
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

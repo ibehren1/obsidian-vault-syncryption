@@ -84,6 +84,7 @@ The plugin syncs the whole vault in place, including the config folder (`.obsidi
 - [docs/scaling.md](docs/scaling.md): storage growth and capacity
 - [docs/remote-only.md](docs/remote-only.md): remote-only devices
 - [docs/architecture.md](docs/architecture.md), [docs/protocol.md](docs/protocol.md) and [docs/crypto.md](docs/crypto.md): how it works
+- [docs/api.md](docs/api.md): every endpoint of the server's API
 - [SECURITY.md](SECURITY.md): reporting a vulnerability
 
 ## Repository

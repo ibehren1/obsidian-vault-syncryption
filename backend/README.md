@@ -1,13 +1,20 @@
 # vault-syncryption-server
 
-The Vault Syncryption sync server. See [../docs/architecture.md](../docs/architecture.md) and
-[../docs/protocol.md](../docs/protocol.md).
+The Vault Syncryption sync server. See [../docs/architecture.md](../docs/architecture.md),
+[../docs/protocol.md](../docs/protocol.md) and the endpoint reference
+[../docs/api.md](../docs/api.md).
 
 ```
 uv sync
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
+```
+
+`../docs/api.md` is generated from the app's OpenAPI schema. Regenerate it after any change
+to a route or a model, or `tests/test_apidocs.py` fails:
+```
+uv run python -m syncryption_server apidocs > ../docs/api.md
 ```
 
 Run a development server. The app is built by a factory that reads its settings from the

@@ -4,6 +4,10 @@ The FastAPI app in `backend/` implements this document, at protocol version `1`
 (section 13). The plugin's TypeScript types are generated from the app's OpenAPI schema.
 Crypto details live in [crypto.md](crypto.md).
 
+[api.md](api.md) is the endpoint reference, generated from that schema: every path, its
+parameters, its request and response bodies and every field of every model. This document
+explains the flows that reference only lists.
+
 ## 1. Conventions
 - **Base URL:** the configured endpoint, e.g. `https://notes.example.com`. All paths
   below are under `/api/v1`, except `/`, `/health`, `/admin` and the icons
