@@ -111,6 +111,7 @@ def check_token(request: Request, state: AppState, token: str) -> bool:
     if expected and hmac.compare_digest(token.encode(), expected.encode()):
         return True
     log.warning("admin: wrong token from %s", client_ip(request, state))
+    state.metrics.admin_token_failures.inc()
     state.limiter.check(key, *FAILURE_LIMIT)
     return False
 

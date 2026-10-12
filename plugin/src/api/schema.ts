@@ -506,6 +506,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Prometheus
+         * @description Prometheus metrics in the text exposition format. Needs no token. Only counts:
+         *     requests by route template and status, users, vaults, keys by status, files,
+         *     revisions, blobs and their bytes, active locks, open long-polls, cleanup runs,
+         *     wrong shared secrets and admin tokens, and process metrics. No label names a
+         *     user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
+         */
+        get: operations["prometheus_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1802,6 +1826,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    prometheus_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain; version=0.0.4; charset=utf-8": unknown;
                 };
             };
         };

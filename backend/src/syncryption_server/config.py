@@ -45,6 +45,8 @@ class Settings:
     # `ADMIN_CONTACT`: how users reach the administrator (email, Slack, phone, ...). Public:
     # shown on `/`, in `/health` and in some errors. Empty when unset.
     admin_contact: str = ""
+    # `DISABLE_METRICS=TRUE`: no `/metrics` endpoint.
+    disable_metrics: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -128,6 +130,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if problem:
         raise ConfigError(f"ADMIN_CONTACT {problem}")
 
+    disable_metrics = _bool(env, "DISABLE_METRICS")
+
     data_dir = Path(env.get("SYNCRYPTION_DATA_DIR", "") or "/data")
     return Settings(
         shared_secret=shared_secret,
@@ -138,4 +142,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         migrate_to_s3=migrate,
         data_dir=data_dir,
         admin_contact=admin_contact,
+        disable_metrics=disable_metrics,
     )

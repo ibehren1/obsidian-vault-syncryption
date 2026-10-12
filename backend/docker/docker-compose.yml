@@ -54,3 +54,7 @@ services:
       # TRUE or FALSE. TRUE copies the files already in ./data to the bucket on startup
       # (needs the S3 variables). Set it back to FALSE once the migration has finished.
       MIGRATE_TO_S3: "FALSE"
+
+      # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
+      # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
+      DISABLE_METRICS: "FALSE"

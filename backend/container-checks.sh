@@ -38,6 +38,8 @@ expect_error "MIGRATE_TO_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x 
 	-e MIGRATE_TO_S3=TRUE
 expect_error "ADMIN_CONTACT must be a single line" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x \
 	-e ADMIN_TOKEN=$ADMIN -e "ADMIN_CONTACT=$(printf 'a\tb')"
+expect_error "DISABLE_METRICS must be TRUE or FALSE" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x \
+	-e ADMIN_TOKEN=$ADMIN -e DISABLE_METRICS=yes
 
 docker run -d --name "$NAME" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=ci-secret -e ADMIN_TOKEN=$ADMIN \
 	-e "ADMIN_CONTACT=ops@example.com" "$IMAGE" >/dev/null

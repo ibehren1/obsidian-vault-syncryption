@@ -27,7 +27,8 @@ SHARED_SECRET=dev-secret ADMIN_TOKEN=dev-admin-token-0123456789abcdef BEHIND_PRO
 `SYNCRYPTION_DATA_DIR` is for development only and isn't part of the container
 configuration. S3 is optional: without the `S3_*` variables, blobs are stored under
 `<data dir>/blobs`. `ADMIN_CONTACT` (optional) sets the contact shown on `/`, in `/health`
-and in maintenance and disabled-account errors. The container variables are described in
+and in maintenance and disabled-account errors, and `DISABLE_METRICS=TRUE` turns off
+`/metrics`. The container variables are described in
 [../docs/self-hosting.md](../docs/self-hosting.md), section 2.
 
 Tests run against a temporary directory and, for `S3BlobStore`, an in-process moto

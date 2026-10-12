@@ -33,6 +33,14 @@ limits, and the admin API. Crypto details are in [crypto.md](crypto.md).
 |---|---|---|
 | `200` | `any` (`application/json`) |  |
 
+#### `GET /metrics`
+
+Prometheus metrics in the text exposition format. Needs no token. Only counts: requests by route template and status, users, vaults, keys by status, files, revisions, blobs and their bytes, active locks, open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
+
+| Status | Body | Notes |
+|---|---|---|
+| `200` | `any` (`text/plain; version=0.0.4; charset=utf-8`) |  |
+
 ### Auth
 
 Logging in, and joining the server with a new key.

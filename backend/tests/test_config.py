@@ -17,6 +17,7 @@ def test_defaults():
     assert s.data_dir == Path("/data")
     assert s.admin_token == "t" * 32
     assert s.admin_contact == ""
+    assert s.disable_metrics is False
 
 
 @pytest.mark.parametrize(
@@ -29,6 +30,7 @@ def test_defaults():
         ({**BASE, "ADMIN_TOKEN": "t" * 31}, "ADMIN_TOKEN must be at least 32"),
         ({**BASE, "SHARED_SECRET": "  "}, "SHARED_SECRET is required"),
         ({**BASE, "BEHIND_PROXY": "yes"}, "BEHIND_PROXY must be TRUE or FALSE"),
+        ({**BASE, "DISABLE_METRICS": "1"}, "DISABLE_METRICS must be TRUE or FALSE"),
         ({**BASE, "URL": "ftp://a.example"}, "URL must look like"),
         ({**BASE, "URL": "https://a.example/sync"}, "origin only"),
         ({**BASE, "S3_BUCKET": "b"}, "S3_ACCESS_KEY, S3_SECRET_KEY empty"),
@@ -100,3 +102,8 @@ def test_admin_contact():
     s = load_settings({**BASE, "ADMIN_CONTACT": "  Ops <ops@example.com>, #help on Slack \n"})
     assert s.admin_contact == "Ops <ops@example.com>, #help on Slack"
     assert load_settings({**BASE, "ADMIN_CONTACT": "é" * 500}).admin_contact == "é" * 500
+
+
+def test_disable_metrics():
+    assert load_settings({**BASE, "DISABLE_METRICS": "TRUE"}).disable_metrics is True
+    assert load_settings({**BASE, "DISABLE_METRICS": "false"}).disable_metrics is False

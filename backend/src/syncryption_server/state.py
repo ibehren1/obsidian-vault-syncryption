@@ -12,6 +12,7 @@ from syncryption_server.config import Settings
 from syncryption_server.db import Database
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import ApiError, maintenance
+from syncryption_server.metrics import Metrics
 from syncryption_server.storage import BlobStore
 
 
@@ -157,6 +158,7 @@ class AppState:
     store: BlobStore
     clock: Callable[[], float] = time.time
     notifier: Notifier = field(default_factory=Notifier)
+    metrics: Metrics = field(default_factory=Metrics)
     limiter: RateLimiter = field(init=False)
     # A copy of the `maintenance` row, so requests don't query it. Only the admin changes it.
     maintenance: Maintenance | None = None

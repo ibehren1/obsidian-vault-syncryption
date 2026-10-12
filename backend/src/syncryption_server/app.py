@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from prometheus_client import CONTENT_TYPE_PLAIN_0_0_4
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from syncryption_server import (
@@ -21,6 +22,7 @@ from syncryption_server import (
     blobs,
     devices,
     locks,
+    metrics,
     retention,
     sync,
     vaults,
@@ -174,20 +176,27 @@ def make_blob_store(settings: Settings) -> BlobStore:
 
 
 async def _gc_loop(state: AppState) -> None:
+    m = state.metrics
     while True:
         await asyncio.sleep(GC_INTERVAL)
+        m.gc_runs.labels("retention").inc()
         try:
             pruned = await retention.prune(state)
+            m.pruned.inc(pruned)
             if pruned:
                 log.info("retention pruned %d old revisions", pruned)
         except Exception:
+            m.gc_failures.labels("retention").inc()
             log.exception("history retention failed")
+        m.gc_runs.labels("blobs").inc()
         try:
             # Blobs a prune freed are usually older than GC_GRACE, so they go in this pass.
             deleted = await blobs.collect_garbage(state)
+            m.gc_deleted.inc(deleted)
             if deleted:
                 log.info("garbage collection deleted %d unreferenced blobs", deleted)
         except Exception:
+            m.gc_failures.labels("blobs").inc()
             log.exception("blob garbage collection failed")
 
 
@@ -198,6 +207,7 @@ def create_app(
 ) -> FastAPI:
     """Build the app. With no arguments, settings come from the environment."""
     settings = settings or load_settings()
+    app_metrics = metrics.Metrics()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -211,7 +221,7 @@ def create_app(
             raise
         blob_store = store or make_blob_store(settings)
         await blob_store.start()
-        state = AppState(settings=settings, db=db, store=blob_store)
+        state = AppState(settings=settings, db=db, store=blob_store, metrics=app_metrics)
         state.maintenance = await db.run(lambda: load_maintenance(db))
         if clock is not None:
             state.clock = clock
@@ -247,6 +257,10 @@ def create_app(
         response.headers[PROTOCOL_HEADER] = str(PROTOCOL_VERSION)
         return response
 
+    if not settings.disable_metrics:
+        # Added last, so it is outermost and counts the maintenance 503 and the 413 too.
+        app.add_middleware(metrics.RequestMetrics, metrics=app_metrics)
+
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
         """`200` with `{status, version, protocol, maintenance, adminContact}` once the
@@ -254,6 +268,22 @@ def create_app(
         Needs no token, and stays `200` during maintenance, which only pauses `/api/v1`."""
         body, status = await health_report(request.app.state.ctx)
         return JSONResponse(body, status_code=status)
+
+    if not settings.disable_metrics:
+
+        @app.get(
+            "/metrics",
+            response_class=Response,
+            responses={200: {"content": {CONTENT_TYPE_PLAIN_0_0_4: {}}}},
+        )
+        async def prometheus(request: Request) -> Response:
+            """Prometheus metrics in the text exposition format. Needs no token. Only counts:
+            requests by route template and status, users, vaults, keys by status, files,
+            revisions, blobs and their bytes, active locks, open long-polls, cleanup runs,
+            wrong shared secrets and admin tokens, and process metrics. No label names a
+            user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`)."""
+            body = await metrics.render(request.app.state.ctx)
+            return Response(body, media_type=CONTENT_TYPE_PLAIN_0_0_4)
 
     def add_icon_route(path: str, media_type: str) -> None:
         file = STATIC_DIR / path.lstrip("/")

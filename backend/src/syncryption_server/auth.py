@@ -236,6 +236,7 @@ def _secret_ok(state: AppState, ip: str, secret: str | None) -> bool:
     expected = state.settings.shared_secret.encode()
     if hmac.compare_digest(secret.encode(), expected):
         return True
+    state.metrics.shared_secret_failures.inc()
     with state.db.transaction() as db:
         db.execute("INSERT INTO join_attempts (ip, at) VALUES (?, ?)", (ip, now))
     if everyone + 1 >= total:

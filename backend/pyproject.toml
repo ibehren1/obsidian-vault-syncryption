@@ -1,6 +1,6 @@
 [project]
 name = "syncryption-server"
-version = "0.1.12"
+version = "0.1.14"
 description = "Vault Syncryption sync server: stores and relays end-to-end encrypted Obsidian vault data"
 readme = "README.md"
 authors = [
@@ -11,6 +11,7 @@ dependencies = [
     "aioboto3>=15.5.0",
     "cryptography>=50.0.2",
     "fastapi>=0.142.2",
+    "prometheus-client>=0.26.0",
     "uvicorn[standard]>=0.54.0",
 ]
 

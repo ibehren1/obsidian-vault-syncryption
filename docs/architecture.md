@@ -44,13 +44,14 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 
 | Module | Responsibility |
 |---|---|
-| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, the HTML `/` page, the icons `/` and `/admin` link (`static/`), version headers, the maintenance `503` for `/api/v1` |
-| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors) |
+| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, `/metrics` (unless `DISABLE_METRICS`), the HTML `/` page, the icons `/` and `/admin` link (`static/`), version headers, the maintenance `503` for `/api/v1` |
+| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors), `DISABLE_METRICS` |
 | `db` | SQLite connection (WAL mode), schema migrations (`PRAGMA user_version`), `BEGIN IMMEDIATE` transaction helper |
 | `errors` | `ApiError` and the handlers that turn every error into the protocol's `{error, message, details}` shape |
 | `encoding` | `b64u`, RFC 3339 times, id formats |
 | `sshkeys` | devices' encryption keys (Ed25519 public keys in OpenSSH format): parsing, fingerprints, pairing codes, sshsig verification |
-| `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag |
+| `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag, metrics |
+| `metrics` | Prometheus collectors in a per-app registry, the request middleware (labels by route template), the `/metrics` rendering, which counts users, vaults, keys, files, revisions, blobs and locks in SQLite at each scrape, and the container's memory and CPU read from its own cgroup v2 files |
 | `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens (5 minutes for a remote-only device, so each login renews its lease), the grace period sent at login, refusing locked devices and keeping remote-only devices out of the vault's management calls |
 | `devices` | the vault's keys (devices): list, approval (with the remote-only flag), removal, policy changes, locking and unlocking remote-only devices, `/devices/self` |
 | `vaults` | open/create the key's vault by name, keyring versions, recovery |

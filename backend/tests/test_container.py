@@ -89,6 +89,15 @@ def test_home_page():
     assert "Vault Syncryption server" in r.text and "Status: ok" in r.text
 
 
+def test_metrics():
+    r = Client(URL).get("/metrics")
+    assert r.status_code == 200
+    # Linux has /proc, so the process metrics are there in the container.
+    assert "syncryption_build_info" in r.text and "process_resident_memory_bytes" in r.text
+    # Docker's private cgroup namespace (cgroup v2) shows the container's own cgroup.
+    assert "syncryption_container_memory_bytes" in r.text
+
+
 def test_maintenance():
     if not ADMIN_TOKEN:
         return
@@ -130,6 +139,7 @@ if __name__ == "__main__":
     for check in (
         test_health,
         test_home_page,
+        test_metrics,
         test_maintenance,
         test_join_create_upload_and_commit,
     ):

@@ -77,6 +77,10 @@ services:
       # TRUE or FALSE. TRUE copies the files already in ./data to the bucket on startup
       # (needs the S3 variables). Set it back to FALSE once the migration has finished.
       MIGRATE_TO_S3: "FALSE"
+
+      # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
+      # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
+      DISABLE_METRICS: "FALSE"
 ```
 
 | Variable | Required | Meaning |
@@ -89,6 +93,7 @@ services:
 | `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | all three or none | store data in S3 instead of `./data`. Leave them empty to use local storage. |
 | `S3_ENDPOINT` | no | the provider's S3 endpoint, e.g. `https://s3.us-west-004.backblazeb2.com`, `https://<account>.r2.cloudflarestorage.com` or `http://minio:9000`. Empty means AWS. |
 | `MIGRATE_TO_S3` | no | `TRUE` copies existing local data to S3 on startup (section 7) |
+| `DISABLE_METRICS` | no | `TRUE` turns off the public Prometheus endpoint `/metrics` (section 5.1). Default `FALSE`. |
 
 **Storage:** with the `S3_*` variables empty (the default), file contents are stored in
 `./data/blobs` on the host and nothing else needs to be set up. Setting the three `S3_*`
@@ -102,8 +107,9 @@ token with `openssl rand -hex 32`.
 The container refuses to start, with a message saying why, if `URL` is missing when
 `BEHIND_PROXY=FALSE`, if `SHARED_SECRET` is empty, if `ADMIN_TOKEN` is
 missing or shorter than 32 characters, if only some of the `S3_*`
-variables are set, if `S3_ENDPOINT` is set without them, or if `MIGRATE_TO_S3=TRUE`
-without S3.
+variables are set, if `S3_ENDPOINT` is set without them, if `MIGRATE_TO_S3=TRUE`
+without S3, or if `BEHIND_PROXY`, `MIGRATE_TO_S3` or `DISABLE_METRICS` is neither `TRUE` nor
+`FALSE`.
 
 ## 3. Start
 ```
@@ -216,6 +222,55 @@ The message is optional: `maintenance/on` also works without a body. `graceSecon
 3600 to 31536000, or `null` for the default. `GET /admin/api/status` returns the version,
 maintenance state and `adminContact`. The API is
 described in [protocol.md](protocol.md), sections 2 and 14.
+
+### 5.1 Metrics
+`https://notes.example.com/metrics` serves Prometheus metrics. It needs no token, so anyone
+who can reach the server can read it, but it holds only counts: no label names a user,
+vault, device or file. Set `DISABLE_METRICS: "TRUE"` to turn it off (it then answers 404).
+Behind your own proxy (`BEHIND_PROXY=TRUE`) you can also keep `/metrics` off the internet
+there and scrape port 8080 directly.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `syncryption_build_info{version,protocol}` | gauge | always 1; the server and protocol version |
+| `syncryption_http_requests_total{method,route,status}` | counter | requests, by route template (e.g. `/api/v1/vaults/{vault_id}/changes`; `unmatched` for unknown paths and for requests answered before routing, such as the maintenance 503) |
+| `syncryption_http_request_duration_seconds{method,route}` | histogram | request duration; `/api/v1/vaults/{vault_id}/wait` long-polls take up to their timeout |
+| `syncryption_users`, `syncryption_vaults` | gauge | users and vaults |
+| `syncryption_devices{status}` | gauge | encryption keys that are `pending`, `active` or `revoked` |
+| `syncryption_files`, `syncryption_revisions` | gauge | files and kept revisions |
+| `syncryption_blobs`, `syncryption_blob_bytes` | gauge | stored encrypted blobs and their total size |
+| `syncryption_locks_active` | gauge | soft locks that haven't expired |
+| `syncryption_longpoll_waiters` | gauge | open long-polls (roughly, devices online) |
+| `syncryption_maintenance` | gauge | 1 while maintenance mode is on |
+| `syncryption_gc_runs_total{task}`, `syncryption_gc_failures_total{task}` | counter | hourly cleanup runs and failures (`retention`, `blobs`) |
+| `syncryption_retention_pruned_revisions_total`, `syncryption_gc_deleted_blobs_total` | counter | revisions and blobs the cleanup deleted |
+| `syncryption_shared_secret_failures_total`, `syncryption_admin_token_failures_total` | counter | wrong shared secrets and admin tokens |
+| `syncryption_container_memory_bytes`, `syncryption_container_memory_working_set_bytes` | gauge | memory of the whole container (server, Caddy, Litestream), with and without inactive page cache; the working set is what `docker stats` shows |
+| `syncryption_container_memory_limit_bytes` | gauge | the container's memory limit, only when it has one |
+| `syncryption_container_cpu_seconds_total` | counter | CPU time of the whole container |
+| `process_*`, `python_*` | | the Python server process only: CPU, memory, open files, Python GC |
+
+The `syncryption_container_*` metrics come from the container's own cgroup, so they need
+no host access: they are there on Linux hosts with cgroup v2 when Docker gives the
+container its own cgroup namespace (the default with cgroup v2), and absent otherwise.
+For every container on the host, or the host itself, run cAdvisor or node_exporter on
+the host. Counters start at zero when the container restarts. A Prometheus scrape job:
+```yaml
+scrape_configs:
+  - job_name: vault-syncryption
+    scheme: https
+    static_configs:
+      - targets: ["notes.example.com"]
+```
+
+A Grafana dashboard for these metrics is in
+[`backend/dashboard/vault-syncryption.json`](../backend/dashboard/vault-syncryption.json).
+In Grafana, open Dashboards, New, Import, upload the file and pick your Prometheus data
+source. It has an overview (scrape, version, maintenance, uptime, users, vaults, keys,
+storage), request rate, status codes, server errors and latency (without the long-polls),
+storage and cleanup, wrong secrets and tokens, the whole container's CPU and memory, and
+the server process's CPU, memory and open files. The Job and Instance variables at the top choose the server when Prometheus scrapes
+more than one.
 
 ## 6. Data and backups
 | Path | Contents |
