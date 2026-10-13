@@ -47,7 +47,7 @@ See [docs/self-hosting.md](docs/self-hosting.md) to get it running.
 
 ## Install the plugin
 - **Community plugins:** Vault Syncryption is published in Obsidian's community plugins. Search for "Vault Syncryption" in Settings → Community plugins, then install and enable it.
-- **By hand:** download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/ibehren1/obsidian-vault-syncryption/releases/latest) into `<vault>/.obsidian/plugins/vault-syncryption/`.
+- **By hand:** download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/ibehren1/obsidian-vault-syncryption/releases/latest) into `<vault>/.obsidian/plugins/vault-syncryption/`. Each file has a GitHub build provenance attestation, so you can check that it was built from this repository: `gh attestation verify main.js --repo ibehren1/obsidian-vault-syncryption`.
 
 ### Betas
 Beta versions are published to [ibehren1/obsidian-vault-syncryption-beta](https://github.com/ibehren1/obsidian-vault-syncryption-beta). To try one, install [BRAT](https://github.com/TfTHacker/obsidian42-brat) and add the beta plugin `ibehren1/obsidian-vault-syncryption-beta`. This works on desktop and mobile.
@@ -75,6 +75,8 @@ The shared secret keeps strangers from creating accounts on your server. It does
 - File contents, file paths and the vault key are encrypted on your device before upload. The server sees ciphertext plus some metadata: usernames, vault names and device names, file counts, sizes and timestamps (the full list is in [docs/crypto.md](docs/crypto.md), section 1).
 - Your private encryption key stays in Obsidian's secret storage on each device. It is never written to the plugin's `data.json` or sent to the server and you don't need to back it up.  Create a recovery key and put that in your favorite password manager as your last resort to access a vault.
 - An account on the server is needed. It is created when you create your first vault, with the shared secret from the server's administrator.
+- The plugin lists every file in the vault (`vault.getFiles()`) and reads the config folder through `app.vault.adapter`, because it syncs the whole vault. Paths and contents are only encrypted and uploaded; nothing else is done with them.
+- The plugin only writes to the clipboard, when you press a copy button for your public key or the recovery key. It never reads the clipboard.
 
 ## How it reads your vault
 The plugin syncs the whole vault in place, including the config folder (`.obsidian`, or whichever folder you set): settings, themes and other plugins. The Vault API doesn't cover the config folder, so the plugin uses `app.vault.adapter` for those files. Its own folder and `workspace*.json` are never synced, and each device can exclude more paths in the settings. This plugin and server are the simplest way to securely sync your vault and own you data. The entire experience is intended to be simple and secure!

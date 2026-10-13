@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isConfigFolder, parseExcludes, pathFilter } from "../src/sync/filter";
+import { parseExcludes, pathFilter } from "../src/sync/filter";
 
 describe("pathFilter", () => {
 	it("syncs notes and attachments", () => {
@@ -45,11 +45,9 @@ describe("pathFilter", () => {
 		expect(include(".config/plugins/vault-syncryption/data.json")).toBe(false);
 		expect(include(".config/plugins/other/data.json")).toBe(true);
 		expect(include(".config/themes/x/workspace.json")).toBe(true);
-		// Profiles for other devices.
-		expect(include(".obsidian/app.json")).toBe(true);
-		expect(include(".obsidian-mobile/hotkeys.json")).toBe(true);
-		expect(include(".obsidian-mobile/workspace-mobile.json")).toBe(false);
-		expect(include(".obsidian-mobile/plugins/vault-syncryption/main.js")).toBe(false);
+		// Other config folders are hidden folders like any other.
+		expect(include(".obsidian/app.json")).toBe(false);
+		expect(include(".obsidian-mobile/hotkeys.json")).toBe(false);
 	});
 
 	it("uses the plugin's folder name", () => {
@@ -85,13 +83,5 @@ describe("pathFilter", () => {
 		expect(include.skipsFolder(".obsidian/plugins/x/node_modules")).toBe(true);
 		expect(include.skipsFolder("Private")).toBe(true);
 		expect(include.skipsFolder("a/.git")).toBe(true);
-	});
-
-	it("knows the config folders", () => {
-		expect(isConfigFolder(".obsidian", ".obsidian")).toBe(true);
-		expect(isConfigFolder(".obsidian-phone", ".config")).toBe(true);
-		expect(isConfigFolder(".config", ".config")).toBe(true);
-		expect(isConfigFolder(".git", ".obsidian")).toBe(false);
-		expect(isConfigFolder("obsidian", ".obsidian")).toBe(false);
 	});
 });

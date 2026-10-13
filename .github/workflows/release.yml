@@ -1,6 +1,7 @@
 # Runs on the public GitHub repo only (Gitea uses .gitea/workflows). When main carries a
 # plugin version that has no release yet, build the plugin and publish the release that
-# Obsidian and BRAT install from: tag = version, with main.js, manifest.json and styles.css.
+# Obsidian and BRAT install from: tag = version, with main.js, manifest.json and styles.css,
+# each with a GitHub build provenance attestation (`gh attestation verify`).
 name: Release
 
 on:
@@ -10,6 +11,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -45,6 +48,14 @@ jobs:
           npm ci
           npm run lint
           npm run build
+      - name: Attest the build provenance
+        if: steps.version.outputs.new == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            plugin/main.js
+            plugin/manifest.json
+            plugin/styles.css
       - name: Publish the release
         if: steps.version.outputs.new == 'true'
         run: |

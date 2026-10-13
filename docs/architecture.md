@@ -14,7 +14,7 @@ flowchart LR
         engine["sync engine"]
         crypto["crypto (age, XChaCha)"]
         idb[("IndexedDB state")]
-        adapter["Vault API (notes) and<br/>vault.adapter (.obsidian*)"]
+        adapter["Vault API (notes) and<br/>vault.adapter (configDir)"]
         secret[("SecretStorage (encryption key)")]
         plugin --- ui & engine
         engine --- crypto & idb & adapter
@@ -383,11 +383,9 @@ flowchart TD
   `name (conflict <device> YYYY-MM-DD HHmm).ext`, with ` 2`, ` 3`... for more copies in
   the same minute. Binary files always get a conflict copy.
 - **Files on disk:** notes and attachments go through the Vault API (`ObsidianFs`), so
-  Obsidian's index stays current. Obsidian doesn't index hidden folders, so every
-  `.obsidian*` folder at the vault root (the active `configDir` and the profiles of other
-  devices) is listed, read and written through `vault.adapter` (`AdapterFs`). If an
-  adapter can't list the vault root, only the active `configDir` is synced. Other hidden
-  files and folders aren't synced.
+  Obsidian's index stays current. Obsidian doesn't index hidden folders, so `configDir` is
+  listed, read and written through `vault.adapter` (`AdapterFs`). Other hidden files and
+  folders, including other config folders, aren't synced.
 - **Config files:** a pull holds back the active `configDir/community-plugins.json` and
   writes it after everything else, so plugins are on disk before Obsidian turns them on.
   The held-back revisions are saved in `meta.deferred` before the cursor moves past them.
@@ -460,17 +458,19 @@ flowchart TD
 - The whole vault is synced in place, including `app.vault.configDir`. It is not a nested
   vault.
 - Notes and attachments go through the Vault API, so Obsidian's index stays current. The
-  hidden `.obsidian*` folders go through `app.vault.adapter`. Both work on desktop and on
+  hidden `configDir` goes through `app.vault.adapter`. Both work on desktop and on
   mobile.
-- Every `.obsidian*` folder at the vault root is synced, so a device can use its own
-  profile through Obsidian's "Override config folder" setting.
+- Only the active `app.vault.configDir` is synced. A device that sets another config
+  folder through Obsidian's "Override config folder" setting syncs only that folder, so
+  its settings stay apart from those of devices using a different one.
 - Never synced (`sync/filter.ts`):
-  - the plugin's own folder, `plugins/vault-syncryption` in every config folder
+  - the plugin's own folder, `plugins/vault-syncryption` in the config folder
   - `workspace.json`, `workspace-mobile.json` and `workspaces.json` at the top of a config
     folder
   - `.trash`, `.git` and `node_modules` folders, and `.DS_Store`, `Thumbs.db` and
     `desktop.ini` files, at any depth
-  - hidden files and folders outside the `.obsidian*` folders (Obsidian doesn't index them)
+  - hidden files and folders outside `configDir`, including other config folders (Obsidian
+    doesn't index them)
   - the paths matched by the device's exclude list (section 4.3)
   - paths that `normPath` rejects ([crypto.md](crypto.md) section 5.2), such as a name
     with `\` on Linux or macOS. Every write and deletion checks the path again.

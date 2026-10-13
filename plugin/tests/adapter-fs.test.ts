@@ -8,7 +8,6 @@ import { MemoryFs } from "../src/sync/fs";
 class FakeAdapter implements Adapter {
 	readonly files = new Map<string, { data: Uint8Array; mtime: number; ctime: number }>();
 	readonly folders = new Set<string>();
-	rootListing = true;
 
 	put(path: string, text: string, mtime = 1000): void {
 		const parts = path.split("/");
@@ -26,7 +25,6 @@ class FakeAdapter implements Adapter {
 	}
 
 	async list(path: string) {
-		if (path === "/" && !this.rootListing) throw new Error("can't list the root");
 		return this.children(path);
 	}
 	async stat(path: string) {
@@ -70,12 +68,11 @@ function vault(): FakeAdapter {
 }
 
 describe("AdapterFs", () => {
-	it("lists every config folder and skips excluded folders", async () => {
+	it("lists the config folder only and skips excluded folders", async () => {
 		const include = pathFilter({ configDir: ".obsidian" });
 		const fs = new AdapterFs(vault(), { configDir: ".obsidian", skipsFolder: include.skipsFolder });
 		const files = await fs.list();
 		expect(files.map((f) => f.path).sort()).toEqual([
-			".obsidian-mobile/hotkeys.json",
 			".obsidian/app.json",
 			".obsidian/plugins/dataview/main.js",
 		]);
@@ -85,15 +82,6 @@ describe("AdapterFs", () => {
 			ctime: 5000,
 			size: 2,
 		});
-	});
-
-	it("falls back to the active config folder if the root can't be listed", async () => {
-		const adapter = vault();
-		adapter.rootListing = false;
-		const fs = new AdapterFs(adapter, { configDir: ".obsidian" });
-		const paths = (await fs.list()).map((f) => f.path);
-		expect(paths).toContain(".obsidian/app.json");
-		expect(paths.some((p) => p.startsWith(".obsidian-mobile/"))).toBe(false);
 	});
 
 	it("writes with times, creating folders, and removes files", async () => {

@@ -8,7 +8,7 @@ const EXCLUDED_FILES = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
 const WORKSPACE_FILES = new Set(["workspace.json", "workspace-mobile.json", "workspaces.json"]);
 
 export interface FilterOptions {
-	/** `app.vault.configDir`, usually `.obsidian`. */
+	/** `app.vault.configDir`: the only hidden folder that is synced. */
 	configDir: string;
 	/** The name of this plugin's folder under `plugins/`. */
 	pluginFolder?: string;
@@ -21,14 +21,6 @@ export interface PathFilter {
 	(path: string): boolean;
 	/** True for folders whose whole content is excluded, so a scan can skip them. */
 	skipsFolder(folder: string): boolean;
-}
-
-/**
- * A config folder: the active one or any `.obsidian*` profile, so each device can pick its
- * own through Obsidian's "Override config folder" setting.
- */
-export function isConfigFolder(name: string, configDir: string): boolean {
-	return name === configDir || name.startsWith(".obsidian");
 }
 
 /** The exclude list from the settings: one pattern per line, blank lines and `#` comments ignored. */
@@ -72,7 +64,7 @@ export function pathFilter(opts: FilterOptions): PathFilter {
 		if (segments.some((s) => EXCLUDED_FOLDERS.has(s))) return true;
 		const [top, second, third] = segments;
 		if (top === undefined) return false;
-		if (isConfigFolder(top, opts.configDir)) {
+		if (top === opts.configDir) {
 			// Never this plugin's own folder: its settings and code are per device.
 			return second === "plugins" && third === pluginFolder;
 		}
@@ -86,7 +78,7 @@ export function pathFilter(opts: FilterOptions): PathFilter {
 		const segments = path.split("/");
 		const name = segments.pop()!;
 		if (folderExcluded(segments) || EXCLUDED_FILES.has(name)) return false;
-		const inConfig = segments.length > 0 && isConfigFolder(segments[0]!, opts.configDir);
+		const inConfig = segments.length > 0 && segments[0] === opts.configDir;
 		if (name.startsWith(".") && !inConfig) return false;
 		if (inConfig && segments.length === 1 && WORKSPACE_FILES.has(name)) return false;
 		return !userExcluded(path);

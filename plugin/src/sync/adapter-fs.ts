@@ -1,9 +1,8 @@
 /**
- * The config folders, read and written through `app.vault.adapter` (docs/architecture.md
+ * The config folder, read and written through `app.vault.adapter` (docs/architecture.md
  * 4.4): Obsidian doesn't index hidden folders, so the Vault API can't see them.
  */
 import { normPath } from "../crypto/kdf";
-import { isConfigFolder } from "./filter";
 import { sha256Hex } from "./cipher";
 import { hashFile, writeChunked, type FileStat, type ListedFile, type VaultFs } from "./fs";
 
@@ -19,7 +18,7 @@ export interface Adapter {
 }
 
 export interface AdapterFsOptions {
-	/** `app.vault.configDir`. Listed even if the vault root can't be. */
+	/** `app.vault.configDir`, the folder that is listed. */
 	configDir: string;
 	/** Folders a scan doesn't descend into, such as `node_modules`. */
 	skipsFolder?: (folder: string) => boolean;
@@ -29,7 +28,7 @@ function buffer(data: Uint8Array): ArrayBuffer {
 	return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 }
 
-/** Adapters may return paths with a leading `/` when listing the root. */
+/** Adapters may return paths with a leading `/`. */
 function clean(path: string): string {
 	return path.replace(/^\/+/, "");
 }
@@ -40,10 +39,10 @@ export class AdapterFs implements VaultFs {
 		private readonly opts: AdapterFsOptions,
 	) {}
 
-	/** Every file in every config folder at the vault root. */
+	/** Every file in the config folder. */
 	async list(): Promise<ListedFile[]> {
 		const out: ListedFile[] = [];
-		for (const folder of await this.configFolders()) await this.walk(folder, out);
+		if (await this.adapter.exists(this.opts.configDir)) await this.walk(this.opts.configDir, out);
 		return out;
 	}
 
@@ -64,20 +63,6 @@ export class AdapterFs implements VaultFs {
 
 	async remove(path: string): Promise<void> {
 		if (await this.stat(path)) await this.adapter.remove(path);
-	}
-
-	private async configFolders(): Promise<string[]> {
-		const folders = new Set<string>();
-		try {
-			for (const f of (await this.adapter.list("/")).folders) {
-				const name = clean(f);
-				if (isConfigFolder(name, this.opts.configDir)) folders.add(name);
-			}
-		} catch {
-			// Some adapters can't list the root: sync the active config folder only.
-		}
-		if (await this.adapter.exists(this.opts.configDir)) folders.add(this.opts.configDir);
-		return [...folders].sort();
 	}
 
 	private async walk(folder: string, out: ListedFile[]): Promise<void> {

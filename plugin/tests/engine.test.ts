@@ -328,7 +328,7 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		expect(b.fs.text(".obsidian/app.json")).toBe('{"vimMode":true}');
 		expect(b.fs.text(".obsidian/hotkeys.json")).toBe('{"editor:toggle-bold":[]}');
 		expect(b.fs.text(".obsidian/themes/Minimal/theme.css")).toBe("body {}");
-		expect(b.fs.text(".obsidian-phone/app.json")).toBe('{"phone":true}');
+		expect(b.fs.files.has(".obsidian-phone/app.json")).toBe(false);
 		expect(b.fs.text(".obsidian/workspace.json")).toBe('{"phone":true}');
 		expect(b.fs.files.has(".obsidian/plugins/vault-syncryption/data.json")).toBe(false);
 		expect(await b.store.getMeta(DEFERRED)).toEqual([]);
