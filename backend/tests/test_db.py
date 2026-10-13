@@ -68,7 +68,7 @@ def test_data_survives_a_restart(settings, clock):
 
 
 def test_check_data_command(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("SHARED_SECRET", "x")
+    monkeypatch.setenv("SHARED_SECRET", "x" * 16)
     monkeypatch.setenv("ADMIN_TOKEN", "a" * 32)
     monkeypatch.setenv("BEHIND_PROXY", "TRUE")
     monkeypatch.setenv("SYNCRYPTION_DATA_DIR", str(tmp_path))
@@ -91,6 +91,8 @@ def schema_5_database(path) -> None:
     db.conn.execute("ALTER TABLE devices DROP COLUMN remote_only")
     db.conn.execute("ALTER TABLE devices DROP COLUMN locked")
     db.conn.execute("ALTER TABLE vaults DROP COLUMN remote_only_grace")
+    db.conn.execute("ALTER TABLE vaults DROP COLUMN blob_bytes")
+    db.conn.execute("ALTER TABLE vaults DROP COLUMN blob_quota")
     db.conn.execute("DROP INDEX revisions_file_epoch")
     db.conn.execute("ALTER TABLE revisions DROP COLUMN epoch")
     db.conn.execute("PRAGMA foreign_keys = OFF")
@@ -101,15 +103,17 @@ def schema_5_database(path) -> None:
             "device_id, created_at) VALUES ('v', ?, 'f', NULL, 0, ?, 1, 'd', 0)",
             (rev, meta),
         )
+    db.conn.execute("INSERT INTO vaults (id, user_id, name, created_at) VALUES ('v', 'u', 'V', 0)")
+    db.conn.execute("INSERT INTO blobs VALUES ('v', 'a', 100, 0), ('v', 'b', 23, 0)")
     db.conn.execute("PRAGMA user_version = 5")
     db.close()
 
 
-def test_schema_5_migrates_to_8_with_epochs_and_remote_only(tmp_path):
+def test_schema_5_migrates_to_9_with_epochs_remote_only_and_quotas(tmp_path):
     schema_5_database(tmp_path / "meta.db")
     db = Database(tmp_path / "meta.db")
     db.migrate()
-    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 8
+    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 9
     assert BASE_VERSION + len(MIGRATIONS) == SCHEMA_VERSION
     epochs = [r[0] for r in db.all("SELECT epoch FROM revisions ORDER BY rev")]
     assert epochs == [1, 3, 65536, 1]  # a header that can't be read keeps the default
@@ -117,6 +121,8 @@ def test_schema_5_migrates_to_8_with_epochs_and_remote_only(tmp_path):
     assert "revisions_file_epoch" in indexes
     assert {"remote_only", "locked"} <= {r[1] for r in db.all("PRAGMA table_info(devices)")}
     assert "remote_only_grace" in {r[1] for r in db.all("PRAGMA table_info(vaults)")}
+    # The stored bytes are counted from the blobs; no quota.
+    assert tuple(db.one("SELECT blob_bytes, blob_quota FROM vaults WHERE id = 'v'")) == (123, None)
     db.close()
 
 
@@ -126,7 +132,7 @@ def test_schema_5_data_is_accepted_and_migrated_on_start(settings, clock):
     with TestClient(create_app(settings, clock=clock)):
         pass
     db = Database(settings.db_path)
-    assert db.one("PRAGMA user_version")[0] == 8
+    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION
     db.close()
 
 

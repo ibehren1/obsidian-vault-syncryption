@@ -4,7 +4,10 @@ import { complianceReport, duration, type ComplianceFacts } from "../src/remote/
 import { RemoteStatFs } from "../src/remote/stat-fs";
 import { MemoryEntryStore, StubAdapter, type WrappedAdapter } from "../src/remote/stub-adapter";
 import { MemoryFs, type FileStat, type ListedFile, type VaultFs } from "../src/sync/fs";
+import { DeviceMismatchError } from "../src/api/client";
 import { isLocked } from "../src/api/http";
+import { MemoryStore } from "../src/store/state";
+import { connect } from "../src/sync/session";
 import { FakeDisk } from "./fake-disk";
 import { noBackend, uniqueName } from "./harness";
 import { device, engineFor, pairedDevice } from "./sync-fixture";
@@ -173,6 +176,32 @@ describe.skipIf(noBackend)("remote-only approval", () => {
 			status: 403,
 			code: "remote_only",
 		});
+	});
+
+	it("follows its own keyring entry, not the device id the server returns", async () => {
+		const username = uniqueName("swapid");
+		const vaultName = uniqueName("Vault ");
+		const a = await device(username, vaultName, "Laptop");
+		const b = await pairedDevice(a, username, vaultName, "Phone", undefined, { remoteOnly: true });
+		const api = a.session.api;
+		const own = api.deviceId;
+		// A server that names the full device with the remote-only device's id.
+		api.deviceId = b.session.deviceId;
+		await expect(api.login()).rejects.toBeInstanceOf(DeviceMismatchError);
+		await expect(a.session.refreshKeyring()).rejects.toBeInstanceOf(DeviceMismatchError);
+		expect(() => a.session.remoteOnly).toThrow(DeviceMismatchError);
+		const again = connect({
+			api,
+			deviceName: "Laptop",
+			seed: (a.session as unknown as { seed: Uint8Array }).seed,
+			openStore: async () => new MemoryStore(),
+			callbacks: { askSharedSecret: async () => null, showPairing: () => {} },
+		});
+		await expect(again).rejects.toBeInstanceOf(DeviceMismatchError);
+
+		api.deviceId = own;
+		await a.session.refreshKeyring();
+		expect(a.session.remoteOnly).toBe(false);
 	});
 });
 

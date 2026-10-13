@@ -138,6 +138,29 @@ def test_pairing_flow(client, alice):
     assert phone.get(f"/api/v1/vaults/{vault_id}/keyring").json()["version"] == 2
 
 
+def test_a_pending_device_sees_only_the_vaults_id_and_name(client, alice):
+    vault_id = alice.vault_id
+    assert alice.put(f"/api/v1/vaults/{vault_id}/keyring", json=alice.keyring(2)).status_code == 201
+    active = alice.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["vault"]
+    assert active["keyringVersion"] == 2
+    assert active["createdAt"] != "1970-01-01T00:00:00Z"
+
+    phone = Device(client, "alice", name="Pixel")
+    phone.login()
+    r = phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()
+    assert r["vault"] == {
+        "id": vault_id,
+        "name": "Personal",
+        "keyringVersion": 0,
+        "seq": 0,
+        "createdAt": "1970-01-01T00:00:00Z",
+    }
+    assert (r["status"], r["membership"]) == ("pending", "pending")
+
+    alice.post(f"/api/v1/vaults/{vault_id}/devices/{phone.device_id}/approve")
+    assert phone.post("/api/v1/vaults/open", json={"name": "Personal"}).json()["vault"] == active
+
+
 def test_other_users_cannot_see_a_vault(client, alice):
     bob = creator(client, "Personal", "bob")
     bob.create_vault()

@@ -80,6 +80,27 @@ def too_large(message: str) -> ApiError:
     return ApiError(413, "too_large", message)
 
 
+def storage_full() -> ApiError:
+    """The data volume is nearly full (protocol.md 12)."""
+    return ApiError(
+        507,
+        "storage_full",
+        "The server is out of storage space, so it can't take new data. "
+        "Ask the server administrator to free some.",
+    )
+
+
+def quota_exceeded(quota: int, used: int) -> ApiError:
+    """The vault's stored blobs would pass the quota the admin set (protocol.md 12)."""
+    return ApiError(
+        507,
+        "quota_exceeded",
+        "This vault has reached its storage quota. Delete files (space is freed once old "
+        "versions expire) or ask the server administrator for a larger quota.",
+        {"quota": quota, "used": used},
+    )
+
+
 def error_response(err: ApiError) -> JSONResponse:
     body = {"error": err.error, "message": err.message, "details": err.details}
     return JSONResponse(body, status_code=err.status, headers=err.headers)

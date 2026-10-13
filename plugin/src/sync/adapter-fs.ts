@@ -2,6 +2,7 @@
  * The config folders, read and written through `app.vault.adapter` (docs/architecture.md
  * 4.4): Obsidian doesn't index hidden folders, so the Vault API can't see them.
  */
+import { normPath } from "../crypto/kdf";
 import { isConfigFolder } from "./filter";
 import { sha256Hex } from "./cipher";
 import { hashFile, writeChunked, type FileStat, type ListedFile, type VaultFs } from "./fs";
@@ -101,7 +102,10 @@ export function isHiddenPath(path: string): boolean {
 	return path.split("/").some((s) => s.startsWith("."));
 }
 
-/** Notes and attachments through one `VaultFs`, hidden paths through another. */
+/**
+ * Notes and attachments through one `VaultFs`, hidden paths through another. Writes and
+ * deletions check the path again first (crypto.md 5.2), so none can leave the vault.
+ */
 export class SplitFs implements VaultFs {
 	constructor(
 		private readonly visible: VaultFs,
@@ -122,16 +126,19 @@ export class SplitFs implements VaultFs {
 	read(path: string): Promise<Uint8Array> {
 		return this.fs(path).read(path);
 	}
-	write(path: string, data: Uint8Array, times: { mtime: number; ctime?: number }): Promise<void> {
+	async write(path: string, data: Uint8Array, times: { mtime: number; ctime?: number }): Promise<void> {
+		normPath(path);
 		return this.fs(path).write(path, data, times);
 	}
-	remove(path: string): Promise<void> {
+	async remove(path: string): Promise<void> {
+		normPath(path);
 		return this.fs(path).remove(path);
 	}
 	hash(path: string): Promise<string> {
 		return hashFile(this.fs(path), path, sha256Hex);
 	}
-	writeChunks(path: string, size: number, count: number, chunks: AsyncIterable<Uint8Array>, times: { mtime: number; ctime?: number }): Promise<void> {
+	async writeChunks(path: string, size: number, count: number, chunks: AsyncIterable<Uint8Array>, times: { mtime: number; ctime?: number }): Promise<void> {
+		normPath(path);
 		return writeChunked(this.fs(path), path, size, count, chunks, times);
 	}
 }

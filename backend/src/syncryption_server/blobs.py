@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import shutil
 import sqlite3
 
 from fastapi import APIRouter, Request, Response
@@ -9,7 +10,14 @@ from pydantic import BaseModel, Field
 
 from syncryption_server.auth import ActiveCaller, Caller, State
 from syncryption_server.encoding import BLOB_ID_RE
-from syncryption_server.errors import ApiError, bad_request, not_found, too_large
+from syncryption_server.errors import (
+    ApiError,
+    bad_request,
+    not_found,
+    quota_exceeded,
+    storage_full,
+    too_large,
+)
 from syncryption_server.state import AppState
 from syncryption_server.storage import BlobNotFound, blob_key
 from syncryption_server.vaults import require_member
@@ -17,6 +25,9 @@ from syncryption_server.vaults import require_member
 MAX_BLOB_SIZE = 4 * 1024 * 1024 + 45
 MAX_MISSING_IDS = 1000
 GC_GRACE = 24 * 3600
+# Free space kept on the data volume, where meta.db lives: below it, uploads and commits are
+# refused, so the database never runs out of room (protocol.md 12).
+DISK_RESERVE = 1024**3
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +74,18 @@ async def _read_body(request: Request) -> bytes:
     return bytes(body)
 
 
+def require_disk(state: AppState) -> None:
+    """Raise `507 storage_full` when the data volume has less than DISK_RESERVE free. The
+    volume always holds meta.db, whether blobs go there or to S3."""
+    try:
+        free = shutil.disk_usage(state.settings.data_dir).free
+    except OSError:
+        return
+    if free < DISK_RESERVE:
+        log.warning("data volume has %d bytes free: refusing new data", free)
+        raise storage_full()
+
+
 @router.put(
     "/{blob_id}",
     status_code=201,
@@ -74,7 +97,10 @@ async def put_blob(
     vault_id: str, blob_id: str, request: Request, caller: ActiveCaller, state: State
 ) -> Response | BlobInfo:
     """Upload one encrypted chunk as raw bytes. The server hashes the body and refuses it
-    with `422 hash_mismatch` unless the hash equals `blob_id`."""
+    with `422 hash_mismatch` unless the hash equals `blob_id`. A new blob is refused with
+    `507 storage_full` when the server's data volume is nearly full, and with
+    `507 quota_exceeded` when it would take the vault's stored blobs past the quota the
+    administrator set (protocol.md 12)."""
     vault = await state.db.read(lambda: require_member(state, caller, vault_id))
     _blob_id(blob_id)
     data = await _read_body(request)
@@ -90,11 +116,22 @@ async def put_blob(
 
     def record() -> None:
         with state.db.transaction() as db:
-            db.execute(
+            added = db.execute(
                 "INSERT OR IGNORE INTO blobs (vault_id, blob_id, size, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (vault_id, blob_id, len(data), state.now()),
-            )
+            ).rowcount
+            if added:
+                db.execute(
+                    "UPDATE vaults SET blob_bytes = blob_bytes + ? WHERE id = ?",
+                    (len(data), vault_id),
+                )
+
+    def check_quota() -> None:
+        row = state.db.one("SELECT blob_bytes, blob_quota FROM vaults WHERE id = ?", vault_id)
+        quota = row["blob_quota"]
+        if quota is not None and row["blob_bytes"] + len(data) > quota:
+            raise quota_exceeded(quota, row["blob_bytes"])
 
     async with state.blob_lock(blob_id):
         if await state.db.read(exists):
@@ -103,6 +140,8 @@ async def put_blob(
                 status_code=200,
                 media_type="application/json",
             )
+        require_disk(state)
+        await state.db.read(check_quota)
         # Store first, then record: a blob row always means the bytes are there.
         await state.store.put(blob_key(vault["user_id"], vault_id, blob_id), data)
         await state.db.run(record)
@@ -191,11 +230,18 @@ async def collect_garbage(state: AppState) -> int:
     def forget(row: sqlite3.Row) -> int:
         with state.db.transaction() as db:
             # Re-check: a commit may have referenced the blob since the query.
-            return db.execute(
+            gone = db.execute(
                 "DELETE FROM blobs WHERE vault_id = ? AND blob_id = ? AND NOT EXISTS "
-                "(SELECT 1 FROM revision_blobs r WHERE r.vault_id = ? AND r.blob_id = ?)",
+                "(SELECT 1 FROM revision_blobs r WHERE r.vault_id = ? AND r.blob_id = ?) "
+                "RETURNING size",
                 (row["vault_id"], row["blob_id"], row["vault_id"], row["blob_id"]),
-            ).rowcount
+            ).fetchall()
+            if gone:
+                db.execute(
+                    "UPDATE vaults SET blob_bytes = MAX(blob_bytes - ?, 0) WHERE id = ?",
+                    (gone[0][0], row["vault_id"]),
+                )
+            return len(gone)
 
     deleted = 0
     for row in rows:

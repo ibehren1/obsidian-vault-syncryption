@@ -20,13 +20,21 @@ services:
       #          X-Forwarded-Proto and X-Forwarded-Host. Allow requests of at least 30 s.
       BEHIND_PROXY: "FALSE"
 
+      # Only with BEHIND_PROXY=TRUE: the IP addresses or CIDRs your reverse proxy connects
+      # from, separated by commas, e.g. "172.18.0.5" or "10.0.0.0/8, fd00::/8". Only
+      # requests from these addresses may set X-Forwarded-For, X-Forwarded-Proto and
+      # X-Forwarded-Host; from anywhere else they are ignored, so nobody can fake a client
+      # address by reaching port 8080 directly. Empty means loopback and private ranges
+      # (127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7).
+      TRUSTED_PROXIES: ""
+
       # The public address: scheme and host only, no path, e.g. https://notes.example.com.
       # Required when BEHIND_PROXY=FALSE. Optional when TRUE (the proxy's headers are used).
       URL: "https://notes.example.com"
 
-      # Required. Needed only to create a new user or vault; joining an existing vault
-      # doesn't need it. Give it only to people who may create vaults.
-      # Generate one with: openssl rand -base64 24
+      # Required, at least 16 characters. Needed only to create a new user or vault;
+      # joining an existing vault doesn't need it. Give it only to people who may
+      # create vaults. Generate one with: openssl rand -base64 24
       SHARED_SECRET: ""
 
       # Required, at least 32 characters. Opens /admin (sign in on the page, or send
@@ -63,3 +71,9 @@ services:
       # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
       # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
       DISABLE_METRICS: "FALSE"
+
+      # Optional. The client IP addresses or CIDRs, separated by commas, that may read
+      # /metrics (e.g. your Prometheus: "10.0.0.5"); others get 403. Behind a proxy the
+      # client is the one in X-Forwarded-For from a TRUSTED_PROXIES peer. Empty means
+      # loopback and private ranges only.
+      METRICS_ALLOWED_IPS: ""

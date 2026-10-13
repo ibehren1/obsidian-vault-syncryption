@@ -247,8 +247,11 @@ flowchart LR
 
 ### 5.2 Path normalisation (`normPath`)
 1. Path relative to the vault root, as returned by `app.vault.adapter`.
-2. Separator `/`. No leading or trailing `/`, no empty segments, no `.` or `..` segments.
-   A path that breaks these rules is rejected, not rewritten.
+2. Separator `/`. No leading or trailing `/`, no empty segments, no `.` or `..` segments,
+   no `\` (a separator on Windows, so `..\x` would leave the vault there), no control
+   characters (U+0000 to U+001F and U+007F), and no segment ending in `:` (a Windows
+   drive). A path that breaks these rules is rejected, not rewritten: a local file with
+   such a name isn't synced, and a revision whose metadata has one fails its check.
 3. Unicode NFC.
 4. Case is preserved. Two paths that differ only in case are different files. (On a
    case-insensitive file system the client can't write the second one: it keeps that
@@ -344,6 +347,11 @@ On every keyring fetch the client checks:
   the vault, so it never signs a keyring.
 - a version signed by the recovery signer changes no existing device's `policy` and adds
   only devices without one. So only a full device sets, changes or removes a policy.
+- the keyring has an entry with this device's own public key, and that entry's `id` is
+  the device id the server returned at login. The client finds its own entry (and so its
+  policy) by its public key, never by the server's id, and a login that returns a
+  different id for the same key is refused. So a server can't make a device follow
+  another device's entry.
 
 The client then pins `{version, sha256(keyring.age)}`.
 

@@ -29,6 +29,13 @@ describe("pathFilter", () => {
 		expect(include(".obsidian/plugins/x/.hotreload")).toBe(true);
 	});
 
+	it("skips names no vault path may have", () => {
+		const include = pathFilter({ configDir: ".obsidian" });
+		expect(include("a\\b.md")).toBe(false);
+		expect(include("C:/x.md")).toBe(false);
+		expect(include("a\nb.md")).toBe(false);
+	});
+
 	it("syncs every config folder except workspaces and this plugin", () => {
 		const include = pathFilter({ configDir: ".config" });
 		expect(include(".config/app.json")).toBe(true);

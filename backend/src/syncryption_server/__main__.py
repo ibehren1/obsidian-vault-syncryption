@@ -78,7 +78,8 @@ def litestream_config(settings: Settings) -> str:
 def describe(settings: Settings) -> str:
     """One line for the log. Never includes secrets."""
     if settings.behind_proxy:
-        serving = "HTTP on :8080 behind your proxy"
+        proxies = ", ".join(str(n) for n in settings.trusted_proxies)
+        serving = f"HTTP on :8080 behind your proxy (X-Forwarded-* trusted from {proxies})"
     else:
         serving = f"HTTPS for {urlsplit(settings.url or '').hostname} through Caddy"
     if settings.blob_s3 is None:

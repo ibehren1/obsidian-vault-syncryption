@@ -145,7 +145,9 @@ def _keyring_model(row: sqlite3.Row) -> Keyring:
 
 @router.post("/open")
 async def open_vault(body: OpenRequest, caller: AnyCaller, state: State) -> OpenResponse:
-    """The caller's vault. 404 while the device still has to create it."""
+    """The caller's vault. 404 while the device still has to create it. For a pending device
+    only the vault's id and name are real: `keyringVersion` and `seq` are 0 and `createdAt`
+    is the Unix epoch until it is approved."""
     return await state.db.read(lambda: _open_vault(body, caller, state))
 
 
@@ -156,6 +158,14 @@ def _open_vault(body: OpenRequest, caller: Caller, state: AppState) -> OpenRespo
         raise not_found("No vault with this name.")
     vault = _own_vault(state, caller, caller.vault_id)
     status = caller.status
+    if status == "pending":
+        # A pending device needs only the vault's id and name, to wait for approval or to
+        # recover it (crypto.md 9). Anyone who knows the names can be one, so the vault's
+        # activity (keyring version, revision counter, age) is left out.
+        model = Vault(
+            id=vault["id"], name=vault["name"], keyringVersion=0, seq=0, createdAt=rfc3339(0)
+        )
+        return OpenResponse(vault=model, status=status, membership=status)
     return OpenResponse(vault=vault_model(vault), status=status, membership=status)
 
 

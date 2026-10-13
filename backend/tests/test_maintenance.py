@@ -57,7 +57,7 @@ def test_home_page_without_a_contact(tmp_path):
     from syncryption_server.config import Settings
 
     settings = Settings(shared_secret=SECRET, behind_proxy=True, data_dir=tmp_path)
-    with TestClient(create_app(settings)) as c:
+    with TestClient(create_app(settings), client=("172.18.0.2", 50000)) as c:
         text = c.get("/", headers={"x-forwarded-proto": "https", "host": "sync.lan"}).text
     assert "https://sync.lan" in text
     assert "contact the person who runs this server" in text

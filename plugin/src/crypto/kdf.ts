@@ -11,16 +11,34 @@ const FILE_INFO = utf8("syncryption/v1/file");
 const LOCAL_INFO = utf8("syncryption/v1/local");
 
 /**
- * `normPath` (crypto.md 5.2): relative, `/`-separated, no empty, `.` or `..` segments,
- * Unicode NFC. Case is preserved. Throws on paths that can't be normalised safely.
+ * Characters no vault path contains: `\`, which Windows reads as a separator (so `..\x`
+ * would leave the vault), and control characters.
+ */
+// eslint-disable-next-line no-control-regex -- control characters are what it rejects
+const UNSAFE = /[\\\u0000-\u001f\u007f]/;
+
+/**
+ * `normPath` (crypto.md 5.2): relative, `/`-separated, no empty, `.` or `..` segments, no
+ * `\` or control characters, no segment ending in `:` (a Windows drive), Unicode NFC. Case
+ * is preserved. Throws on paths that can't be normalised safely.
  */
 export function normPath(path: string): string {
 	const nfc = path.normalize("NFC");
 	const segments = nfc.split("/");
-	if (nfc === "" || segments.some((s) => s === "" || s === "." || s === "..")) {
+	if (nfc === "" || UNSAFE.test(nfc) || segments.some((s) => s === "" || s === "." || s === ".." || s.endsWith(":"))) {
 		throw new Error("invalid vault path");
 	}
 	return nfc;
+}
+
+/** Whether `path` can be synced: `normPath` accepts it. */
+export function isVaultPath(path: string): boolean {
+	try {
+		normPath(path);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** `indexKey = HKDF(VDK[1], "", "syncryption/v1/index")`. Derived once at vault creation. */

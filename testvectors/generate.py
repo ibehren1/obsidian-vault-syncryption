@@ -725,6 +725,13 @@ def kdf_vectors() -> dict:
         "Notes/../a.md",
         "..",
         ".",
+        "..\\..\\evil.bat",
+        "Notes\\a.md",
+        "C:/Windows/evil.md",
+        "Notes/C:",
+        "a\u0000.md",
+        "Notes/a\nb.md",
+        "a\u007f.md",
     ]
     pairing = []
     for i in range(4):

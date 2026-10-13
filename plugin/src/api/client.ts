@@ -53,9 +53,16 @@ export interface ClientOptions {
  */
 const REQUEST_TIMEOUT_MS = 60_000;
 
+/** Hosts reached without leaving the machine: the only ones `http://` is accepted for. */
+function isLoopback(hostname: string): boolean {
+	return hostname === "localhost" || hostname === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+}
+
 /**
  * `https://Notes.Example.com/` -> `https://notes.example.com`. The endpoint must be an
  * origin: the server signs challenges for its origin, and the client compares the two.
+ * `http://` is accepted only for this machine: tokens and the shared secret would
+ * otherwise cross the network in the clear.
  */
 export function normalizeEndpoint(endpoint: string): string {
 	let url: URL;
@@ -64,13 +71,25 @@ export function normalizeEndpoint(endpoint: string): string {
 	} catch {
 		throw new Error("The endpoint must be a URL like https://notes.example.com");
 	}
-	if (url.protocol !== "https:" && url.protocol !== "http:") {
-		throw new Error("The endpoint must start with https://");
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) {
+		throw new Error("The endpoint must start with https:// (http:// only for localhost)");
 	}
 	if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash || url.username) {
 		throw new Error("The endpoint must be just the server address, without a path");
 	}
 	return url.origin;
+}
+
+/**
+ * The server named this key with another device's id, or the keyring has no entry for it
+ * under that id. The keyring entry found by this device's public key decides the device's
+ * policy (remote-only.md 4), so sync stops instead.
+ */
+export class DeviceMismatchError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "DeviceMismatchError";
+	}
 }
 
 /**
@@ -142,6 +161,11 @@ export class ApiClient {
 		};
 		if (sharedSecret !== undefined) body.sharedSecret = sharedSecret;
 		const result = await this.send<VerifyResponse>("POST", "/api/v1/auth/verify", { json: body });
+		// An active key's device id never changes: a server that names another one isn't
+		// followed. A pending key may get a new id: the server replaces stale pending keys.
+		if (this.deviceStatus === "active" && result.deviceId !== this.deviceId) {
+			throw new DeviceMismatchError("The server returned another device's id for this key.");
+		}
 		this.token = result.token;
 		this.deviceId = result.deviceId;
 		this.deviceStatus = result.status;

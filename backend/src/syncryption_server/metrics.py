@@ -38,7 +38,7 @@ PREFIX = "syncryption_"
 # Up to a minute, so `/wait` long-polls land in a bucket of their own.
 DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
 DEVICE_STATUSES = ("pending", "active", "revoked")
-GC_TASKS = ("retention", "blobs")
+GC_TASKS = ("expired", "retention", "blobs")
 # The event-loop lag: measured every LAG_INTERVAL seconds, the worst of the last LAG_WINDOW.
 LAG_INTERVAL = 0.5
 LAG_WINDOW = 20

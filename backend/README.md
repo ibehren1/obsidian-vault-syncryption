@@ -21,14 +21,17 @@ Run a development server. The app is built by a factory that reads its settings 
 environment, so set at least the shared secret and the admin token, and keep the data
 outside `/data`:
 ```
-SHARED_SECRET=dev-secret ADMIN_TOKEN=dev-admin-token-0123456789abcdef BEHIND_PROXY=TRUE SYNCRYPTION_DATA_DIR=./dev-data \
+SHARED_SECRET=dev-shared-secret ADMIN_TOKEN=dev-admin-token-0123456789abcdef BEHIND_PROXY=TRUE SYNCRYPTION_DATA_DIR=./dev-data \
   uv run uvicorn --factory syncryption_server.app:create_app --reload
 ```
 `SYNCRYPTION_DATA_DIR` is for development only and isn't part of the container
 configuration. S3 is optional: without the `S3_*` variables, blobs are stored under
 `<data dir>/blobs`. `ADMIN_CONTACT` (optional) sets the contact shown on `/`, in `/health`
 and in maintenance and disabled-account errors, and `DISABLE_METRICS=TRUE` turns off
-`/metrics`. The container variables are described in
+`/metrics`. `METRICS_ALLOWED_IPS` (optional) lists the client addresses or CIDRs that may
+read `/metrics`; it defaults to loopback and private ranges. `TRUSTED_PROXIES` (optional, with `BEHIND_PROXY=TRUE`) lists the proxy
+addresses or CIDRs whose `X-Forwarded-*` headers count; it defaults to loopback and
+private ranges, which includes a development proxy on `127.0.0.1`. The container variables are described in
 [../docs/self-hosting.md](../docs/self-hosting.md), section 2.
 
 Tests run against a temporary directory and, for `S3BlobStore`, an in-process moto

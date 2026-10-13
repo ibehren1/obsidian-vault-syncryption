@@ -9,7 +9,8 @@ parameters, its request and response bodies and every field of every model. This
 explains the flows that reference only lists.
 
 ## 1. Conventions
-- **Base URL:** the configured endpoint, e.g. `https://notes.example.com`. All paths
+- **Base URL:** the configured endpoint, e.g. `https://notes.example.com`. The plugin
+  accepts `http://` only for `localhost`, `127.0.0.0/8` and `[::1]`. All paths
   below are under `/api/v1`, except `/`, `/health`, `/metrics`, `/admin` and the icons
   (`/favicon.ico`, `/icon-32.png`, `/icon-128.png`, `/icon-256.png`).
 - **Bodies:** JSON (`application/json`), except blob uploads and downloads, which are
@@ -45,6 +46,7 @@ explains the flows that reference only lists.
 | 423 | `locked` |
 | 429 | `rate_limited` (with `Retry-After`) |
 | 503 | `maintenance` (with `Retry-After`, section 14.1) |
+| 507 | `storage_full`, `quota_exceeded` (section 12) |
 
 The admin JSON API (section 14) also returns `409 not_disabled` and `400 confirm`.
 
@@ -80,9 +82,10 @@ or maintenance with its start time and message), and a "Health" section with the
 database or blob store is unreachable). It never shows the shared secret, and it
 works during maintenance.
 
-`GET /metrics` (*public*) returns Prometheus metrics in the text exposition format
+`GET /metrics` (no token) returns Prometheus metrics in the text exposition format
 (`text/plain; version=0.0.4`), unless the server sets `DISABLE_METRICS=TRUE`, in which case
-it is `404 not_found`. It holds counts only: no label names a user, vault, device, file or
+it is `404 not_found`. It answers only clients in the server's `METRICS_ALLOWED_IPS`
+(empty: loopback and private ranges); others get `403 forbidden`. It holds counts only: no label names a user, vault, device, file or
 path, and requests are labelled with the route template (`/api/v1/vaults/{vault_id}/changes`),
 never the raw path. It works during maintenance. The metric names are listed in
 self-hosting.md 5.1.
@@ -145,7 +148,8 @@ Response `200`:
 - `vaultName` is required and normalised like `POST /vaults/open` (section 7.1); an
   invalid name returns `400 bad_request`. The `vault` line carries the normalised name.
 - `origin` is `URL` if it is set, otherwise the scheme and host the request arrived on
-  (honouring `X-Forwarded-Proto`/`X-Forwarded-Host` when `BEHIND_PROXY=TRUE`).
+  (honouring `X-Forwarded-Proto`/`X-Forwarded-Host` when `BEHIND_PROXY=TRUE` and the
+  request comes from an address in `TRUSTED_PROXIES`).
 - The challenge is single-use and expires after 60 s.
 
 The client must check, before signing, that `origin` equals its configured endpoint's
@@ -197,15 +201,25 @@ again.
 The secret is compared in constant time. The `join_required` message is generic: "This
 server needs an access secret to join. Contact your administrator." Its rate limit is
 strict (section 12): only a secret that was sent and is wrong counts as a failure, so a
-client that first tries without one (and then asks the user) isn't penalised. Adding a
-pending device when the vault already has 5 returns `429 rate_limited`.
+client that first tries without one (and then asks the user) isn't penalised.
+
+New pending devices are rate limited: 3 per hour per client address, and 10 per hour per
+vault from all addresses together (`429 rate_limited` with `Retry-After`). A key that is
+already a pending device logs in again without counting. A vault has at most 5 pending
+devices: adding one to a vault that already has 5 removes the pending device seen least
+recently (by its last request, then the oldest), together with its sessions. A device
+that waits for approval polls (section 7.1), so it stays recently seen, and abandoned
+requests are removed first.
 
 Anyone who knows a username and one of its vault names can add pending devices to that
 vault without the secret. They get no access until a device of the vault approves them
-(and approval shows the pairing code), and they are bounded by the auth rate limit, the 5
-pending devices per vault and their 24-hour expiry. While 5 such requests are pending,
-other new keys for that vault wait too (`429`) until a device removes them. The answer
-also tells whether such a vault exists.
+(and approval shows the pairing code), and they are bounded by the auth rate limit, the
+pending-device rate limits, the 5 pending devices per vault and their 24-hour expiry. They
+can't hold every slot: a new key for the vault replaces a stale one, and is refused only
+while the vault's hourly limit is used up. Until approved, a pending device learns only
+the vault's id and name (section 7.1). The answer also tells whether such a vault exists:
+a new key for a vault that doesn't exist gets `403 join_required`, which is how the client
+knows to ask for the shared secret.
 
 Response `200`:
 ```json
@@ -260,8 +274,9 @@ device), `vaultName` and `username`.
   "locked": false
 }
 ```
-- `status` is `pending`, `active` or `revoked`. A vault has at most 5 pending devices, and
-  a pending device that isn't approved expires after 24 h.
+- `status` is `pending`, `active` or `revoked`. A vault has at most 5 pending devices (a
+  new one replaces the one seen least recently, section 5.2), and a pending device that
+  isn't approved expires after 24 h.
 - `pairingCode` is computed from the public key ([crypto.md](crypto.md) section 6.5). The
   approving client recomputes it from `publicKey` and never trusts the server's value.
 - **Approving** is the server half of pairing. The approving client must also add the
@@ -313,6 +328,12 @@ A device only ever opens its own vault, named in its login (section 5). A new ke
 an existing vault is already pending after verify. The plugin shows its pairing code and
 polls `/vaults/open` (or `/devices/self`) until the status is `active`. `membership` is
 kept for older clients. An invalid name returns `400 bad_request`.
+
+For a pending device, only the vault object's `id` and `name` are real: `keyringVersion`
+and `seq` are `0` and `createdAt` is `1970-01-01T00:00:00Z`. They are all a pending device
+needs, to wait for approval or to recover the vault (section 7.4), and anyone who knows
+the username and vault name can become one. Once approved, the same call returns the
+vault object below.
 
 **Vault object:**
 ```json
@@ -403,7 +424,8 @@ Blobs are encrypted chunks ([crypto.md](crypto.md) section 8.2), at most
 - On `PUT`, the server hashes the body and returns `422 hash_mismatch` if it doesn't
   equal `blobId`, or `413 too_large` if it exceeds the limit (checked against
   `Content-Length` first, then while the body streams). A malformed `blobId` returns
-  `400 bad_request`.
+  `400 bad_request`. A new blob can also be refused with `507 storage_full` or
+  `507 quota_exceeded` (section 12); a blob that is already stored never is.
 - Blobs are partitioned by user and vault. The store key is
   `blobs/<userId>/<vaultId>/<blobId[0:2]>/<blobId>`, using ids rather than names so a
   rename doesn't move data. The layout is the same in `LocalBlobStore` and
@@ -467,6 +489,8 @@ base64url or is empty returns `400 bad_request`. `meta` is at most 64 KiB once d
 the object header (crypto.md 8.1: format `0x01`, then an epoch of at least 1), or the
 server returns `422 malformed`. The server keeps the epoch for retention (9.3). A revision has at
 most 10,000 blobs, and a deletion must have an empty `blobs` list (`400 bad_request`).
+While the server's data volume is below its free-space reserve, a commit that isn't a
+deletion returns `507 storage_full` (section 12).
 
 `GET .../revs` returns `{"revisions": [<revision object>, ...], "more": bool}`, deletions
 included. `limit` is 1 to 100 (default 50). To page back, pass the last `rev` as `before`.
@@ -582,8 +606,9 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 | Keyring size | 1 MiB |
 | Other request bodies | 2 MiB, checked before the body is read (`413 too_large`) |
 | `/auth/*` | 10 requests/min per client address (challenge and verify together) |
-| Wrong shared secrets | 5 per hour per client address, and 50 per hour from all addresses together, then `429` with `Retry-After: 3600`, to stop guessing `SHARED_SECRET`. The server logs a warning when joining pauses. |
-| Pending devices | 5 per vault (then `429` with `Retry-After: 86400`); they expire after 24 hours |
+| Wrong shared secrets | 5 per hour per client address, and 50 per hour from all addresses together, then `429` with `Retry-After: 3600`, to stop guessing `SHARED_SECRET`. The per-address cap refuses every attempt from that address, including the right secret. The cap over all addresses refuses only wrong or missing secrets: the right secret still creates a vault, so guessing from many addresses can't block vault creation. Wrong secrets refused by that cap still count against their address. The server logs a warning when the cap over all addresses is reached. |
+| Pending devices | 5 per vault; a new one replaces the one seen least recently. They expire after 24 hours |
+| New pending devices | 3 per hour per client address, and 10 per hour per vault from all addresses together, then `429` with `Retry-After` (section 5.2) |
 | Challenges | single use, 60 s |
 | Sessions | 1 hour; 5 minutes for a remote-only device |
 | Remote-only grace period | 24 hours by default, 1 hour to 365 days per vault (section 14) |
@@ -596,15 +621,29 @@ Locks are **soft lease locks**: they warn other devices and never block a commit
 | Unreferenced blobs | deleted 24 hours after upload, by the hourly garbage collector |
 | Admin token | 5 wrong tokens per client address in 15 minutes (section 14) |
 | Revision history | every revision for 30 days, at least the last 10 per file; deleted files 90 days; revisions under an old epoch 30 days after a newer one (9.3) |
+| Free space on the data volume | 1 GiB kept free; below it, new blobs and commits other than deletions get `507 storage_full` |
+| Vault storage quota | none by default; set per vault by the admin (section 14), then a new blob that would pass it gets `507 quota_exceeded` |
 
 - A client address is the connecting IP (the last `X-Forwarded-For` entry with
-  `BEHIND_PROXY=TRUE`). IPv6 addresses count by their /64, since one host usually has a
+  `BEHIND_PROXY=TRUE`, when the connection comes from an address in `TRUSTED_PROXIES`). IPv6 addresses count by their /64, since one host usually has a
   whole /64.
 - There is no per-username login limit: anyone who knows a username could use it to lock
   that user's devices out, and sshsig signatures can't be guessed.
 - Requests of active devices aren't rate limited otherwise. Only devices approved by the
   user reach them, and a first sync of a large vault makes many requests in a short time.
 - `429` responses carry `Retry-After` in seconds.
+- **Free-space reserve:** the data volume (`/data`) always holds `meta.db`, also when blobs
+  go to S3, so the server checks its free space before it stores a new blob or commits a
+  revision. Deletions are still accepted, so devices can keep recording them. The reserve
+  is fixed and not configurable.
+- **Vault quota:** counts the bytes of the vault's stored blobs, the `size` the admin page
+  shows: every blob still referenced by a revision the server keeps, plus unreferenced
+  blobs until the garbage collector deletes them. Old revisions count, so deleting or
+  shrinking files frees space only once retention removes their revisions (9.3) and the
+  next garbage collection deletes their blobs (section 8). Encrypted metadata in `meta.db`
+  doesn't count. `quota_exceeded` carries `details: {"quota": <bytes>, "used": <bytes>}`.
+  Uploads running at the same time are checked separately, so a vault can pass its quota by
+  at most those blobs.
 
 ## 13. Versioning
 - The server and the plugin have independent `x.y.z` versions.
@@ -624,7 +663,8 @@ API. Every route needs `ADMIN_TOKEN`.
 
 - **Authentication:** `Authorization: Bearer <ADMIN_TOKEN>`, or (pages only) a session
   cookie from the login form: `POST /admin/login` with the form field `token` sets
-  `syncryption_admin` (HttpOnly, Secure over HTTPS, SameSite=Strict, `Path=/admin`,
+  `syncryption_admin` (HttpOnly, Secure except over plain HTTP to `localhost` or a loopback
+  address, SameSite=Strict, `Path=/admin`,
   12 hours). Every form posted with a cookie session carries the session's `csrf` field.
   `POST /admin/logout` ends the session. The JSON routes take only the Bearer header.
 - **Rate limit:** 5 wrong tokens per client address (section 12) in 15 minutes. While the
@@ -639,7 +679,9 @@ API. Every route needs `ADMIN_TOKEN`.
   `POST /admin/{users|vaults}/{id}/{disable|enable|purge}` and
   `POST /admin/maintenance/{on|off}` (form field `message` for `on`) and
   `POST /admin/vaults/{id}/grace` (form field `hours`, a whole number from 1 to 8760, empty
-  for the default) act and redirect to `/admin?done=<code>`.
+  for the default) and `POST /admin/vaults/{id}/quota` (form field `gb`, a whole number of
+  GB of 2^30 bytes from 1 to 1048576, empty for no quota) act and redirect to
+  `/admin?done=<code>`.
 - **JSON:**
   - `GET /admin/api/performance` returns the snapshot of section 14.2.
   - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
@@ -647,7 +689,8 @@ API. Every route needs `ADMIN_TOKEN`.
   - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
     `createdAt`, `lastSeenAt`, `disabled`, `vaults` (`id`, `name`, `size` in stored
     bytes, `files` (files that aren't deleted), `revisions`, `createdAt`, `lastChangeAt`,
-    `disabled`, `remoteOnlyGrace` (seconds, or `null` for the default), and `devices`:
+    `disabled`, `remoteOnlyGrace` (seconds, or `null` for the default), `quota` (bytes, or
+    `null` for no quota), and `devices`:
     `id`, `name`, `fingerprint`, `status`, `createdAt`, `lastSeenAt`, `remoteOnly`,
     `locked`) and `creating`
     (`[{"vaultName", "device"}]`, keys that haven't created their vault yet). Times are
@@ -656,6 +699,10 @@ API. Every route needs `ADMIN_TOKEN`.
   - `POST /admin/api/vaults/{id}/grace` with `{"graceSeconds": <3600 to 31536000 or null>}`
     sets the vault's grace period for remote-only devices and returns `204`. A value out of
     range returns `400 bad_request`. Devices get it at their next login.
+  - `POST /admin/api/vaults/{id}/quota` with `{"quotaBytes": <1 to 2^50 or null>}` sets the
+    vault's storage quota (section 12) and returns `204`; `null` removes it. A value out of
+    range returns `400 bad_request`. It applies to the next upload; data already stored is
+    kept, even above the new quota.
   - `POST /admin/api/{users|vaults}/{id}/purge` with `{"confirm": "<username or vault
     name>"}` returns `204`. It returns `409 not_disabled` unless the item is disabled
     first, and `400 confirm` if the name doesn't match.
@@ -724,7 +771,9 @@ browser's `localStorage`).
     before the first run).
   No value names a user, vault, device or path. Requests are counted also with
   `DISABLE_METRICS=TRUE`, which removes only `/metrics`.
-- **Page:** `GET /admin/performance.js` (no login needed, static) is the only script on
+- **Page:** the admin pages and `/` have one inline stylesheet, which their CSP allows by
+  its SHA-256 hash (`style-src 'sha256-…'`), so no other inline style applies.
+  `GET /admin/performance.js` (no login needed, static) is the only script on
   the admin pages; only the Performance tab loads it, and its CSP adds
   `script-src 'self'; connect-src 'self'`. It turns two snapshots into rates: requests per
   second (also by kind: file commits, `409` conflicts, blob uploads and downloads, logins,

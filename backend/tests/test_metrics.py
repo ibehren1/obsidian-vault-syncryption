@@ -6,6 +6,7 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from syncryption_server import PROTOCOL_VERSION, __version__
 from syncryption_server.app import create_app
+from syncryption_server.config import parse_networks
 from tests.helpers import ADMIN_TOKEN
 
 
@@ -130,3 +131,38 @@ def test_container_metrics_are_absent_without_cgroup_files(tmp_path):
     from syncryption_server.metrics import ContainerCollector
 
     assert collected(ContainerCollector(cgroup=tmp_path / "no", proc=tmp_path / "no")) == {}
+
+
+def test_metrics_answer_only_allowed_addresses(settings):
+    # Empty METRICS_ALLOWED_IPS: loopback and private ranges.
+    for peer, status in [
+        ("127.0.0.1", 200),
+        ("10.1.2.3", 200),
+        ("192.168.1.5", 200),
+        ("203.0.113.7", 403),
+        ("2001:db8::1", 403),
+    ]:
+        with TestClient(create_app(settings), client=(peer, 50000)) as c:
+            r = c.get("/metrics")
+            assert r.status_code == status, peer
+            if status == 403:
+                assert r.json()["error"] == "forbidden"
+
+
+def test_metrics_allowed_ips_can_be_narrowed(settings):
+    settings = dataclasses.replace(settings, metrics_allowed=parse_networks("10.0.0.5"))
+    with TestClient(create_app(settings), client=("10.0.0.5", 50000)) as c:
+        assert c.get("/metrics").status_code == 200
+    with TestClient(create_app(settings), client=("10.0.0.6", 50000)) as c:
+        assert c.get("/metrics").status_code == 403
+
+
+def test_metrics_check_the_client_behind_a_trusted_proxy(settings):
+    settings = dataclasses.replace(settings, behind_proxy=True)
+    with TestClient(create_app(settings), client=("172.18.0.2", 50000)) as c:
+        # The proxy forwards a public client: refused. A spoofed header can't add one.
+        assert c.get("/metrics", headers={"x-forwarded-for": "203.0.113.7"}).status_code == 403
+        assert c.get("/metrics", headers={"x-forwarded-for": "10.0.0.9"}).status_code == 200
+    with TestClient(create_app(settings), client=("203.0.113.7", 50000)) as c:
+        # Not a trusted proxy: its header doesn't count, and its own address is public.
+        assert c.get("/metrics", headers={"x-forwarded-for": "10.0.0.9"}).status_code == 403

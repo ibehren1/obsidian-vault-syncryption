@@ -193,7 +193,7 @@ def test_performance_snapshot(client, alice, vault):
     assert snap["inFlight"] == 0 and snap["loopLagSeconds"] >= 0
     assert snap["disk"]["freeBytes"] > 0 and snap["disk"]["totalBytes"] >= snap["disk"]["freeBytes"]
     assert snap["dbBytes"] > 0
-    assert snap["gcLastRun"] == {"retention": None, "blobs": None}
+    assert snap["gcLastRun"] == {"expired": None, "retention": None, "blobs": None}
     assert (snap["prunedRevisions"], snap["deletedBlobs"]) == (0, 0)
     for secret in ("alice", "Personal", alice.vault_id, alice.device_id):
         assert secret not in r.text
@@ -346,3 +346,35 @@ def test_sessions_expire(client, clock):
     cookie, _ = login(client)
     clock.advance(12 * 3600 + 1)
     assert 'name="token"' in client.get("/admin", headers=cookie).text
+
+
+def test_admin_cookie_is_secure_unless_plain_http_to_this_machine(settings):
+    def cookie(settings, headers=None, peer=("127.0.0.1", 50000)) -> str:
+        with TestClient(create_app(settings), client=peer) as c:
+            r = c.post(
+                "/admin/login", data={"token": ADMIN_TOKEN}, headers=headers, follow_redirects=False
+            )
+            assert r.status_code == 303
+            return r.headers["set-cookie"]
+
+    proxied = dataclasses.replace(settings, url=None, behind_proxy=True)
+    # A proxy that says the client used plain HTTP still gets a Secure cookie.
+    claims_http = {"x-forwarded-proto": "http", "host": "notes.example.com"}
+    assert "Secure" in cookie(proxied, claims_http, ("10.0.0.2", 50000))
+    assert "Secure" in cookie(proxied, {"host": "notes.example.com"}, ("10.0.0.2", 50000))
+    # Plain HTTP to this machine, for development: not Secure, or the browser drops it.
+    assert "Secure" not in cookie(proxied, {"host": "localhost:8080"})
+    assert "Secure" not in cookie(proxied, {"host": "127.0.0.1:8080"})
+
+
+def test_admin_csp_allows_only_its_own_stylesheet(client):
+    import base64
+    import hashlib
+
+    for page in (client.get("/admin"), client.get("/")):
+        csp = page.headers["content-security-policy"]
+        assert "unsafe-inline" not in csp
+        style = re.search(r"<style>(.*?)</style>", page.text, re.S)[1]
+        digest = base64.b64encode(hashlib.sha256(style.encode()).digest()).decode()
+        assert f"style-src 'sha256-{digest}'" in csp
+        assert " style=" not in page.text

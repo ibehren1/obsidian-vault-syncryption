@@ -1,4 +1,5 @@
 /** Which paths are synced (docs/architecture.md 4.4). */
+import { isVaultPath } from "../crypto/kdf";
 
 /** Folders that are never synced, at any depth. */
 const EXCLUDED_FOLDERS = new Set([".trash", ".git", "node_modules"]);
@@ -80,6 +81,8 @@ export function pathFilter(opts: FilterOptions): PathFilter {
 	};
 
 	const include = ((path: string) => {
+		// A name no vault path may have (crypto.md 5.2), e.g. with `\` on Linux: never synced.
+		if (!isVaultPath(path)) return false;
 		const segments = path.split("/");
 		const name = segments.pop()!;
 		if (folderExcluded(segments) || EXCLUDED_FILES.has(name)) return false;

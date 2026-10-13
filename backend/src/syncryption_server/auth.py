@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from syncryption_server.config import IPNetwork
 from syncryption_server.encoding import b64u, from_b64u, new_device_id, rfc3339
 from syncryption_server.errors import (
     ApiError,
@@ -44,7 +45,9 @@ SESSION_TTL = 3600
 REMOTE_ONLY_SESSION_TTL = 300  # remote-only.md 5: the lease is renewed at each login
 REMOTE_ONLY_GRACE = 24 * 3600  # the default grace period, settable per vault on /admin
 PENDING_DEVICE_TTL = 24 * 3600
-MAX_PENDING_DEVICES = 5  # per vault
+MAX_PENDING_DEVICES = 5  # per vault; a new one then replaces the least recently seen
+PENDING_IP_LIMIT = (3, 3600)  # new pending devices per client address
+PENDING_VAULT_LIMIT = (10, 3600)  # new pending devices per vault, from all addresses
 CREATING_DEVICE_TTL = 24 * 3600  # a key that registered to create a vault and never did
 AUTH_LIMIT = (10, 60.0)  # per client address
 JOIN_FAILURE_LIMIT = (5, 3600)  # wrong shared secrets per client address
@@ -107,13 +110,40 @@ def vault_name(name: str) -> str:
     return name
 
 
+def _ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        addr = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def ip_in(ip: str, networks: tuple[IPNetwork, ...]) -> bool:
+    """Whether `ip` (from `client_ip`) is in one of `networks`. False when it isn't an IP."""
+    addr = _ip(ip)
+    return addr is not None and any(addr in n for n in networks)
+
+
+def from_trusted_proxy(request: Request, state: AppState) -> bool:
+    """Whether this request's X-Forwarded-* headers count: only with BEHIND_PROXY=TRUE and
+    only from a peer in TRUSTED_PROXIES. Anyone else reaching :8080 could set them to
+    anything. (With BEHIND_PROXY=FALSE uvicorn applies Caddy's headers before the app runs,
+    and only Caddy can reach it.)"""
+    if not state.settings.behind_proxy or request.client is None:
+        return False
+    peer = _ip(request.client.host)
+    return peer is not None and any(peer in n for n in state.settings.trusted_proxies)
+
+
 def client_ip(request: Request, state: AppState) -> str:
-    if state.settings.behind_proxy:
+    if from_trusted_proxy(request, state):
         forwarded = request.headers.get("x-forwarded-for", "")
         # The last entry is the one our proxy added; earlier ones are client supplied.
-        last = forwarded.split(",")[-1].strip()
-        if last:
-            return last
+        last = _ip(forwarded.split(",")[-1])
+        if last is not None:
+            return str(last)
     return request.client.host if request.client else "unknown"
 
 
@@ -136,8 +166,10 @@ def request_origin(request: Request, state: AppState) -> str:
         return state.settings.url
     scheme = request.url.scheme
     host = request.headers.get("host", request.url.netloc)
-    if state.settings.behind_proxy:
-        scheme = request.headers.get("x-forwarded-proto", scheme).split(",")[0].strip()
+    if from_trusted_proxy(request, state):
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded in ("http", "https"):
+            scheme = forwarded
         host = request.headers.get("x-forwarded-host", host).split(",")[0].strip()
     return f"{scheme}://{host.lower()}"
 
@@ -216,32 +248,44 @@ def _invalid() -> ApiError:
 
 
 def _secret_ok(state: AppState, ip: str, secret: str | None) -> bool:
-    """Check the shared secret, counting wrong guesses per address and in total (protocol.md 12)."""
+    """Check the shared secret, counting wrong guesses per address and in total (protocol.md 12).
+
+    The per-address cap applies to every attempt. The cap over all addresses applies only to
+    wrong secrets, so guessing from many addresses can't stop the right secret from working.
+    """
     limit, window = JOIN_FAILURE_LIMIT
     total, _ = JOIN_FAILURE_TOTAL
     now = state.now()
     failures = state.db.one(
         "SELECT COUNT(*) FROM join_attempts WHERE ip = ? AND at > ?", ip, now - window
     )[0]
-    everyone = state.db.one("SELECT COUNT(*) FROM join_attempts WHERE at > ?", now - window)[0]
-    if failures >= limit or everyone >= total:
-        raise ApiError(
-            429,
-            "rate_limited",
-            "Too many attempts. Try again later.",
-            headers={"Retry-After": str(window)},
-        )
-    if not secret:
-        return False
+    if failures >= limit:
+        raise _join_rate_limited(window)
     expected = state.settings.shared_secret.encode()
-    if hmac.compare_digest(secret.encode(), expected):
+    if secret and hmac.compare_digest(secret.encode(), expected):
         return True
-    state.metrics.shared_secret_failures.inc()
-    with state.db.transaction() as db:
-        db.execute("INSERT INTO join_attempts (ip, at) VALUES (?, ?)", (ip, now))
-    if everyone + 1 >= total:
-        log.warning("%d wrong shared secrets in the last hour; joining is paused", total)
+    everyone = state.db.one("SELECT COUNT(*) FROM join_attempts WHERE at > ?", now - window)[0]
+    if secret:
+        state.metrics.shared_secret_failures.inc()
+        # Counted even past the total cap, so the per-address cap still bounds each address.
+        with state.db.transaction() as db:
+            db.execute("INSERT INTO join_attempts (ip, at) VALUES (?, ?)", (ip, now))
+        if everyone + 1 == total:
+            log.warning(
+                "%d wrong shared secrets in the last hour; further wrong ones are refused", total
+            )
+    if everyone >= total:
+        raise _join_rate_limited(window)
     return False
+
+
+def _join_rate_limited(window: int) -> ApiError:
+    return ApiError(
+        429,
+        "rate_limited",
+        "Too many attempts. Try again later.",
+        headers={"Retry-After": str(window)},
+    )
 
 
 def _too_many_pending() -> ApiError:
@@ -251,6 +295,43 @@ def _too_many_pending() -> ApiError:
         "Too many devices are waiting for approval.",
         headers={"Retry-After": str(PENDING_DEVICE_TTL)},
     )
+
+
+def _limit_pending(state: AppState, ip: str, vault_id: str) -> None:
+    """Count a new pending device against its address and its vault (protocol.md 12). Both
+    are checked before either counts, so a refusal by one doesn't use up the other."""
+    keys = (
+        (f"pending-ip:{ip}", PENDING_IP_LIMIT),
+        (f"pending-vault:{vault_id}", PENDING_VAULT_LIMIT),
+    )
+    for key, (limit, window) in keys:
+        if state.limiter.full(key, limit, window):
+            state.limiter.check(key, limit, window)  # raises 429 with its Retry-After
+    for key, (limit, window) in keys:
+        state.limiter.check(key, limit, window)
+
+
+def _make_room_for_pending(db: sqlite3.Connection, vault_id: str) -> None:
+    """Keep the vault under MAX_PENDING_DEVICES by removing the pending devices seen least
+    recently: an abandoned request goes before one whose device still polls for approval,
+    so stale requests can't hold every slot until they expire."""
+    pending = db.execute(
+        "SELECT id FROM devices WHERE vault_id = ? AND status = 'pending' "
+        "AND id NOT IN (SELECT signer FROM keyrings) "
+        "AND id NOT IN (SELECT device_id FROM revisions) "
+        "ORDER BY COALESCE(last_seen_at, created_at), created_at, rowid",
+        (vault_id,),
+    ).fetchall()
+    total = db.execute(
+        "SELECT COUNT(*) FROM devices WHERE vault_id = ? AND status = 'pending'", (vault_id,)
+    ).fetchone()[0]
+    excess = total - MAX_PENDING_DEVICES + 1
+    if excess <= 0:
+        return
+    if excess > len(pending):
+        raise _too_many_pending()
+    for (device_id,) in pending[:excess]:
+        db.execute("DELETE FROM devices WHERE id = ?", (device_id,))
 
 
 def _being_created() -> ApiError:
@@ -343,6 +424,7 @@ def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
             if vault["disabled_at"] is not None:
                 raise vault_disabled(state.settings.admin_contact)
             status, vault_id = "pending", vault["id"]
+            _limit_pending(state, ip, vault_id)
         else:
             # A new vault: the shared secret, then the key is active and reserves the name
             # until it creates the vault with POST /vaults.
@@ -372,12 +454,7 @@ def _verify(body: VerifyRequest, ip: str, state: AppState) -> VerifyResponse:
                 if vault_id is None and _creating(db, user_id, vname):
                     raise _being_created()
                 if vault_id is not None:
-                    pending = db.execute(
-                        "SELECT COUNT(*) FROM devices WHERE vault_id = ? AND status = 'pending'",
-                        (vault_id,),
-                    ).fetchone()[0]
-                    if pending >= MAX_PENDING_DEVICES:
-                        raise _too_many_pending()
+                    _make_room_for_pending(db, vault_id)
                 db.execute(
                     "INSERT INTO devices (id, user_id, vault_id, vault_name, public_key, name, "
                     "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

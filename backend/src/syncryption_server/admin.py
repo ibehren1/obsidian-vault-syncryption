@@ -5,11 +5,13 @@ login form, which starts a browser session (an HttpOnly cookie, plus a CSRF toke
 form). The Vaults tab lists users, their vaults with stored sizes, and under each vault its
 devices (one encryption key each). Users and vaults can be disabled (no access, data kept),
 enabled again, and purged once disabled. Purging a vault also deletes its devices. Each vault
-has a grace period for its remote-only devices (remote-only.md 5).
+has a grace period for its remote-only devices (remote-only.md 5) and an optional storage
+quota (protocol.md 12).
 Maintenance mode pauses the whole sync API until it is turned off (protocol.md 14.1). The
 Performance tab polls the server's metrics and shows them as rates (protocol.md 14.2).
 """
 
+import base64
 import hashlib
 import hmac
 import html
@@ -19,7 +21,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -56,6 +58,9 @@ DEFAULT_INTERVAL = 5
 # remote-only.md 5: the grace period of a vault's remote-only devices, in seconds.
 MIN_GRACE = 3600
 MAX_GRACE = 365 * 24 * 3600
+# protocol.md 12: a vault's storage quota in bytes; the form takes whole GB (2**30 bytes).
+GB = 1024**3
+MAX_QUOTA = 2**50
 
 
 class AdminError(Exception):
@@ -82,6 +87,9 @@ MESSAGES = {
     "grace_set": "Grace period saved. Remote-only devices get it at their next login.",
     "bad_grace": f"The grace period is a whole number of hours from 1 to {MAX_GRACE // 3600}, "
     f"or empty for the default ({REMOTE_ONLY_GRACE // 3600} hours).",
+    "quota_set": "Storage quota saved. It applies to the next upload.",
+    "bad_quota": f"The quota is a whole number of GB from 1 to {MAX_QUOTA // GB}, "
+    "or empty for no quota.",
 }
 # Codes that aren't errors, shown in green.
 SUCCESS = (
@@ -92,6 +100,7 @@ SUCCESS = (
     "maintenance_on",
     "maintenance_off",
     "grace_set",
+    "quota_set",
 )
 
 
@@ -164,7 +173,7 @@ def overview(state: AppState) -> list[dict]:
     users = state.db.all("SELECT * FROM users ORDER BY username")
     vaults = state.db.all(
         "SELECT v.id, v.user_id, v.name, v.created_at, v.disabled_at, v.remote_only_grace, "
-        "(SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.vault_id = v.id) AS size, "
+        "v.blob_bytes AS size, v.blob_quota, "
         "(SELECT COUNT(*) FROM files f JOIN revisions r ON r.vault_id = f.vault_id "
         "AND r.rev = f.head_rev WHERE f.vault_id = v.id AND r.deleted = 0) AS files, "
         "(SELECT COUNT(*) FROM revisions r WHERE r.vault_id = v.id) AS revisions, "
@@ -211,6 +220,8 @@ def overview(state: AppState) -> list[dict]:
                         "disabled": v["disabled_at"] is not None,
                         # null: the default, REMOTE_ONLY_GRACE
                         "remoteOnlyGrace": v["remote_only_grace"],
+                        # null: no quota
+                        "quota": v["blob_quota"],
                         "devices": [device(d) for d in mine if d["vault_id"] == v["id"]],
                     }
                     for v in vaults
@@ -336,6 +347,21 @@ async def set_grace(state: AppState, vault_id: str, seconds: int | None) -> str:
     return "grace_set"
 
 
+async def set_quota(state: AppState, vault_id: str, quota: int | None) -> str:
+    """Set a vault's storage quota in bytes, None for no quota."""
+    if quota is not None and not 1 <= quota <= MAX_QUOTA:
+        raise AdminError("bad_quota")
+    row = await state.db.read(lambda: _row(state, "vaults", vault_id))
+
+    def store() -> None:
+        with state.db.transaction() as db:
+            db.execute("UPDATE vaults SET blob_quota = ? WHERE id = ?", (quota, vault_id))
+
+    await state.db.run(store)
+    log.info("admin: set the storage quota of vault %s/%s", row["username"], row["name"])
+    return "quota_set"
+
+
 async def set_maintenance(state: AppState, on: bool, message: str | None = None) -> str:
     """Turn maintenance on (or update its message) or off. Returns the message code."""
     if not on:
@@ -429,6 +455,23 @@ class GraceRequest(BaseModel):
 async def api_grace(vault_id: str, body: GraceRequest, admin: ApiAdmin, state: State) -> Response:
     try:
         await set_grace(state, vault_id, body.graceSeconds)
+    except AdminError as e:
+        if e.status == 404:
+            raise not_found() from e
+        raise bad_request(MESSAGES[e.code]) from e
+    return Response(status_code=204)
+
+
+class QuotaRequest(BaseModel):
+    quotaBytes: int | None = Field(
+        description=f"1 to {MAX_QUOTA} bytes of stored blobs, or null for no quota."
+    )
+
+
+@router.post("/api/vaults/{vault_id}/quota", status_code=204)
+async def api_quota(vault_id: str, body: QuotaRequest, admin: ApiAdmin, state: State) -> Response:
+    try:
+        await set_quota(state, vault_id, body.quotaBytes)
     except AdminError as e:
         if e.status == 404:
             raise not_found() from e
@@ -541,6 +584,8 @@ section.stripe td.num { white-space: nowrap; }
 td.trend { padding-top: .35rem; }
 td.trend .spark { margin: 0; }
 """
+# The CSP allows this one stylesheet by its hash, so no other inline style can apply.
+STYLE_HASH = "sha256-" + base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
 
 
 def _size(n: int) -> str:
@@ -592,7 +637,7 @@ def html_page(
         headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": f"default-src 'none'; img-src 'self'; {scripts}"
-            "style-src 'unsafe-inline'; "
+            f"style-src '{STYLE_HASH}'; "
             "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             "Referrer-Policy": "no-referrer",
             "X-Frame-Options": "DENY",
@@ -649,6 +694,23 @@ def _grace_form(admin: Admin, vault: dict) -> str:
         f'<form class="inline" method="post" action="{target}">{csrf}'
         f'<input name="hours" size="4" inputmode="numeric" value="{value}" '
         f'placeholder="{REMOTE_ONLY_GRACE // 3600}" aria-label="Grace period in hours"> h '
+        "<button>Save</button></form>"
+    )
+
+
+def _quota_form(admin: Admin, vault: dict) -> str:
+    """The vault's storage quota in whole GB; empty means no quota."""
+    quota = vault["quota"]
+    # A quota set through the API in bytes shows rounded up to whole GB.
+    value = str(-(-quota // GB)) if quota is not None else ""
+    csrf = (
+        f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf)}">' if admin.csrf else ""
+    )
+    target = f"/admin/vaults/{html.escape(vault['id'])}/quota"
+    return (
+        f'<form class="inline" method="post" action="{target}">{csrf}'
+        f'<input name="gb" size="6" inputmode="numeric" value="{value}" '
+        'placeholder="none" aria-label="Storage quota in GB"> GB '
         "<button>Save</button></form>"
     )
 
@@ -728,6 +790,7 @@ def _vault_card(admin: Admin, v: dict) -> str:
         f"{v['revisions']:,} versions · created {_when(v['createdAt'])} · "
         f"last change {_when(v['lastChangeAt'])}</p>"
         f"<div>Remote-only grace {_grace_form(admin, v)}</div>"
+        f"<div>Storage quota {_quota_form(admin, v)}</div>"
         f"{_keys(v['devices'])}</section>"
     )
 
@@ -956,10 +1019,19 @@ async def login(request: Request, state: State) -> Response:
         max_age=SESSION_TTL,
         path="/admin",
         httponly=True,
-        secure=request_origin(request, state).startswith("https:"),
+        secure=_secure_cookie(request_origin(request, state)),
         samesite="strict",
     )
     return response
+
+
+def _secure_cookie(origin: str) -> bool:
+    """`Secure` always, except for plain HTTP to this machine (development), where a browser
+    wouldn't send the cookie back. Not from the scheme alone: a request that claims `http`
+    must not get a cookie that may travel unencrypted."""
+    host = (urlsplit(origin).hostname or "").lower()
+    loopback = host == "localhost" or host == "::1" or host.startswith("127.")
+    return not (origin.startswith("http:") and loopback)
 
 
 async def _form_admin(request: Request, state: AppState, form: dict[str, str]) -> Admin | None:
@@ -1017,6 +1089,21 @@ async def form_grace(vault_id: str, request: Request, state: State) -> Response:
         if hours and not hours.isdigit():
             raise AdminError("bad_grace")
         code = await set_grace(state, vault_id, int(hours) * 3600 if hours else None)
+    except AdminError as e:
+        code = e.code
+    return _back(code)
+
+
+@router.post("/vaults/{vault_id}/quota")
+async def form_quota(vault_id: str, request: Request, state: State) -> Response:
+    form = await _form(request)
+    try:
+        if await _form_admin(request, state, form) is None:
+            return _login_page("Log in first.", status=401)
+        gb = form.get("gb", "").strip()
+        if gb and (not gb.isdigit() or len(gb) > 9):
+            raise AdminError("bad_quota")
+        code = await set_quota(state, vault_id, int(gb) * GB if gb else None)
     except AdminError as e:
         code = e.code
     return _back(code)

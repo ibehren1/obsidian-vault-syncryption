@@ -28,25 +28,27 @@ expect_error() {
 }
 
 ADMIN=ci-admin-token-0123456789abcdef0
-expect_error "URL is required when BEHIND_PROXY=FALSE" -e SHARED_SECRET=x
+SECRET=ci-shared-secret-01
+expect_error "URL is required when BEHIND_PROXY=FALSE" -e SHARED_SECRET=$SECRET
 expect_error "SHARED_SECRET is required" -e BEHIND_PROXY=TRUE
-expect_error "ADMIN_TOKEN is required" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x
-expect_error "ADMIN_TOKEN must be at least 32" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=short
+expect_error "SHARED_SECRET must be at least 16" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=short
+expect_error "ADMIN_TOKEN is required" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET
+expect_error "ADMIN_TOKEN must be at least 32" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET -e ADMIN_TOKEN=short
 expect_error "set all of S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY or none" \
-	-e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=$ADMIN -e S3_BUCKET=b
-expect_error "MIGRATE_TO_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=$ADMIN \
+	-e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET -e ADMIN_TOKEN=$ADMIN -e S3_BUCKET=b
+expect_error "MIGRATE_TO_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET -e ADMIN_TOKEN=$ADMIN \
 	-e MIGRATE_TO_S3=TRUE
-expect_error "MIGRATE_FROM_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x -e ADMIN_TOKEN=$ADMIN \
+expect_error "MIGRATE_FROM_S3=TRUE needs" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET -e ADMIN_TOKEN=$ADMIN \
 	-e MIGRATE_FROM_S3=TRUE
 expect_error "set only one of MIGRATE_TO_S3 and MIGRATE_FROM_S3" -e BEHIND_PROXY=TRUE \
-	-e SHARED_SECRET=x -e ADMIN_TOKEN=$ADMIN -e S3_BUCKET=b -e S3_ACCESS_KEY=k -e S3_SECRET_KEY=s \
+	-e SHARED_SECRET=$SECRET -e ADMIN_TOKEN=$ADMIN -e S3_BUCKET=b -e S3_ACCESS_KEY=k -e S3_SECRET_KEY=s \
 	-e MIGRATE_TO_S3=TRUE -e MIGRATE_FROM_S3=TRUE
-expect_error "ADMIN_CONTACT must be a single line" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x \
+expect_error "ADMIN_CONTACT must be a single line" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET \
 	-e ADMIN_TOKEN=$ADMIN -e "ADMIN_CONTACT=$(printf 'a\tb')"
-expect_error "DISABLE_METRICS must be TRUE or FALSE" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=x \
+expect_error "DISABLE_METRICS must be TRUE or FALSE" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET \
 	-e ADMIN_TOKEN=$ADMIN -e DISABLE_METRICS=yes
 
-docker run -d --name "$NAME" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=ci-secret -e ADMIN_TOKEN=$ADMIN \
+docker run -d --name "$NAME" -e BEHIND_PROXY=TRUE -e SHARED_SECRET=$SECRET -e ADMIN_TOKEN=$ADMIN \
 	-e "ADMIN_CONTACT=ops@example.com" "$IMAGE" >/dev/null
 for _ in $(seq 30); do
 	if docker exec "$NAME" python -m syncryption_server health; then
@@ -62,7 +64,7 @@ echo "ok BEHIND_PROXY=TRUE serves /health over HTTP on 8080"
 
 docker cp tests "$NAME":/tmp/tests
 docker cp ../testvectors "$NAME":/testvectors
-docker exec -w /tmp -e SYNCRYPTION_URL=http://127.0.0.1:8080 -e SYNCRYPTION_SECRET=ci-secret \
+docker exec -w /tmp -e SYNCRYPTION_URL=http://127.0.0.1:8080 -e SYNCRYPTION_SECRET=$SECRET \
 	-e SYNCRYPTION_ADMIN_TOKEN=$ADMIN "$NAME" python -m tests.test_container
 
 docker stop "$NAME" >/dev/null

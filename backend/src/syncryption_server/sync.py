@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 from syncryption_server.auth import ActiveCaller, Caller, State, recheck
+from syncryption_server.blobs import require_disk
 from syncryption_server.encoding import BLOB_ID_RE, FILE_ID_RE, b64u, from_b64u, rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found, too_large
 from syncryption_server.state import AppState
@@ -118,7 +119,9 @@ async def commit(
 ) -> Revision:
     """Commit a new revision of one file. `parentRev` must be the current head, or `null` for
     a file that must not exist yet; otherwise the answer is `409 stale_parent` with the head,
-    so the client can merge without another round trip. Every blob must be uploaded first."""
+    so the client can merge without another round trip. Every blob must be uploaded first.
+    While the server's data volume is nearly full, commits other than deletions are refused
+    with `507 storage_full` (protocol.md 12)."""
     rev = await state.db.run(lambda: _commit(vault_id, file_id, body, caller, state))
     await state.notifier.notify(vault_id)
     return await state.db.read(lambda: _revision(state, vault_id, rev))
@@ -143,6 +146,8 @@ def _commit(
     if body.deleted and body.blobs:
         raise bad_request("A deletion has no blobs.")
     epoch = meta_epoch(meta)
+    if not body.deleted:
+        require_disk(state)
 
     stale = False
     with state.db.transaction() as db:

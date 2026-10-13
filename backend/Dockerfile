@@ -29,7 +29,9 @@ RUN set -eu; \
     echo "$sum  /tmp/$file" | sha256sum -c -; \
     tar -xzf "/tmp/$file" -C /usr/local/bin litestream
 
-FROM caddy:2.11 AS caddy
+# Caddy, pinned by the digest of its multi-arch index: a moved tag can't change the build.
+# To upgrade: docker buildx imagetools inspect caddy:<version>, and copy its Digest.
+FROM caddy:2.11@sha256:f2a1290d0463aad60660d4ec134943f183ee2a5f6c3eb7bf32dd984f2f020772 AS caddy
 
 # Runtime: Python, the virtualenv, Caddy and Litestream.
 FROM python:3.12-slim-bookworm

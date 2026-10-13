@@ -122,4 +122,17 @@ describe("SplitFs", () => {
 		expect(adapter.files.has("New.md")).toBe(false);
 		expect(visible.text("New.md")).toBe("new");
 	});
+
+	it("refuses to write or delete a path that could leave the vault", async () => {
+		const visible = new MemoryFs();
+		const fs = new SplitFs(visible, new AdapterFs(vault(), { configDir: ".obsidian" }));
+		const data = new TextEncoder().encode("x");
+		const chunks = (async function* () {
+			yield data;
+		})();
+		await expect(fs.write("..\\..\\evil.bat", data, { mtime: 1 })).rejects.toThrow("invalid vault path");
+		await expect(fs.remove("..\\outside.md")).rejects.toThrow("invalid vault path");
+		await expect(fs.writeChunks("C:/evil.md", 1, 1, chunks, { mtime: 1 })).rejects.toThrow("invalid vault path");
+		expect(await visible.list()).toEqual([]);
+	});
 });

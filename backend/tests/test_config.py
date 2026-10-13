@@ -5,7 +5,8 @@ import pytest
 from syncryption_server.config import ConfigError, load_settings
 
 ADMIN = {"ADMIN_TOKEN": "t" * 32}
-BASE = {"SHARED_SECRET": "s", **ADMIN, "URL": "https://Notes.Example.com/"}
+SECRET = "s" * 16
+BASE = {"SHARED_SECRET": SECRET, **ADMIN, "URL": "https://Notes.Example.com/"}
 
 
 def test_defaults():
@@ -24,15 +25,19 @@ def test_defaults():
 @pytest.mark.parametrize(
     ("env", "message"),
     [
-        ({"SHARED_SECRET": "s", **ADMIN}, "URL is required"),
-        ({"SHARED_SECRET": "s", **ADMIN, "BEHIND_PROXY": "FALSE"}, "URL is required"),
+        ({"SHARED_SECRET": SECRET, **ADMIN}, "URL is required"),
+        ({"SHARED_SECRET": SECRET, **ADMIN, "BEHIND_PROXY": "FALSE"}, "URL is required"),
         ({"URL": "https://a.example", **ADMIN}, "SHARED_SECRET is required"),
         ({**BASE, "ADMIN_TOKEN": ""}, "ADMIN_TOKEN is required"),
         ({**BASE, "ADMIN_TOKEN": "t" * 31}, "ADMIN_TOKEN must be at least 32"),
         ({**BASE, "SHARED_SECRET": "  "}, "SHARED_SECRET is required"),
+        ({**BASE, "SHARED_SECRET": "s" * 15}, "SHARED_SECRET must be at least 16"),
+        ({**BASE, "SHARED_SECRET": " " + "s" * 15 + " "}, "SHARED_SECRET must be at least 16"),
         ({**BASE, "BEHIND_PROXY": "yes"}, "BEHIND_PROXY must be TRUE or FALSE"),
         ({**BASE, "DISABLE_METRICS": "1"}, "DISABLE_METRICS must be TRUE or FALSE"),
         ({**BASE, "URL": "ftp://a.example"}, "URL must look like"),
+        ({**BASE, "TRUSTED_PROXIES": "10.0.0.1, proxy.lan"}, "'proxy.lan' is neither"),
+        ({**BASE, "TRUSTED_PROXIES": "10.0.0.0/33"}, "TRUSTED_PROXIES must be"),
         ({**BASE, "URL": "https://a.example/sync"}, "origin only"),
         ({**BASE, "S3_BUCKET": "b"}, "S3_ACCESS_KEY, S3_SECRET_KEY empty"),
         ({**BASE, "S3_BUCKET": "b", "S3_ACCESS_KEY": "k"}, "S3_SECRET_KEY empty"),
@@ -72,7 +77,7 @@ def test_invalid(env, message):
 
 
 def test_behind_proxy_without_url():
-    s = load_settings({"SHARED_SECRET": "s", **ADMIN, "BEHIND_PROXY": "true"})
+    s = load_settings({"SHARED_SECRET": SECRET, **ADMIN, "BEHIND_PROXY": "true"})
     assert s.behind_proxy is True
     assert s.url is None
 
@@ -132,3 +137,28 @@ def test_admin_contact():
 def test_disable_metrics():
     assert load_settings({**BASE, "DISABLE_METRICS": "TRUE"}).disable_metrics is True
     assert load_settings({**BASE, "DISABLE_METRICS": "false"}).disable_metrics is False
+
+
+def test_metrics_allowed_ips():
+    from ipaddress import ip_network
+
+    default = load_settings(BASE).metrics_allowed
+    assert ip_network("10.0.0.0/8") in default and ip_network("127.0.0.0/8") in default
+    s = load_settings({**BASE, "METRICS_ALLOWED_IPS": "192.0.2.7, 10.1.2.3/24"})
+    assert s.metrics_allowed == (ip_network("192.0.2.7/32"), ip_network("10.1.2.0/24"))
+    with pytest.raises(ConfigError, match="METRICS_ALLOWED_IPS must be"):
+        load_settings({**BASE, "METRICS_ALLOWED_IPS": "prometheus"})
+
+
+def test_trusted_proxies():
+    from ipaddress import ip_network
+
+    default = load_settings(BASE).trusted_proxies
+    assert ip_network("172.16.0.0/12") in default and ip_network("::1/128") in default
+    assert load_settings({**BASE, "TRUSTED_PROXIES": " "}).trusted_proxies == default
+    s = load_settings({**BASE, "TRUSTED_PROXIES": "192.0.2.7, 2001:db8::/32,10.1.2.3/24"})
+    assert s.trusted_proxies == (
+        ip_network("192.0.2.7/32"),
+        ip_network("2001:db8::/32"),
+        ip_network("10.1.2.0/24"),
+    )

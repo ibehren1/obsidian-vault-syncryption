@@ -7,7 +7,7 @@
  */
 import { ed25519 } from "@noble/curves/ed25519.js";
 
-import type { ApiClient, Device, KeyringObject, Vault } from "../api/client";
+import { DeviceMismatchError, type ApiClient, type Device, type KeyringObject, type Vault } from "../api/client";
 import { ApiError } from "../api/http";
 import { fromB64u, toB64u } from "../crypto/bytes";
 import {
@@ -24,6 +24,7 @@ import {
 	setKeyringRecovery,
 	type Keyring,
 	type KeyringBlob,
+	type KeyringDevice,
 	type KeyringPin,
 	type TrustedKeyring,
 } from "../crypto/keyring";
@@ -92,13 +93,17 @@ export class SetupCancelled extends Error {
 
 /** A connected vault: the keyring is verified and pinned. */
 export class VaultSession {
+	private readonly publicKey: string;
+
 	constructor(
 		readonly api: ApiClient,
 		readonly vault: Vault,
 		readonly store: SyncStore,
 		private trusted: TrustedKeyring,
 		private readonly seed: Uint8Array,
-	) {}
+	) {
+		this.publicKey = publicKeyText(ed25519.getPublicKey(seed));
+	}
 
 	get keyring() {
 		return this.trusted.keyring;
@@ -127,9 +132,12 @@ export class VaultSession {
 			.map((device) => ({ device, code: pairingCode(parsePublicKeyText(device.publicKey)) }));
 	}
 
-	/** This device's policy in the keyring (remote-only.md 4). The server's copy isn't trusted. */
+	/**
+	 * This device's policy in the keyring (remote-only.md 4), from the entry with this
+	 * device's public key. The server's copy isn't trusted, nor is the device id it returned.
+	 */
 	get remoteOnly(): boolean {
-		return this.keyring.devices.find((d) => d.id === this.deviceId)?.policy === "remote-only";
+		return selfEntry(this.keyring, this.publicKey, this.deviceId).policy === "remote-only";
 	}
 
 	/**
@@ -269,11 +277,28 @@ async function fetchTrusted(
 ): Promise<TrustedKeyring> {
 	const ctx = { seed, vaultId: vault.id, name: vault.name };
 	const latest = blobFrom(await api.keyring(vault.id));
-	if (!trusted) return openKeyring(latest, ctx);
-	if (latest.version <= trusted.pin.version + 1) return openKeyring(latest, ctx, trusted);
-	const blobs = [latest];
-	for (let v = trusted.pin.version + 1; v < latest.version; v++) blobs.push(blobFrom(await api.keyring(vault.id, v)));
-	return openKeyringChain(blobs, ctx, trusted);
+	let opened: TrustedKeyring;
+	if (!trusted) opened = await openKeyring(latest, ctx);
+	else if (latest.version <= trusted.pin.version + 1) opened = await openKeyring(latest, ctx, trusted);
+	else {
+		const blobs = [latest];
+		for (let v = trusted.pin.version + 1; v < latest.version; v++) blobs.push(blobFrom(await api.keyring(vault.id, v)));
+		opened = await openKeyringChain(blobs, ctx, trusted);
+	}
+	selfEntry(opened.keyring, publicKeyText(ed25519.getPublicKey(seed)), api.deviceId);
+	return opened;
+}
+
+/**
+ * This device's keyring entry, found by its public key. Its id must be the one the server
+ * returned at login: a server that returns another device's id would otherwise make this
+ * device follow that device's policy.
+ */
+function selfEntry(keyring: Keyring, publicKey: string, deviceId: string | null): KeyringDevice {
+	const entry = keyring.devices.find((d) => d.publicKey === publicKey);
+	if (!entry) throw new DeviceMismatchError("This device's key isn't in the vault's keyring.");
+	if (entry.id !== deviceId) throw new DeviceMismatchError("The server returned another device's id for this key.");
+	return entry;
 }
 
 /** Log in, asking for the shared secret if the server needs it to let this key join. */

@@ -35,7 +35,7 @@ limits, and the admin API. Crypto details are in [crypto.md](crypto.md).
 
 #### `GET /metrics`
 
-Prometheus metrics in the text exposition format. Needs no token. Only counts: requests by route template and status, users, vaults, keys by status, files, revisions, blobs and their bytes, active locks, open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
+Prometheus metrics in the text exposition format. Needs no token, but answers only clients in `METRICS_ALLOWED_IPS` (empty: loopback and private ranges); others get `403 forbidden`. Only counts: requests by route template and status, users, vaults, keys by status, files, revisions, blobs and their bytes, active locks, open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
 
 | Status | Body | Notes |
 |---|---|---|
@@ -170,7 +170,7 @@ Opening or creating a vault, its keyring and recovery.
 
 #### `POST /api/v1/vaults/open`
 
-The caller's vault. 404 while the device still has to create it.
+The caller's vault. 404 while the device still has to create it. For a pending device only the vault's id and name are real: `keyringVersion` and `seq` are 0 and `createdAt` is the Unix epoch until it is approved.
 
 Request body: [OpenRequest](#openrequest) (`application/json`)
 
@@ -298,7 +298,7 @@ Path parameters:
 
 #### `PUT /api/v1/vaults/{vault_id}/blobs/{blob_id}`
 
-Upload one encrypted chunk as raw bytes. The server hashes the body and refuses it with `422 hash_mismatch` unless the hash equals `blob_id`.
+Upload one encrypted chunk as raw bytes. The server hashes the body and refuses it with `422 hash_mismatch` unless the hash equals `blob_id`. A new blob is refused with `507 storage_full` when the server's data volume is nearly full, and with `507 quota_exceeded` when it would take the vault's stored blobs past the quota the administrator set (protocol.md 12).
 
 Path parameters:
 
@@ -354,7 +354,7 @@ Path parameters:
 
 #### `PUT /api/v1/vaults/{vault_id}/files/{file_id}`
 
-Commit a new revision of one file. `parentRev` must be the current head, or `null` for a file that must not exist yet; otherwise the answer is `409 stale_parent` with the head, so the client can merge without another round trip. Every blob must be uploaded first.
+Commit a new revision of one file. `parentRev` must be the current head, or `null` for a file that must not exist yet; otherwise the answer is `409 stale_parent` with the head, so the client can merge without another round trip. Every blob must be uploaded first. While the server's data volume is nearly full, commits other than deletions are refused with `507 storage_full` (protocol.md 12).
 
 Path parameters:
 

@@ -38,7 +38,8 @@ def settings(tmp_path) -> Settings:
 
 @pytest.fixture
 def client(settings, clock):
-    with TestClient(create_app(settings, clock=clock)) as c:
+    # From loopback, as a real peer: TestClient's default "testclient" isn't an address.
+    with TestClient(create_app(settings, clock=clock), client=("127.0.0.1", 50000)) as c:
         yield c
 
 

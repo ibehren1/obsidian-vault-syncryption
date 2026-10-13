@@ -26,7 +26,7 @@ from pathlib import Path
 BASE_VERSION = 5
 # Read-only connections for `Database.read`, each on its own thread.
 READERS = 5
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 OLD_DATA_MESSAGE = (
     "This server's data predates server 0.1.4 (one key per device per vault). "
     "Delete ./data (or the S3 data) and start again."
@@ -50,6 +50,9 @@ CREATE TABLE vaults (
     disabled_at INTEGER,
     -- remote-only.md 5: the grace period of its remote-only devices, NULL for the default
     remote_only_grace INTEGER,
+    -- protocol.md 12: the bytes of its stored blobs, and the admin's cap on them (NULL: none)
+    blob_bytes INTEGER NOT NULL DEFAULT 0,
+    blob_quota INTEGER,
     UNIQUE (user_id, name)
 );
 -- One key of one device in one vault (protocol.md 3). `vault_id` is NULL while the key
@@ -187,6 +190,11 @@ MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [
     "ALTER TABLE vaults ADD COLUMN remote_only_grace INTEGER",
     # Schema 8: locking a remote-only device from another device (remote-only.md 5).
     "ALTER TABLE devices ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
+    # Schema 9: per-vault storage quotas (protocol.md 12), with the stored bytes kept up to date.
+    "ALTER TABLE vaults ADD COLUMN blob_bytes INTEGER NOT NULL DEFAULT 0;"
+    "ALTER TABLE vaults ADD COLUMN blob_quota INTEGER;"
+    "UPDATE vaults SET blob_bytes = "
+    "(SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.vault_id = vaults.id)",
 ]
 
 

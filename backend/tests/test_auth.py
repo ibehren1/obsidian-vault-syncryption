@@ -238,6 +238,40 @@ def test_wrong_secrets_are_rate_limited(client, clock):
     Device(client, "late").login(SECRET)
 
 
+def test_the_right_secret_works_after_the_total_cap(client, clock):
+    from syncryption_server.auth import JOIN_FAILURE_TOTAL
+
+    db = client.app.state.ctx.db
+    total, _ = JOIN_FAILURE_TOTAL
+    now = clock()
+    with db.transaction() as tx:  # wrong secrets from many other addresses
+        for i in range(total):
+            tx.execute("INSERT INTO join_attempts (ip, at) VALUES (?, ?)", (f"10.0.0.{i}", now))
+    for secret in ("wrong", None):
+        r = Device(client, "mallory").login(secret, expect=429)
+        assert r["error"] == "rate_limited"
+        clock.advance(30)
+    assert Device(client, "bob").login(SECRET)["status"] == "active"
+    # Wrong secrets past the cap still count against their own address.
+    ours = "SELECT COUNT(*) FROM join_attempts WHERE ip NOT LIKE '10.0.0.%'"
+    assert db.one(ours)[0] == 1
+
+
+def test_wrong_secrets_past_the_total_cap_hit_the_address_cap(client, clock):
+    from syncryption_server.auth import JOIN_FAILURE_TOTAL
+
+    db = client.app.state.ctx.db
+    total, _ = JOIN_FAILURE_TOTAL
+    with db.transaction() as tx:
+        for i in range(total):
+            tx.execute("INSERT INTO join_attempts (ip, at) VALUES (?, ?)", (f"10.0.0.{i}", clock()))
+    for i in range(5):
+        Device(client, f"user{i}").login("wrong", expect=429)
+        clock.advance(30)
+    # The address is now over its own cap, so the right secret is refused from it too.
+    Device(client, "late").login(SECRET, expect=429)
+
+
 def test_auth_is_rate_limited_per_ip(client):
     d = Device(client, "alice")
     for _ in range(10):
@@ -251,20 +285,6 @@ def test_auth_is_rate_limited_per_ip(client):
     )
     assert r.status_code == 429
     assert int(r.headers["Retry-After"]) >= 1
-
-
-def test_at_most_five_pending_devices_per_vault(client, clock, alice):
-    for _ in range(5):
-        Device(client, "alice").login()
-        clock.advance(30)
-    r = Device(client, "alice").login(expect=429)
-    assert r["error"] == "rate_limited"
-    # Another vault has its own limit.
-    work = Device(client, "alice", vault_name="Work")
-    work.login(SECRET)
-    work.create_vault()
-    clock.advance(60)
-    assert Device(client, "alice", vault_name="Work").login()["status"] == "pending"
 
 
 def test_pending_devices_expire_after_a_day(client, clock, alice):
@@ -294,7 +314,7 @@ def test_origin_from_proxy_headers(tmp_path, clock):
     from syncryption_server.config import Settings
 
     settings = Settings(shared_secret=SECRET, behind_proxy=True, data_dir=tmp_path)
-    with TestClient(create_app(settings, clock=clock)) as c:
+    with TestClient(create_app(settings, clock=clock), client=("127.0.0.1", 50000)) as c:
         d = Device(c, "alice")
         r = c.post(
             "/api/v1/auth/challenge",
@@ -313,3 +333,45 @@ def test_joining_a_disabled_vault(client, alice):
     phone = Device(client, "alice")
     for secret in (None, SECRET):
         assert phone.login(secret, expect=403)["error"] == "vault_disabled"
+
+
+def test_origin_ignores_proxy_headers_from_an_untrusted_peer(tmp_path, clock):
+    from fastapi.testclient import TestClient
+
+    from syncryption_server.app import create_app
+    from syncryption_server.config import Settings
+
+    settings = Settings(shared_secret=SECRET, behind_proxy=True, data_dir=tmp_path)
+    with TestClient(create_app(settings, clock=clock), client=("203.0.113.5", 1)) as c:
+        d = Device(c, "alice")
+        r = c.post(
+            "/api/v1/auth/challenge",
+            json={"username": "alice", "vaultName": "V", "publicKey": d.public_key_text},
+            headers={
+                "Host": "sync.example.org",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "evil.example",
+            },
+        )
+        assert "origin: http://sync.example.org\n" in r.json()["message"]
+
+
+def test_hourly_cleanup_sweeps_expired_challenges(client, clock, alice):
+    from syncryption_server.app import gc_pass
+
+    state = client.app.state.ctx
+
+    def count() -> int:
+        return state.db.one("SELECT COUNT(*) FROM challenges")[0]
+
+    before = count()
+    for _ in range(3):
+        alice.challenge()
+    assert count() == before + 3
+    # Challenge-only traffic never reaches /auth/verify, so only the hourly cleanup sweeps.
+    client.portal.call(gc_pass, state)
+    assert count() == before + 3
+    clock.advance(3 * 60)
+    client.portal.call(gc_pass, state)
+    assert count() == 0
+    assert state.metrics.gc_runs.labels("expired")._value.get() == 2

@@ -21,7 +21,7 @@ serve() {
 	settings=$(python -m syncryption_server render "$RUN_DIR")
 	eval "$settings"
 	if [ "$behind_proxy" = TRUE ]; then
-		# The app reads X-Forwarded-* itself (BEHIND_PROXY=TRUE), so uvicorn must not.
+		# The app reads X-Forwarded-* itself, only from TRUSTED_PROXIES, so uvicorn must not.
 		uvicorn --factory "$APP" --host 0.0.0.0 --port 8080 --no-proxy-headers \
 			--no-server-header --timeout-graceful-shutdown 5 &
 		pids+=($!)

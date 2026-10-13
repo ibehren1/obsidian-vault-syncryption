@@ -6,7 +6,11 @@ from syncryption_server.__main__ import main
 from syncryption_server.migrate import FROM_MARKER
 
 ADMIN = "admin-token-" + "f" * 32
-BASE = {"SHARED_SECRET": "very-secret", "ADMIN_TOKEN": ADMIN, "URL": "https://notes.example.com"}
+BASE = {
+    "SHARED_SECRET": "very-secret-value",
+    "ADMIN_TOKEN": ADMIN,
+    "URL": "https://notes.example.com",
+}
 S3 = {"S3_BUCKET": "bucket", "S3_ACCESS_KEY": "AKIA-key", "S3_SECRET_KEY": "s3-secret"}
 
 
@@ -33,7 +37,7 @@ def env(monkeypatch):
 
 
 def test_check_reports_errors(env, capsys):
-    env({"SHARED_SECRET": "x", "ADMIN_TOKEN": ADMIN})
+    env({"SHARED_SECRET": "x" * 16, "ADMIN_TOKEN": ADMIN})
     assert main(["check"]) == 1
     assert "URL is required" in capsys.readouterr().err
 
@@ -91,7 +95,7 @@ def test_check_data_refuses_s3_after_moving_off_it(env, tmp_path, capsys):
 
 
 def test_render_behind_proxy_without_s3(env, tmp_path, capsys):
-    env({"SHARED_SECRET": "x", "ADMIN_TOKEN": ADMIN, "BEHIND_PROXY": "TRUE"})
+    env({"SHARED_SECRET": "x" * 16, "ADMIN_TOKEN": ADMIN, "BEHIND_PROXY": "TRUE"})
     assert main(["render", str(tmp_path)]) == 0
     assert "behind_proxy=TRUE" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == []

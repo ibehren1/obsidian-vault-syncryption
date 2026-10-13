@@ -102,7 +102,10 @@ export interface paths {
         /**
          * Put Blob
          * @description Upload one encrypted chunk as raw bytes. The server hashes the body and refuses it
-         *     with `422 hash_mismatch` unless the hash equals `blob_id`.
+         *     with `422 hash_mismatch` unless the hash equals `blob_id`. A new blob is refused with
+         *     `507 storage_full` when the server's data volume is nearly full, and with
+         *     `507 quota_exceeded` when it would take the vault's stored blobs past the quota the
+         *     administrator set (protocol.md 12).
          */
         put: operations["put_blob_api_v1_vaults__vault_id__blobs__blob_id__put"];
         post?: never;
@@ -279,6 +282,8 @@ export interface paths {
          * @description Commit a new revision of one file. `parentRev` must be the current head, or `null` for
          *     a file that must not exist yet; otherwise the answer is `409 stale_parent` with the head,
          *     so the client can merge without another round trip. Every blob must be uploaded first.
+         *     While the server's data volume is nearly full, commits other than deletions are refused
+         *     with `507 storage_full` (protocol.md 12).
          */
         put: operations["commit_api_v1_vaults__vault_id__files__file_id__put"];
         post?: never;
@@ -475,7 +480,9 @@ export interface paths {
         put?: never;
         /**
          * Open Vault
-         * @description The caller's vault. 404 while the device still has to create it.
+         * @description The caller's vault. 404 while the device still has to create it. For a pending device
+         *     only the vault's id and name are real: `keyringVersion` and `seq` are 0 and `createdAt`
+         *     is the Unix epoch until it is approved.
          */
         post: operations["open_vault_api_v1_vaults_open_post"];
         delete?: never;
@@ -515,11 +522,13 @@ export interface paths {
         };
         /**
          * Prometheus
-         * @description Prometheus metrics in the text exposition format. Needs no token. Only counts:
-         *     requests by route template and status, users, vaults, keys by status, files,
-         *     revisions, blobs and their bytes, active locks, open long-polls, cleanup runs,
-         *     wrong shared secrets and admin tokens, and process metrics. No label names a
-         *     user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
+         * @description Prometheus metrics in the text exposition format. Needs no token, but answers
+         *     only clients in `METRICS_ALLOWED_IPS` (empty: loopback and private ranges); others
+         *     get `403 forbidden`. Only counts: requests by route template and status, users,
+         *     vaults, keys by status, files, revisions, blobs and their bytes, active locks,
+         *     open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process
+         *     metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE`
+         *     removes the endpoint (`404`).
          */
         get: operations["prometheus_metrics_get"];
         put?: never;

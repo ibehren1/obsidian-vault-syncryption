@@ -139,7 +139,8 @@ cryptographic:
 ## 4. The policy
 - The policy is a field in the device's entry of the signed keyring plaintext
   ([crypto.md](crypto.md) section 6.1): `"policy": "remote-only"`. If it's absent, the device
-  is a full device. The device being approved reads its policy from the keyring it opens.
+  is a full device. The device being approved reads its policy from the keyring it opens,
+  in the entry with its own public key ([crypto.md](crypto.md) section 6.4).
   The server is untrusted for integrity, so a flag held only on the server could be removed
   by a malicious server, making the device write plaintext.
 - The approving device sets it, through a choice in the approval UI ("Approve as

@@ -44,8 +44,8 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 
 | Module | Responsibility |
 |---|---|
-| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, `/metrics` (unless `DISABLE_METRICS`), the HTML `/` page, the icons `/` and `/admin` link (`static/`), version headers, the maintenance `503` for `/api/v1` |
-| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `MIGRATE_FROM_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors), `DISABLE_METRICS` |
+| `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly cleanup task (expired challenges, sessions and pending keys, then retention, then blob GC), `/health`, `/metrics` (unless `DISABLE_METRICS`; only for clients in `METRICS_ALLOWED_IPS`), the HTML `/` page, the icons `/` and `/admin` link (`static/`), version headers, the maintenance `503` for `/api/v1` |
+| `config` | parses and validates `BEHIND_PROXY`, `TRUSTED_PROXIES`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `MIGRATE_FROM_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors), `DISABLE_METRICS`, `METRICS_ALLOWED_IPS` |
 | `db` | SQLite connection (WAL mode), schema migrations (`PRAGMA user_version`), `BEGIN IMMEDIATE` transaction helper |
 | `errors` | `ApiError` and the handlers that turn every error into the protocol's `{error, message, details}` shape |
 | `encoding` | `b64u`, RFC 3339 times, id formats |
@@ -251,7 +251,7 @@ wakes its `/wait`, which then finds the session gone.
 ## 3. Container (`backend/Dockerfile`, `backend/entrypoint.sh`)
 The image is built in three stages: a `ghcr.io/astral-sh/uv` stage that installs the
 locked dependencies into `/app/.venv`, the Litestream 0.5.17 release binary (checked
-against a pinned SHA-256) and the Caddy 2.11 binary from the official image. The runtime
+against a pinned SHA-256) and the Caddy 2.11 binary from the official image (pinned by digest). The runtime
 is `python:3.12-slim-bookworm`. The entrypoint uses small commands from
 `python -m syncryption_server` (`check`, `check-data`, `render`, `migrate`, `health`), so
 the environment rules live in one place (`config.py`).
@@ -281,7 +281,7 @@ the environment rules live in one place (`config.py`).
      --forwarded-allow-ips 127.0.0.1` (so client IPs come from Caddy), and Caddy in front
      on 80/443.
    - `BEHIND_PROXY=TRUE`: uvicorn on `0.0.0.0:8080` with `--no-proxy-headers`. The app
-     reads `X-Forwarded-*` itself.
+     reads `X-Forwarded-*` itself, and only from peers in `TRUSTED_PROXIES`.
    - With blobs in S3, everything runs under `litestream replicate -exec`, so the database
      is replicated while the app runs and Litestream stops when the app does. With
      `MIGRATE_FROM_S3=TRUE`, blobs are served from `/data` and Litestream doesn't run.
@@ -357,7 +357,9 @@ flowchart TD
   upload), otherwise read the file, encrypt the chunks, upload the missing
   blobs, then commit with `parentRev` from `files`. On `409`, apply or merge the head
   returned in the error, which queues the result for the next push round (at most 5 per
-  sync). A `400`, `413` or `422` for one file keeps it queued and the sync goes on.
+  sync). A `400`, `413` or `422` for one file keeps it queued and the sync goes on. Any
+  other error, such as `507 storage_full` or `quota_exceeded` (protocol.md 12), stops the
+  sync with the server's message, and the outbox is kept for the next one.
 - **Live updates:** `LiveLoop` long-polls `/wait` (protocol.md 10.2). A new `seq` runs a
   sync; a new `locksSeq` refetches the lock list. Local changes sync 2 seconds after the
   last one, and a 2-minute timer is the fallback when a wait is lost. When the app comes
@@ -470,6 +472,8 @@ flowchart TD
     `desktop.ini` files, at any depth
   - hidden files and folders outside the `.obsidian*` folders (Obsidian doesn't index them)
   - the paths matched by the device's exclude list (section 4.3)
+  - paths that `normPath` rejects ([crypto.md](crypto.md) section 5.2), such as a name
+    with `\` on Linux or macOS. Every write and deletion checks the path again.
 - `community-plugins.json` is written last, and the user is asked to reload Obsidian. On a
   device's first sync, the vault's config files replace the local defaults without
   conflict copies (section 4.2, Config files).

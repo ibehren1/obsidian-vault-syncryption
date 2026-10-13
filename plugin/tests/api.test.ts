@@ -44,6 +44,14 @@ describe("normalizeEndpoint", () => {
 		expect(() => normalizeEndpoint("ftp://example.com")).toThrow();
 		expect(() => normalizeEndpoint("not a url")).toThrow();
 	});
+
+	it("accepts http:// only for this machine", () => {
+		expect(normalizeEndpoint("http://127.0.0.1:8080")).toBe("http://127.0.0.1:8080");
+		expect(normalizeEndpoint("http://[::1]:8080")).toBe("http://[::1]:8080");
+		expect(() => normalizeEndpoint("http://sync.example.com")).toThrow("https://");
+		expect(() => normalizeEndpoint("http://192.168.1.5:8080")).toThrow("https://");
+		expect(() => normalizeEndpoint("http://localhost.example.com")).toThrow("https://");
+	});
 });
 
 describe("checkChallenge", () => {

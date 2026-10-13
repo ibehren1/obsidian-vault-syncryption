@@ -20,6 +20,8 @@ MB of database. Blob keys are `blobs/<userId>/<vaultId>/<blobId[0:2]>/<blobId>`.
 - A key rotation (removing a key, or replacing or removing the recovery key) re-encrypts
   every file under the new epoch: one more full copy of the vault (crypto.md 8.4).
 - A deleted file keeps its earlier revisions until retention removes them.
+- The admin can cap a vault's stored size with a quota, and the server keeps 1 GiB free on
+  the data volume for `meta.db` (protocol.md 12).
 
 Retention (protocol.md 9.3) bounds this. It uses fixed values:
 - every revision for 30 days, and at least the last 10 per file;

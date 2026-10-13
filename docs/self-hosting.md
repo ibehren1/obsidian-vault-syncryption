@@ -43,13 +43,21 @@ services:
       #          X-Forwarded-Proto and X-Forwarded-Host. Allow requests of at least 30 s.
       BEHIND_PROXY: "FALSE"
 
+      # Only with BEHIND_PROXY=TRUE: the IP addresses or CIDRs your reverse proxy connects
+      # from, separated by commas, e.g. "172.18.0.5" or "10.0.0.0/8, fd00::/8". Only
+      # requests from these addresses may set X-Forwarded-For, X-Forwarded-Proto and
+      # X-Forwarded-Host; from anywhere else they are ignored, so nobody can fake a client
+      # address by reaching port 8080 directly. Empty means loopback and private ranges
+      # (127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7).
+      TRUSTED_PROXIES: ""
+
       # The public address: scheme and host only, no path, e.g. https://notes.example.com.
       # Required when BEHIND_PROXY=FALSE. Optional when TRUE (the proxy's headers are used).
       URL: "https://notes.example.com"
 
-      # Required. Needed only to create a new user or vault; joining an existing vault
-      # doesn't need it. Give it only to people who may create vaults.
-      # Generate one with: openssl rand -base64 24
+      # Required, at least 16 characters. Needed only to create a new user or vault;
+      # joining an existing vault doesn't need it. Give it only to people who may
+      # create vaults. Generate one with: openssl rand -base64 24
       SHARED_SECRET: ""
 
       # Required, at least 32 characters. Opens /admin (sign in on the page, or send
@@ -86,20 +94,28 @@ services:
       # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
       # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
       DISABLE_METRICS: "FALSE"
+
+      # Optional. The client IP addresses or CIDRs, separated by commas, that may read
+      # /metrics (e.g. your Prometheus: "10.0.0.5"); others get 403. Behind a proxy the
+      # client is the one in X-Forwarded-For from a TRUSTED_PROXIES peer. Empty means
+      # loopback and private ranges only.
+      METRICS_ALLOWED_IPS: ""
 ```
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `BEHIND_PROXY` | yes | `FALSE`: the container gets its own certificate. `TRUE`: plain HTTP on 8080 for your proxy. |
+| `TRUSTED_PROXIES` | no | with `BEHIND_PROXY=TRUE`: the IP addresses or CIDRs of your reverse proxy, separated by commas. Only requests from them may set `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`. Empty means loopback and private ranges (`127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`). |
 | `URL` | when `BEHIND_PROXY=FALSE` | the public address, e.g. `https://notes.example.com` |
-| `SHARED_SECRET` | yes | the secret people need to join the server (section 4) |
+| `SHARED_SECRET` | yes | the secret people need to join the server, at least 16 characters (section 4) |
 | `ADMIN_TOKEN` | yes | the token for the admin page, at least 32 characters (section 5) |
 | `ADMIN_CONTACT` | no | how users can reach you (email, Slack, phone, ...): one line of free text, at most 500 characters. Shown on the server's `/` page and in `/health`, and in the plugin when the server is in maintenance or an account is disabled. |
 | `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | all three or none | store data in S3 instead of `./data`. Leave them empty to use local storage. |
 | `S3_ENDPOINT` | no | the provider's S3 endpoint, e.g. `https://s3.us-west-004.backblazeb2.com`, `https://<account>.r2.cloudflarestorage.com` or `http://minio:9000`. Empty means AWS. |
 | `MIGRATE_TO_S3` | no | `TRUE` copies existing local data to S3 on startup (section 7) |
 | `MIGRATE_FROM_S3` | no | `TRUE` copies the data in S3 back to `./data` on startup and serves from `./data` (section 8) |
-| `DISABLE_METRICS` | no | `TRUE` turns off the public Prometheus endpoint `/metrics` (section 5.1). Default `FALSE`. |
+| `DISABLE_METRICS` | no | `TRUE` turns off the Prometheus endpoint `/metrics` (section 5.1). Default `FALSE`. |
+| `METRICS_ALLOWED_IPS` | no | the client IP addresses or CIDRs, separated by commas, that may read `/metrics` (section 5.1). Empty means loopback and private ranges (the same list as `TRUSTED_PROXIES`'s default). |
 
 **Storage:** with the `S3_*` variables empty (the default), file contents are stored in
 `./data/blobs` on the host and nothing else needs to be set up. Setting the three `S3_*`
@@ -111,11 +127,12 @@ Generate a shared secret with, for example, `openssl rand -base64 24`, and an ad
 token with `openssl rand -hex 32`.
 
 The container refuses to start, with a message saying why, if `URL` is missing when
-`BEHIND_PROXY=FALSE`, if `SHARED_SECRET` is empty, if `ADMIN_TOKEN` is
+`BEHIND_PROXY=FALSE`, if `SHARED_SECRET` is empty or shorter than 16 characters, if `ADMIN_TOKEN` is
 missing or shorter than 32 characters, if only some of the `S3_*`
 variables are set, if `S3_ENDPOINT` is set without them, if `MIGRATE_TO_S3=TRUE`
 or `MIGRATE_FROM_S3=TRUE` without S3, if both are `TRUE`, or if `BEHIND_PROXY`,
-`MIGRATE_TO_S3`, `MIGRATE_FROM_S3` or `DISABLE_METRICS` is neither `TRUE` nor `FALSE`. It
+`MIGRATE_TO_S3`, `MIGRATE_FROM_S3` or `DISABLE_METRICS` is neither `TRUE` nor `FALSE`, or
+if an entry of `TRUSTED_PROXIES` or `METRICS_ALLOWED_IPS` is neither an IP address nor a CIDR. It
 also refuses to start if the `S3_*` variables are set again after a move off S3 (section 8).
 
 ## 3. Start
@@ -135,6 +152,14 @@ and point your proxy at it. The container's healthcheck (`docker compose ps`) sh
 it is ready. The proxy must pass `X-Forwarded-Proto` and
 `X-Forwarded-Host`, and must allow requests to stay open for at least 30 seconds (live
 updates use long-polling). Don't expose port 8080 to the internet directly.
+
+The server honours `X-Forwarded-For` (it takes the last entry, the one your proxy added),
+`X-Forwarded-Proto` and `X-Forwarded-Host` only on connections from `TRUSTED_PROXIES`.
+The default, loopback and private ranges, covers a proxy on the same host or on a Docker
+network. If your proxy connects from a public address, set `TRUSTED_PROXIES` to it; if
+other machines on your private network can reach port 8080, narrow it to the proxy's
+address. Requests from any other address are counted (for rate limits) and logged under
+their own address, and their origin uses the scheme and `Host` they arrived with.
 
 Check it's up: `curl https://notes.example.com/health`. It answers 200 with
 `"status": "ok"`, or `"status": "maintenance"` while maintenance mode is on (section 5),
@@ -164,7 +189,8 @@ organisation. Without it, the plugin tells people to contact their administrator
   vaults are end-to-end encrypted and readable only by their members' keys.
 
 In the plugin, each person sets:
-- the endpoint URL
+- the endpoint URL, which must be `https://` (`http://` works only for a server on the
+  same machine, such as `http://localhost:8080`)
 - their username
 - a vault name (a new name creates the vault)
 - an encryption key: the plugin generates one for each device and vault (a key opens
@@ -221,6 +247,18 @@ show "–" elsewhere. This tab works also with `DISABLE_METRICS: "TRUE"`.
   how long such a device may go without reaching the server before it locks its files. The
   default is 24 hours. Enter a whole number of hours from 1 to 8760 in the vault's box, or
   leave it empty for the default. Devices get the new value at their next login.
+- **Storage quota:** each vault can have a quota on its stored (encrypted) size, the size
+  the page shows. There is none by default. Enter a whole number of GB in the vault's box,
+  or leave it empty for no quota. Once a vault reaches it, new uploads are refused with
+  507 `quota_exceeded` and the plugin shows the server's message; data already stored is
+  kept. The size includes the old versions the server keeps, so deleting files frees space
+  only once those versions expire (30 days of history, 90 days for deleted files) and the
+  hourly cleanup has run ([protocol.md](protocol.md) sections 9.3 and 12).
+- **Disk reserve:** the server keeps 1 GiB free on the data volume, which always holds
+  `meta.db` (also with S3). Below that, it refuses new uploads and changes with 507
+  `storage_full`, so the database can't run out of room; deletions still go through.
+  Free space on the data disk shows on the Performance tab. Free some space, or grow the
+  volume, and syncing resumes on its own.
 - Admin actions are written to the container log.
 
 The same data is available as JSON for scripts:
@@ -236,20 +274,27 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"graceSeconds": 172800}' \
   https://notes.example.com/admin/api/vaults/<vault id>/grace
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"quotaBytes": 10737418240}' \
+  https://notes.example.com/admin/api/vaults/<vault id>/quota
 ```
 The message is optional: `maintenance/on` also works without a body. `graceSeconds` is
-3600 to 31536000, or `null` for the default. `GET /admin/api/status` returns the version,
+3600 to 31536000, or `null` for the default. `quotaBytes` is 1 to 2^50 bytes, or `null`
+for no quota. `GET /admin/api/status` returns the version,
 maintenance state and `adminContact`, and `GET /admin/api/performance` the numbers of the
 Performance tab (counters as totals since the server started). The API is
 described in [protocol.md](protocol.md), sections 2 and 14.
 
 ### 5.1 Metrics
-`https://notes.example.com/metrics` serves Prometheus metrics. It needs no token, so anyone
-who can reach the server can read it, but it holds only counts: no label names a user,
-vault, device or file. Set `DISABLE_METRICS: "TRUE"` to turn it off (it then answers 404);
-the admin page's Performance tab keeps working.
-Behind your own proxy (`BEHIND_PROXY=TRUE`) you can also keep `/metrics` off the internet
-there and scrape port 8080 directly.
+`/metrics` serves Prometheus metrics. It needs no token, but it answers only clients in
+`METRICS_ALLOWED_IPS`; others get `403 forbidden`. Left empty, that is loopback and private
+ranges, so a Prometheus on the same host, Docker network or LAN can scrape it and the
+internet can't. Behind your own proxy (`BEHIND_PROXY=TRUE`) the client is the address in
+`X-Forwarded-For` from a `TRUSTED_PROXIES` peer, so a request the proxy forwards from the
+internet is refused; a request from the proxy itself without that header counts as the
+proxy's address. It holds only counts: no label names a user, vault, device or file. Set
+`DISABLE_METRICS: "TRUE"` to turn it off (it then answers 404); the admin page's
+Performance tab keeps working.
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -266,7 +311,7 @@ there and scrape port 8080 directly.
 | `syncryption_locks_active` | gauge | soft locks that haven't expired |
 | `syncryption_longpoll_waiters` | gauge | open long-polls (roughly, devices online) |
 | `syncryption_maintenance` | gauge | 1 while maintenance mode is on |
-| `syncryption_gc_runs_total{task}`, `syncryption_gc_failures_total{task}` | counter | hourly cleanup runs and failures (`retention`, `blobs`) |
+| `syncryption_gc_runs_total{task}`, `syncryption_gc_failures_total{task}` | counter | hourly cleanup runs and failures (`expired`: challenges, sessions and pending keys past their lifetime; `retention`; `blobs`) |
 | `syncryption_retention_pruned_revisions_total`, `syncryption_gc_deleted_blobs_total` | counter | revisions and blobs the cleanup deleted |
 | `syncryption_gc_last_run_timestamp_seconds{task}` | gauge | when each cleanup task last ran (Unix time; 0 before the first run) |
 | `syncryption_data_disk_free_bytes`, `syncryption_data_disk_total_bytes` | gauge | free and total space of the file system holding `/data` |
