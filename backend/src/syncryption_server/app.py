@@ -5,6 +5,7 @@ import contextlib
 import html
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -188,6 +189,7 @@ async def _gc_loop(state: AppState) -> None:
         except Exception:
             m.gc_failures.labels("retention").inc()
             log.exception("history retention failed")
+        m.gc_last_run.labels("retention").set(time.time())
         m.gc_runs.labels("blobs").inc()
         try:
             # Blobs a prune freed are usually older than GC_GRACE, so they go in this pass.
@@ -198,6 +200,7 @@ async def _gc_loop(state: AppState) -> None:
         except Exception:
             m.gc_failures.labels("blobs").inc()
             log.exception("blob garbage collection failed")
+        m.gc_last_run.labels("blobs").set(time.time())
 
 
 def create_app(
@@ -207,7 +210,7 @@ def create_app(
 ) -> FastAPI:
     """Build the app. With no arguments, settings come from the environment."""
     settings = settings or load_settings()
-    app_metrics = metrics.Metrics()
+    app_metrics = metrics.Metrics(settings.data_dir)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -226,13 +229,18 @@ def create_app(
         if clock is not None:
             state.clock = clock
         app.state.ctx = state
-        gc = asyncio.create_task(_gc_loop(state))
+        tasks = [
+            asyncio.create_task(_gc_loop(state)),
+            asyncio.create_task(metrics.watch_loop_lag(app_metrics)),
+        ]
         try:
             yield
         finally:
-            gc.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await gc
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             await blob_store.close()
             await asyncio.to_thread(db.close)
 
@@ -257,9 +265,9 @@ def create_app(
         response.headers[PROTOCOL_HEADER] = str(PROTOCOL_VERSION)
         return response
 
-    if not settings.disable_metrics:
-        # Added last, so it is outermost and counts the maintenance 503 and the 413 too.
-        app.add_middleware(metrics.RequestMetrics, metrics=app_metrics)
+    # Added last, so it is outermost and counts the maintenance 503 and the 413 too. Also with
+    # DISABLE_METRICS, which removes only `/metrics`: the admin page shows the same numbers.
+    app.add_middleware(metrics.RequestMetrics, metrics=app_metrics)
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:

@@ -633,12 +633,15 @@ API. Every route needs `ADMIN_TOKEN`.
 - **Errors:** a JSON route without a valid Bearer token returns `401 unauthenticated`; an
   unknown user or vault id returns `404 not_found`. A page without a valid session shows
   the login form (`401` after a wrong token).
-- **Pages:** `GET /admin` shows the login form or the dashboard;
+- **Pages:** `GET /admin` shows the login form or the dashboard's Vaults tab (each user,
+  and under each vault its devices), `GET /admin?tab=performance` the Performance tab
+  (section 14.2);
   `POST /admin/{users|vaults}/{id}/{disable|enable|purge}` and
   `POST /admin/maintenance/{on|off}` (form field `message` for `on`) and
   `POST /admin/vaults/{id}/grace` (form field `hours`, a whole number from 1 to 8760, empty
   for the default) act and redirect to `/admin?done=<code>`.
 - **JSON:**
+  - `GET /admin/api/performance` returns the snapshot of section 14.2.
   - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
     with the same values as `/health`.
   - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
@@ -693,3 +696,39 @@ backup.
 - **Clients** are expected to pause sync, show the message and the contact, and retry after
   `Retry-After`. Nothing changes on the server while it is on, so they resume where they
   stopped.
+
+### 14.2 Performance
+The Performance tab shows the server's current numbers and refreshes them on an interval
+the administrator picks (1, 2, 5, 10, 30 or 60 seconds, default 5, or paused; kept in the
+browser's `localStorage`).
+
+- **Data:** `GET /admin/performance.json` (session cookie or Bearer; it changes nothing,
+  so it needs no CSRF token) and `GET /admin/api/performance` (Bearer only) return the
+  same snapshot with `Cache-Control: no-store`, or `401 unauthenticated`. Neither is
+  counted in the request metrics. The snapshot:
+  - `time`, `startedAt`: server time and process start, in Unix seconds.
+  - `requests`: `[{"method", "route", "status", "count"}]`, and `durations`:
+    `[{"method", "route", "buckets", "sum"}]`, where `buckets` are cumulative counts for
+    each bound in the top-level `buckets` (seconds), then +Inf. Routes are templates, as
+    in `/metrics`. All counts are totals since `startedAt`.
+  - `process` (`cpuSeconds`, `memoryBytes`, `openFds`) and `container` (`cpuSeconds`,
+    `memoryBytes`, `memoryLimitBytes`): `null` where not available.
+  - `users`, `vaults`, `devices` (by status), `files`, `revisions`, `blobs`, `blobBytes`,
+    `locks`, `longpolls`, `maintenance`, `gcRuns` and `gcFailures` (by task),
+    `adminTokenFailures`, `sharedSecretFailures`.
+  - `requestBytes`, `responseBytes` (body bytes, totals), `inFlight` (requests being
+    answered, long-polls included), `loopLagSeconds` (the worst event-loop delay of the
+    last 10 seconds), `disk` (`freeBytes`, `totalBytes` of the data directory's file
+    system), `dbBytes` and `dbWalBytes` (`null` while the file doesn't exist),
+    `prunedRevisions`, `deletedBlobs`, and `gcLastRun` (Unix seconds by task, `null`
+    before the first run).
+  No value names a user, vault, device or path. Requests are counted also with
+  `DISABLE_METRICS=TRUE`, which removes only `/metrics`.
+- **Page:** `GET /admin/performance.js` (no login needed, static) is the only script on
+  the admin pages; only the Performance tab loads it, and its CSP adds
+  `script-src 'self'; connect-src 'self'`. It turns two snapshots into rates: requests per
+  second (also by kind: file commits, `409` conflicts, blob uploads and downloads, logins,
+  `401`, `429`), bytes per second, CPU percent, and latency percentiles interpolated within
+  the histogram buckets (the overall ones leave out `/wait`). It keeps the last 60 readings
+  of the main numbers and draws each as a small SVG line. A changed `startedAt` (a
+  restart) starts the rates over.

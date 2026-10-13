@@ -174,12 +174,24 @@ fingerprint and device name) and remove one; files a removed device already has 
 it.
 
 ## 5. Admin page
-`https://notes.example.com/admin` lists every user with their vaults and each vault's
-keys: the stored (encrypted) size of each vault, its number of files and of kept revisions, when it was created
+`https://notes.example.com/admin` has two tabs. **Vaults** lists every user with their
+vaults, and under each vault its keys: the stored (encrypted) size of each vault, its number of files and of kept revisions, when it was created
 and last changed, and each key's fingerprint, device name, status (pending, active or revoked),
 whether it is a remote-only device and whether it is locked, and when it joined and was
 last seen. Keys that registered to create a vault that doesn't exist yet are listed as
-"being created". File names and contents stay encrypted, so the page can't show them.
+"being created", under the name of that vault. File names and contents stay encrypted,
+so the page can't show them. **Performance** shows the server's current numbers and
+refreshes them every 1, 2, 5 (the default), 10, 30 or 60 seconds, or not at all, as picked
+in its dropdown: requests per second, 4xx and 5xx responses per second, latency
+percentiles (without the `/wait` long-polls) and the busiest routes; sync activity (file
+commits, conflicts, blob uploads and downloads, logins, 401 and 429 answers per second);
+bytes received and sent per second, requests in flight, open long-polls and event-loop lag;
+CPU and memory of the process and of the container; free space on the data disk, the size
+of the database and its write-ahead log, and the cleanup's runs and results; and the
+stored totals. Rates cover the time since the previous refresh. A small line next to the
+main numbers shows their last 60 readings; it is kept in the browser and starts over when
+the page reloads. The process and container lines need Linux and
+show "–" elsewhere. This tab works also with `DISABLE_METRICS: "TRUE"`.
 
 - **Logging in:** the page asks for `ADMIN_TOKEN` and keeps you logged in for 12 hours
   (an HttpOnly, SameSite=Strict cookie). Five wrong tokens from one address block that
@@ -200,7 +212,7 @@ last seen. Keys that registered to create a vault that doesn't exist yet are lis
 - **Remote-only grace period:** each vault has a grace period for its remote-only devices
   (devices that keep the vault's contents only as ciphertext, [remote-only.md](remote-only.md)):
   how long such a device may go without reaching the server before it locks its files. The
-  default is 24 hours. Enter a whole number of hours from 1 to 8760 in the vault's row, or
+  default is 24 hours. Enter a whole number of hours from 1 to 8760 in the vault's box, or
   leave it empty for the default. Devices get the new value at their next login.
 - Admin actions are written to the container log.
 
@@ -220,13 +232,15 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: applicati
 ```
 The message is optional: `maintenance/on` also works without a body. `graceSeconds` is
 3600 to 31536000, or `null` for the default. `GET /admin/api/status` returns the version,
-maintenance state and `adminContact`. The API is
+maintenance state and `adminContact`, and `GET /admin/api/performance` the numbers of the
+Performance tab (counters as totals since the server started). The API is
 described in [protocol.md](protocol.md), sections 2 and 14.
 
 ### 5.1 Metrics
 `https://notes.example.com/metrics` serves Prometheus metrics. It needs no token, so anyone
 who can reach the server can read it, but it holds only counts: no label names a user,
-vault, device or file. Set `DISABLE_METRICS: "TRUE"` to turn it off (it then answers 404).
+vault, device or file. Set `DISABLE_METRICS: "TRUE"` to turn it off (it then answers 404);
+the admin page's Performance tab keeps working.
 Behind your own proxy (`BEHIND_PROXY=TRUE`) you can also keep `/metrics` off the internet
 there and scrape port 8080 directly.
 
@@ -235,6 +249,9 @@ there and scrape port 8080 directly.
 | `syncryption_build_info{version,protocol}` | gauge | always 1; the server and protocol version |
 | `syncryption_http_requests_total{method,route,status}` | counter | requests, by route template (e.g. `/api/v1/vaults/{vault_id}/changes`; `unmatched` for unknown paths and for requests answered before routing, such as the maintenance 503) |
 | `syncryption_http_request_duration_seconds{method,route}` | histogram | request duration; `/api/v1/vaults/{vault_id}/wait` long-polls take up to their timeout |
+| `syncryption_http_request_bytes_total`, `syncryption_http_response_bytes_total` | counter | bytes received in request bodies and sent in response bodies |
+| `syncryption_http_requests_in_flight` | gauge | requests being answered, long-polls included |
+| `syncryption_event_loop_lag_seconds` | gauge | the longest delay of the server's event loop over the last 10 seconds; high values mean the server is overloaded |
 | `syncryption_users`, `syncryption_vaults` | gauge | users and vaults |
 | `syncryption_devices{status}` | gauge | encryption keys that are `pending`, `active` or `revoked` |
 | `syncryption_files`, `syncryption_revisions` | gauge | files and kept revisions |
@@ -244,6 +261,9 @@ there and scrape port 8080 directly.
 | `syncryption_maintenance` | gauge | 1 while maintenance mode is on |
 | `syncryption_gc_runs_total{task}`, `syncryption_gc_failures_total{task}` | counter | hourly cleanup runs and failures (`retention`, `blobs`) |
 | `syncryption_retention_pruned_revisions_total`, `syncryption_gc_deleted_blobs_total` | counter | revisions and blobs the cleanup deleted |
+| `syncryption_gc_last_run_timestamp_seconds{task}` | gauge | when each cleanup task last ran (Unix time; 0 before the first run) |
+| `syncryption_data_disk_free_bytes`, `syncryption_data_disk_total_bytes` | gauge | free and total space of the file system holding `/data` |
+| `syncryption_db_bytes`, `syncryption_db_wal_bytes` | gauge | size of `meta.db` and of its write-ahead log |
 | `syncryption_shared_secret_failures_total`, `syncryption_admin_token_failures_total` | counter | wrong shared secrets and admin tokens |
 | `syncryption_container_memory_bytes`, `syncryption_container_memory_working_set_bytes` | gauge | memory of the whole container (server, Caddy, Litestream), with and without inactive page cache; the working set is what `docker stats` shows |
 | `syncryption_container_memory_limit_bytes` | gauge | the container's memory limit, only when it has one |

@@ -1,7 +1,10 @@
+import dataclasses
 import re
 
 import pytest
+from fastapi.testclient import TestClient
 
+from syncryption_server.app import create_app
 from tests.helpers import ADMIN_TOKEN, META, SECRET, Device, blob, file_id
 
 BEARER = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
@@ -124,12 +127,92 @@ def test_page_lists_devices_with_fingerprints(client, alice):
     assert "MacBook" in page and fp in page
 
 
+def test_page_lists_keys_under_their_vault(client, alice):
+    other = second_vault(client, "Work")
+    creating = Device(client, "alice", vault_name="Notes", name="Laptop")
+    creating.login(SECRET)
+    cookie, _ = login(client)
+    page = client.get("/admin", headers=cookie).text
+    cards = re.findall(r'<section class="vault[^"]*">(.*?)</section>', page)
+    by_name = {re.search(r"<h3>([^< ]+)", c)[1]: c for c in cards}
+    assert set(by_name) == {"Personal", "Work", "Notes"}
+    fp = alice.get("/api/v1/devices/self").json()["fingerprint"]
+    other_fp = other.get("/api/v1/devices/self").json()["fingerprint"]
+    assert fp in by_name["Personal"] and other_fp not in by_name["Personal"]
+    assert other_fp in by_name["Work"] and fp not in by_name["Work"]
+    assert "Laptop" in by_name["Notes"] and "(being created)" in by_name["Notes"]
+    assert "<th>Vault</th>" not in page
+
+
+def test_performance_tab(client, alice):
+    cookie, _ = login(client)
+    vaults = client.get("/admin", headers=cookie)
+    assert "script-src" not in vaults.headers["content-security-policy"]
+    assert 'href="/admin?tab=performance"' in vaults.text
+    page = client.get("/admin?tab=performance", headers=cookie)
+    assert page.status_code == 200
+    csp = page.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "connect-src 'self'" in csp
+    assert '<script src="/admin/performance.js"></script>' in page.text
+    assert '<option value="5" selected>5 s</option>' in page.text
+    assert '<option value="0">Paused</option>' in page.text
+    for value_id in ("commits", "conflicts", "bin", "lag", "disk", "gclast"):
+        assert f'id="{value_id}"' in page.text
+    assert 'id="spark-rps"' in page.text
+    js = client.get("/admin/performance.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    assert "innerHTML" not in js.text
+    # Without a login: the login form, and no data.
+    assert 'name="token"' in client.get("/admin?tab=performance").text
+    assert client.get("/admin/performance.json").status_code == 401
+    assert client.get("/admin/api/performance").status_code == 401
+    assert client.get("/admin/api/performance", headers=cookie).status_code == 401
+
+
+def test_performance_snapshot(client, alice, vault):
+    alice.get(f"/api/v1/vaults/{alice.vault_id}/changes")
+    cookie, _ = login(client)
+    r = client.get("/admin/performance.json", headers=cookie)
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    snap = r.json()
+    assert client.get("/admin/api/performance", headers=BEARER).json().keys() == snap.keys()
+    assert (snap["users"], snap["vaults"], snap["files"], snap["blobBytes"]) == (1, 1, 1, 10)
+    assert snap["devices"] == {"pending": 0, "active": 1, "revoked": 0}
+    assert snap["maintenance"] is False and snap["longpolls"] == 0
+    assert snap["startedAt"] <= snap["time"]
+    changes = "/api/v1/vaults/{vault_id}/changes"
+    (req,) = [x for x in snap["requests"] if x["route"] == changes]
+    assert (req["method"], req["status"], req["count"]) == ("GET", "200", 1)
+    (d,) = [x for x in snap["durations"] if x["route"] == changes]
+    assert len(d["buckets"]) == len(snap["buckets"]) + 1 and d["buckets"][-1] == 1
+    # The page's own polling isn't counted, and nothing names a user, vault or device.
+    assert not any(x["route"].startswith("/admin/perf") for x in snap["requests"])
+    assert all(k in snap["process"] for k in ("cpuSeconds", "memoryBytes", "openFds"))
+    # The blob upload's 10 bytes in, the responses out. The poll itself isn't counted.
+    assert snap["requestBytes"] >= 10 and snap["responseBytes"] > 0
+    assert snap["inFlight"] == 0 and snap["loopLagSeconds"] >= 0
+    assert snap["disk"]["freeBytes"] > 0 and snap["disk"]["totalBytes"] >= snap["disk"]["freeBytes"]
+    assert snap["dbBytes"] > 0
+    assert snap["gcLastRun"] == {"retention": None, "blobs": None}
+    assert (snap["prunedRevisions"], snap["deletedBlobs"]) == (0, 0)
+    for secret in ("alice", "Personal", alice.vault_id, alice.device_id):
+        assert secret not in r.text
+
+
+def test_performance_counts_requests_without_metrics(settings):
+    settings = dataclasses.replace(settings, disable_metrics=True)
+    with TestClient(create_app(settings)) as c:
+        c.get("/health")
+        snap = c.get("/admin/api/performance", headers=BEARER).json()
+        assert any(x["route"] == "/health" for x in snap["requests"])
+
+
 def test_page_explains_retention_and_counts_versions(client, alice, vault):
     cookie, _ = login(client)
     page = client.get("/admin", headers=cookie).text
     assert "every version for 30 days, at least the last 10" in page
     assert "deleted files for 90 days" in page
-    assert "<th>Versions</th>" in page and '<td class="num">1</td>' in page
+    assert "1 files · 1 versions" in page
 
 
 def test_disable_and_enable_a_vault(client, alice, vault):

@@ -494,7 +494,7 @@ The plugin uses no Node APIs outside desktop-only code: WebCrypto, `@noble/*`,
 ## 5. Repository and CI
 - `testvectors/` is read by both the pytest and the vitest suites.
 - CI (Gitea Actions, `.gitea/workflows/ci.yml`) runs on every PR and on pushes to `main`,
-  in three jobs:
+  in three check jobs, and one more on pushes to `main` once all three pass:
   - `backend`: `uv sync --locked`, `ruff check`, `ruff format --check`, `pytest`.
   - `container`: `backend/container-checks.sh` (section 3).
   - `plugin`: checks that the root `manifest.json` and `versions.json` match the plugin's,
@@ -502,3 +502,6 @@ The plugin uses no Node APIs outside desktop-only code: WebCrypto, `@noble/*`,
     against the real backend (started with uv) and against `ssh-keygen` and the Go `age`
     CLI for interop, and fail rather than skip if either is missing (`REQUIRE_BACKEND=1`,
     `REQUIRE_AGE=1`).
+  - `release`: if `manifest.json` has a plugin version with no Gitea release yet, builds
+    the plugin and creates the release (tag = version) with `main.js`, `manifest.json` and
+    `styles.css`.
