@@ -40,7 +40,7 @@ Once an hour:
 
 The collector never lists the store, local or S3: the database is the index. Listing is
 used only when an admin purges a vault (just that vault's prefix) and by the one-shot
-`MIGRATE_TO_S3` copy. Both steps cost time in proportion to the number of rows they check,
+`MIGRATE_TO_S3` and `MIGRATE_FROM_S3` copies. Both steps cost time in proportion to the number of rows they check,
 which retention keeps bounded.
 
 ## 4. The single-container model

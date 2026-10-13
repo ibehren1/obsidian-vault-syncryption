@@ -1,7 +1,7 @@
 """Blob storage (docs/architecture.md 2.2).
 
 Both stores use the same keys, `blobs/<userId>/<vaultId>/<blobId[0:2]>/<blobId>`, so
-`MIGRATE_TO_S3` is a straight copy.
+`MIGRATE_TO_S3` and `MIGRATE_FROM_S3` are straight copies.
 """
 
 import asyncio

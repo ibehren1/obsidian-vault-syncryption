@@ -267,7 +267,7 @@
       svg.setAttribute("aria-hidden", "true");
       const line = document.createElementNS(SVG, "polyline");
       line.setAttribute("fill", "none");
-      line.setAttribute("stroke", "#1f3a5f");
+      line.setAttribute("stroke", "#2d2f31");
       line.setAttribute("stroke-width", "1.5");
       line.setAttribute("stroke-linejoin", "round");
       svg.append(line);

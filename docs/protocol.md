@@ -407,7 +407,7 @@ Blobs are encrypted chunks ([crypto.md](crypto.md) section 8.2), at most
 - Blobs are partitioned by user and vault. The store key is
   `blobs/<userId>/<vaultId>/<blobId[0:2]>/<blobId>`, using ids rather than names so a
   rename doesn't move data. The layout is the same in `LocalBlobStore` and
-  `S3BlobStore`, which keeps `MIGRATE_TO_S3` a straight copy.
+  `S3BlobStore`, which keeps `MIGRATE_TO_S3` and `MIGRATE_FROM_S3` straight copies.
 - Blobs that no revision references are deleted by a periodic garbage collector after a
   grace period of 24 h, so an upload in progress isn't lost.
 

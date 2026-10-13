@@ -3,8 +3,9 @@
 - `check`: validate the environment and print what will run. Exits 1 with the reason.
 - `render DIR`: write `Caddyfile` (unless `BEHIND_PROXY=TRUE`) and `litestream.yml` (when S3
   is enabled) into DIR, and print the shell assignments the entrypoint needs.
-- `check-data`: exit 1 if `meta.db` was written by a server before 0.1.4 (delete it).
-- `migrate`: the `MIGRATE_TO_S3` copy.
+- `check-data`: exit 1 if `meta.db` was written by a server before 0.1.4 (delete it), or if
+  the S3 variables are set again after `MIGRATE_FROM_S3` without a migration.
+- `migrate`: the `MIGRATE_TO_S3` or `MIGRATE_FROM_S3` copy.
 - `health`: the container healthcheck, a GET of `/health` on the local app port.
 - `openapi`: print the OpenAPI schema, from which the plugin's API types are generated.
 - `apidocs`: print the API reference in `docs/api.md`, rendered from that schema.
@@ -24,7 +25,12 @@ from urllib.parse import urlsplit
 from syncryption_server import apidocs
 from syncryption_server.config import ConfigError, Settings, load_settings
 from syncryption_server.db import OldDataError, check_file
-from syncryption_server.migrate import MigrationError, migrate_to_s3
+from syncryption_server.migrate import (
+    MigrationError,
+    check_not_moved_off_s3,
+    migrate_from_s3,
+    migrate_to_s3,
+)
 from syncryption_server.storage import S3BlobStore
 
 UPSTREAM = "127.0.0.1:8000"
@@ -75,12 +81,18 @@ def describe(settings: Settings) -> str:
         serving = "HTTP on :8080 behind your proxy"
     else:
         serving = f"HTTPS for {urlsplit(settings.url or '').hostname} through Caddy"
-    if settings.s3 is None:
+    if settings.blob_s3 is None:
         storage = f"local blobs in {settings.data_dir / 'blobs'}"
     else:
-        where = settings.s3.endpoint_url or "AWS"
-        storage = f"S3 bucket {settings.s3.bucket} ({where}), database replicated by Litestream"
-    migrate = ", migrating local blobs to S3 first" if settings.migrate_to_s3 else ""
+        where = settings.blob_s3.endpoint_url or "AWS"
+        storage = (
+            f"S3 bucket {settings.blob_s3.bucket} ({where}), database replicated by Litestream"
+        )
+    migrate = ""
+    if settings.migrate_to_s3:
+        migrate = ", migrating local blobs to S3 first"
+    elif settings.migrate_from_s3 and settings.s3 is not None:
+        migrate = f", migrating blobs from S3 bucket {settings.s3.bucket} to local storage first"
     return f"Vault Syncryption: {serving}; {storage}{migrate}"
 
 
@@ -117,7 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "check-data":
         try:
             check_file(settings.db_path)
-        except OldDataError as e:
+            if settings.blob_s3 is not None and not settings.migrate_to_s3:
+                check_not_moved_off_s3(settings.data_dir)
+        except (OldDataError, MigrationError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     elif args.command == "render":
@@ -128,19 +142,27 @@ def main(argv: list[str] | None = None) -> int:
             (args.directory / "litestream.yml").write_text(litestream_config(settings))
         print(f"behind_proxy={shlex.quote(str(settings.behind_proxy).upper())}")
         print(f"s3_enabled={shlex.quote(str(settings.s3 is not None).upper())}")
-        print(f"migrate={shlex.quote(str(settings.migrate_to_s3).upper())}")
+        migrate = settings.migrate_to_s3 or settings.migrate_from_s3
+        print(f"migrate={shlex.quote(str(migrate).upper())}")
+        # Litestream restores whenever S3 is configured, but replicates only while the
+        # server stores its blobs there (not while moving off S3).
+        print(f"replicate={shlex.quote(str(settings.blob_s3 is not None).upper())}")
         print(f"db_path={shlex.quote(str(settings.db_path))}")
     elif args.command == "migrate":
-        if settings.s3 is None:
-            print("error: MIGRATE_TO_S3 needs the S3 variables", file=sys.stderr)
+        if settings.s3 is None or not (settings.migrate_to_s3 or settings.migrate_from_s3):
+            print(
+                "error: migrate needs the S3 variables and MIGRATE_TO_S3 or MIGRATE_FROM_S3",
+                file=sys.stderr,
+            )
             return 1
+        direction = "from S3" if settings.migrate_from_s3 else "to S3"
         try:
             asyncio.run(_migrate(settings))
         except MigrationError as e:
-            print(f"error: migration to S3 failed: {e}", file=sys.stderr)
+            print(f"error: migration {direction} failed: {e}", file=sys.stderr)
             return 1
         except Exception as e:
-            print(f"error: migration to S3 failed: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"error: migration {direction} failed: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
     return 0
 
@@ -168,7 +190,10 @@ async def _migrate(settings: Settings) -> None:
     store = S3BlobStore(settings.s3)
     await store.start()
     try:
-        await migrate_to_s3(settings.data_dir, store)
+        if settings.migrate_from_s3:
+            await migrate_from_s3(settings.data_dir, store, settings.db_path)
+        else:
+            await migrate_to_s3(settings.data_dir, store)
     finally:
         await store.close()
 

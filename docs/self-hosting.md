@@ -78,6 +78,11 @@ services:
       # (needs the S3 variables). Set it back to FALSE once the migration has finished.
       MIGRATE_TO_S3: "FALSE"
 
+      # TRUE or FALSE. TRUE copies the files in the bucket back to ./data on startup and
+      # serves from ./data (needs the S3 variables). Once the migration has finished,
+      # remove the S3 variables and set it back to FALSE.
+      MIGRATE_FROM_S3: "FALSE"
+
       # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
       # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
       DISABLE_METRICS: "FALSE"
@@ -93,13 +98,14 @@ services:
 | `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | all three or none | store data in S3 instead of `./data`. Leave them empty to use local storage. |
 | `S3_ENDPOINT` | no | the provider's S3 endpoint, e.g. `https://s3.us-west-004.backblazeb2.com`, `https://<account>.r2.cloudflarestorage.com` or `http://minio:9000`. Empty means AWS. |
 | `MIGRATE_TO_S3` | no | `TRUE` copies existing local data to S3 on startup (section 7) |
+| `MIGRATE_FROM_S3` | no | `TRUE` copies the data in S3 back to `./data` on startup and serves from `./data` (section 8) |
 | `DISABLE_METRICS` | no | `TRUE` turns off the public Prometheus endpoint `/metrics` (section 5.1). Default `FALSE`. |
 
 **Storage:** with the `S3_*` variables empty (the default), file contents are stored in
 `./data/blobs` on the host and nothing else needs to be set up. Setting the three `S3_*`
 variables stores them in S3 instead, which gives effectively unlimited storage. The
 database always stays in `./data` (replicated to the bucket when S3 is used, section 6).
-You can start locally and move to S3 later (section 7).
+You can start locally and move to S3 later (section 7), and move back (section 8).
 
 Generate a shared secret with, for example, `openssl rand -base64 24`, and an admin
 token with `openssl rand -hex 32`.
@@ -108,8 +114,9 @@ The container refuses to start, with a message saying why, if `URL` is missing w
 `BEHIND_PROXY=FALSE`, if `SHARED_SECRET` is empty, if `ADMIN_TOKEN` is
 missing or shorter than 32 characters, if only some of the `S3_*`
 variables are set, if `S3_ENDPOINT` is set without them, if `MIGRATE_TO_S3=TRUE`
-without S3, or if `BEHIND_PROXY`, `MIGRATE_TO_S3` or `DISABLE_METRICS` is neither `TRUE` nor
-`FALSE`.
+or `MIGRATE_FROM_S3=TRUE` without S3, if both are `TRUE`, or if `BEHIND_PROXY`,
+`MIGRATE_TO_S3`, `MIGRATE_FROM_S3` or `DISABLE_METRICS` is neither `TRUE` nor `FALSE`. It
+also refuses to start if the `S3_*` variables are set again after a move off S3 (section 8).
 
 ## 3. Start
 ```
@@ -317,13 +324,35 @@ Your notes are also on every device, so the server is never the only copy.
 
 ## 7. Moving from local storage to S3
 1. Add the three `S3_*` variables and set `MIGRATE_TO_S3: "TRUE"`.
-2. `docker compose up -d` and watch the logs. Every blob is copied and checked before the
+2. `docker compose up -d` and watch the logs. The log first says how many blobs there are,
+   then reports progress every 1000 blobs. Every blob is copied and checked before the
    server starts serving, so devices can't connect until it finishes and retry on their
    own. If it's interrupted, starting again continues where it stopped.
 3. When the log says the migration is complete, set `MIGRATE_TO_S3` back to `"FALSE"`.
 4. Once you're satisfied, delete `./data/blobs`. The migration never deletes it for you.
 
-## 8. Recovery without the server
+## 8. Moving from S3 to local storage
+1. Keep the three `S3_*` variables and set `MIGRATE_FROM_S3: "TRUE"`.
+2. `docker compose up -d` and watch the logs. On a host whose `./data` has no `meta.db`,
+   the database is first restored from the bucket's Litestream replica. The log then says
+   how many blobs the bucket holds and reports progress every 1000 blobs while every blob
+   in the bucket is copied to `./data/blobs` and checked before the server starts
+   serving; blobs already in `./data/blobs` and intact are kept. If it's interrupted,
+   starting again continues where it stopped. While `MIGRATE_FROM_S3` is `TRUE`, the
+   server stores everything in `./data` and Litestream no longer replicates the database.
+3. When the log says the migration is complete, remove the `S3_*` variables (and
+   `S3_ENDPOINT`) and set `MIGRATE_FROM_S3` back to `"FALSE"`. From now on, back up
+   `./data` as in section 6.
+4. Once you're satisfied, delete the bucket's contents, including the database replica in
+   `litestream/`, which stopped being updated. The migration never deletes anything from
+   the bucket. If you move back to S3 with the same bucket, Litestream sees that the old
+   replica doesn't match the database and replicates the current one.
+
+After the move, the container refuses to start if the `S3_*` variables are set again with
+both migration variables `FALSE`: the bucket no longer has the files written since. To go
+back to S3, use section 7.
+
+## 9. Recovery without the server
 A vault's keyring holds its vault keys, and can be decrypted with standard tools and the
 vault's recovery key. The server stores it in `meta.db`; to extract the current version
 (`sqlite3` on the host, with the vault's username and vault name):

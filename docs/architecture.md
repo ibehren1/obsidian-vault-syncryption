@@ -45,7 +45,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | Module | Responsibility |
 |---|---|
 | `app` | `create_app` factory (lifespan opens the database and blob store and loads the maintenance flag), hourly retention and blob GC task, `/health`, `/metrics` (unless `DISABLE_METRICS`), the HTML `/` page, the icons `/` and `/admin` link (`static/`), version headers, the maintenance `503` for `/api/v1` |
-| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors), `DISABLE_METRICS` |
+| `config` | parses and validates `BEHIND_PROXY`, `URL`, `S3_*` (including the optional `S3_ENDPOINT`), `MIGRATE_TO_S3`, `MIGRATE_FROM_S3`, `SHARED_SECRET`, `ADMIN_TOKEN`, `ADMIN_CONTACT` (optional, one line, shown on `/`, in `/health` and in disabled and maintenance errors), `DISABLE_METRICS` |
 | `db` | SQLite connection (WAL mode), schema migrations (`PRAGMA user_version`), `BEGIN IMMEDIATE` transaction helper |
 | `errors` | `ApiError` and the handlers that turn every error into the protocol's `{error, message, details}` shape |
 | `encoding` | `b64u`, RFC 3339 times, id formats |
@@ -61,7 +61,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
 | `locks` | lease locks and `locksSeq` |
 | `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode, each vault's remote-only grace period) |
-| `migrate` | `MIGRATE_TO_S3` one-shot copy, run by the entrypoint before serving |
+| `migrate` | `MIGRATE_TO_S3` and `MIGRATE_FROM_S3` one-shot copies, run by the entrypoint before serving |
 | `__main__` | the entrypoint's commands: `check`, `check-data`, `render`, `migrate`, `health`, and `openapi` (the schema `npm run api-types` reads) |
 
 ### 2.1 Data model (SQLite)
@@ -236,7 +236,8 @@ class BlobStore(Protocol):
 - The collector works from the database only: it selects unreferenced `blobs` rows and
   deletes each object by its key. It never lists the store. Before it runs, `retention`
   removes old revisions (protocol.md 9.3), which is what makes their blobs unreferenced.
-  Listing is used only by an admin purge (the vault's own prefix) and by `MIGRATE_TO_S3`.
+  Listing is used only by an admin purge (the vault's own prefix) and by `MIGRATE_TO_S3` and
+  `MIGRATE_FROM_S3`.
   Capacity and growth are described in [scaling.md](scaling.md).
 
 ### 2.3 Long-poll
@@ -263,20 +264,27 @@ the environment rules live in one place (`config.py`).
    uvicorn) and a `litestream.yml` when S3 is enabled. Credentials are not written to
    disk: the file refers to `${S3_ACCESS_KEY}` and `${S3_SECRET_KEY}`, which Litestream
    expands when it loads it.
-3. If S3 is enabled: `litestream restore -if-db-not-exists -if-replica-exists`, so a new
-   host can be rebuilt from the bucket.
+3. If the `S3_*` variables are set (also with `MIGRATE_FROM_S3=TRUE`): `litestream restore
+   -if-db-not-exists -if-replica-exists`, so a new host can be rebuilt from the bucket.
 4. `check-data` stops the container if `meta.db` was written by a server before 0.1.4
-   (section 2.1).
-5. If `MIGRATE_TO_S3=TRUE`: run the migration and stop on failure. The server is not
-   listening yet, so clients see connection errors and back off.
+   (section 2.1), or if the `S3_*` variables are set with both migration variables
+   `FALSE` while `/data/.migrated_from_s3` exists (the bucket is stale after a move off
+   S3).
+5. If `MIGRATE_TO_S3=TRUE` or `MIGRATE_FROM_S3=TRUE`: run the migration and stop on
+   failure. The server is not listening yet, so clients see connection errors and back
+   off. Moving off S3 copies every blob in the bucket to `/data/blobs`, checking each
+   against its SHA-256 key, then removes Litestream's local state (`/data/.meta.db-litestream`)
+   and writes `/data/.migrated_from_s3`; moving to S3 writes `/data/.migrated_to_s3`. Each
+   removes the other's marker.
 6. Start the app:
    - `BEHIND_PROXY=FALSE`: uvicorn on `127.0.0.1:8000` with `--proxy-headers
      --forwarded-allow-ips 127.0.0.1` (so client IPs come from Caddy), and Caddy in front
      on 80/443.
    - `BEHIND_PROXY=TRUE`: uvicorn on `0.0.0.0:8080` with `--no-proxy-headers`. The app
      reads `X-Forwarded-*` itself.
-   - With S3, everything runs under `litestream replicate -exec`, so the database is
-     replicated while the app runs and Litestream stops when the app does.
+   - With blobs in S3, everything runs under `litestream replicate -exec`, so the database
+     is replicated while the app runs and Litestream stops when the app does. With
+     `MIGRATE_FROM_S3=TRUE`, blobs are served from `/data` and Litestream doesn't run.
 7. The entrypoint supervises the processes with `wait -n`: if uvicorn or Caddy exits, the
    other is stopped and the container exits with an error. `docker stop` (SIGTERM) shuts
    everything down cleanly and exits 0.

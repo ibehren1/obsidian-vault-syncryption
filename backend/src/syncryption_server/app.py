@@ -171,8 +171,8 @@ def home_page(state: AppState, origin: str, health: dict[str, object]) -> HTMLRe
 
 
 def make_blob_store(settings: Settings) -> BlobStore:
-    if settings.s3 is not None:
-        return S3BlobStore(settings.s3)
+    if settings.blob_s3 is not None:
+        return S3BlobStore(settings.blob_s3)
     return LocalBlobStore(settings.data_dir)
 
 

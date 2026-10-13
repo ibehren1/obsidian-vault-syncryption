@@ -14,6 +14,7 @@ def test_defaults():
     assert s.url == "https://notes.example.com"
     assert s.s3 is None
     assert s.migrate_to_s3 is False
+    assert s.migrate_from_s3 is False
     assert s.data_dir == Path("/data")
     assert s.admin_token == "t" * 32
     assert s.admin_contact == ""
@@ -36,6 +37,19 @@ def test_defaults():
         ({**BASE, "S3_BUCKET": "b"}, "S3_ACCESS_KEY, S3_SECRET_KEY empty"),
         ({**BASE, "S3_BUCKET": "b", "S3_ACCESS_KEY": "k"}, "S3_SECRET_KEY empty"),
         ({**BASE, "MIGRATE_TO_S3": "TRUE"}, "MIGRATE_TO_S3=TRUE needs"),
+        ({**BASE, "MIGRATE_FROM_S3": "TRUE"}, "MIGRATE_FROM_S3=TRUE needs"),
+        ({**BASE, "MIGRATE_FROM_S3": "no"}, "MIGRATE_FROM_S3 must be TRUE or FALSE"),
+        (
+            {
+                **BASE,
+                "S3_BUCKET": "b",
+                "S3_ACCESS_KEY": "k",
+                "S3_SECRET_KEY": "x",
+                "MIGRATE_TO_S3": "TRUE",
+                "MIGRATE_FROM_S3": "TRUE",
+            },
+            "set only one of MIGRATE_TO_S3 and MIGRATE_FROM_S3",
+        ),
         ({**BASE, "ADMIN_CONTACT": "x" * 501}, "ADMIN_CONTACT must be at most 500"),
         ({**BASE, "ADMIN_CONTACT": "a\nb"}, "ADMIN_CONTACT must be a single line"),
         ({**BASE, "ADMIN_CONTACT": "a\tb"}, "ADMIN_CONTACT must be a single line"),
@@ -77,7 +91,18 @@ def test_s3_and_migration():
     assert (s.s3.bucket, s.s3.access_key, s.s3.secret_key) == ("b", "k", "x")
     assert s.s3.endpoint_url is None
     assert s.migrate_to_s3 is True
+    assert s.blob_s3 == s.s3
     assert s.db_path == Path("/tmp/dev/meta.db")
+
+
+def test_migration_from_s3_serves_local_blobs():
+    s = load_settings(
+        {**BASE, "S3_BUCKET": "b", "S3_ACCESS_KEY": "k", "S3_SECRET_KEY": "x"}
+        | {"MIGRATE_FROM_S3": "TRUE"}
+    )
+    assert s.migrate_from_s3 is True
+    assert s.s3 is not None
+    assert s.blob_s3 is None
 
 
 def test_url_keeps_non_default_port():

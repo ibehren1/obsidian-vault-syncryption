@@ -41,6 +41,8 @@ class Settings:
     url: str | None = None
     s3: S3Settings | None = None
     migrate_to_s3: bool = False
+    # `MIGRATE_FROM_S3=TRUE`: S3 is only the source of the copy, blobs are served locally.
+    migrate_from_s3: bool = False
     data_dir: Path = Path("/data")
     # `ADMIN_CONTACT`: how users reach the administrator (email, Slack, phone, ...). Public:
     # shown on `/`, in `/health` and in some errors. Empty when unset.
@@ -51,6 +53,11 @@ class Settings:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "meta.db"
+
+    @property
+    def blob_s3(self) -> S3Settings | None:
+        """The S3 the server stores blobs in (and Litestream replicates to), if any."""
+        return None if self.migrate_from_s3 else self.s3
 
 
 def _bool(env: Mapping[str, str], name: str) -> bool:
@@ -124,6 +131,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     migrate = _bool(env, "MIGRATE_TO_S3")
     if migrate and s3 is None:
         raise ConfigError("MIGRATE_TO_S3=TRUE needs S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY")
+    migrate_from = _bool(env, "MIGRATE_FROM_S3")
+    if migrate_from and s3 is None:
+        raise ConfigError("MIGRATE_FROM_S3=TRUE needs S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY")
+    if migrate and migrate_from:
+        raise ConfigError("set only one of MIGRATE_TO_S3 and MIGRATE_FROM_S3 to TRUE")
 
     admin_contact = env.get("ADMIN_CONTACT", "").strip()
     problem = note_problem(admin_contact)
@@ -140,6 +152,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         url=url,
         s3=s3,
         migrate_to_s3=migrate,
+        migrate_from_s3=migrate_from,
         data_dir=data_dir,
         admin_contact=admin_contact,
         disable_metrics=disable_metrics,
