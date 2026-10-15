@@ -28,13 +28,17 @@ import {
 	type KeyringPin,
 	type TrustedKeyring,
 } from "../crypto/keyring";
-import { pairingCode, parsePublicKeyText, publicKeyText } from "../crypto/openssh";
+import { fingerprint, pairingCode, parsePublicKeyText, publicKeyText } from "../crypto/openssh";
 import type { SyncStore } from "../store/state";
 
 export const PIN = "keyringPin";
 export const VAULT_ID = "vaultId";
 /** Store meta: the device whose key this device replaced, until it is removed (`handOver`). */
 export const REPLACED = "replacedDevice";
+/** Store meta: the devices this device started removing, until the keyring is rotated. */
+export const REVOKING = "revokingDevices";
+/** Store meta: devices the server reports removed that the user chose to keep in the keyring. */
+export const KEPT = "keptDevices";
 const PAIRING_POLL_MS = 5000;
 
 /** The vault a key slot last connected to, remembered on the device to open its local state offline. */
@@ -125,11 +129,18 @@ export class VaultSession {
 	}
 
 	/** Keys waiting for approval, with the pairing code computed here, not by the server. */
-	async pendingDevices(): Promise<Array<{ device: Device; code: string }>> {
+	/**
+	 * Keys waiting for approval. The pairing code and fingerprint are computed here from the
+	 * public key that approving adds: the server's `fingerprint` could name another key.
+	 */
+	async pendingDevices(): Promise<Array<{ device: Device; code: string; fingerprint: string }>> {
 		const devices = await this.devices();
 		return devices
 			.filter((d) => d.status === "pending")
-			.map((device) => ({ device, code: pairingCode(parsePublicKeyText(device.publicKey)) }));
+			.map((device) => {
+				const key = parsePublicKeyText(device.publicKey);
+				return { device, code: pairingCode(key), fingerprint: fingerprint(key) };
+			});
 	}
 
 	/**
@@ -185,29 +196,60 @@ export class VaultSession {
 	 * the keyring with a new epoch. Other devices re-encrypt their files in the background.
 	 */
 	async removeDevice(deviceId: string): Promise<void> {
-		if (deviceId === this.deviceId) throw new Error("This device can't remove its own key.");
-		try {
-			await this.api.removeDevice(this.vault.id, deviceId);
-		} catch (e) {
-			// Already gone from the server: the keyring still has to follow.
-			if (!(e instanceof ApiError && e.status === 404)) throw e;
+		await this.removeDevices([deviceId]);
+	}
+
+	/** `removeDevice` for several keys, with one rotation. */
+	async removeDevices(ids: string[]): Promise<void> {
+		if (ids.includes(this.deviceId)) throw new Error("This device can't remove its own key.");
+		// Noted first, so an interrupted removal is finished at the next start without asking.
+		await this.updateList(REVOKING, (l) => [...new Set([...l, ...ids])]);
+		for (const id of ids) {
+			try {
+				await this.api.removeDevice(this.vault.id, id);
+			} catch (e) {
+				// Already gone from the server: the keyring still has to follow.
+				if (!(e instanceof ApiError && e.status === 404)) throw e;
+			}
 		}
-		await this.rotateOut([deviceId]);
+		await this.rotateOut(ids);
+		await this.updateList(REVOKING, (l) => l.filter((id) => !ids.includes(id)));
+		await this.updateList(KEPT, (l) => l.filter((id) => !ids.includes(id)));
 	}
 
 	/**
-	 * Finish revocations done elsewhere: remove keyring devices whose key is revoked or gone
-	 * on the server (a rotation that didn't finish). Returns their names.
+	 * Keyring devices whose key is revoked or gone on the server. Those this device started
+	 * removing are removed from the keyring (a rotation that didn't finish); the others are
+	 * returned, apart from those the user chose to keep: only the user decides that another
+	 * device's removal is real, since the server's word alone could expel a legitimate device.
 	 */
-	async removeStaleDevices(): Promise<string[]> {
+	async removeStaleDevices(): Promise<{ removed: string[]; unconfirmed: KeyringDevice[] }> {
 		const status = new Map((await this.devices()).map((d) => [d.id, d.status]));
 		await this.refreshKeyring();
 		const stale = this.keyring.devices.filter(
 			(d) => d.id !== this.deviceId && (status.get(d.id) ?? "revoked") === "revoked",
 		);
-		if (stale.length === 0) return [];
-		await this.rotateOut(stale.map((d) => d.id));
-		return stale.map((d) => d.name);
+		const revoking = await this.list(REVOKING);
+		const kept = await this.list(KEPT);
+		const own = stale.filter((d) => revoking.includes(d.id));
+		if (own.length) await this.removeDevices(own.map((d) => d.id));
+		return {
+			removed: own.map((d) => d.name),
+			unconfirmed: stale.filter((d) => !revoking.includes(d.id) && !kept.includes(d.id)),
+		};
+	}
+
+	/** The user keeps these devices in the keyring although the server reports them removed. */
+	async keepDevices(ids: string[]): Promise<void> {
+		await this.updateList(KEPT, (l) => [...new Set([...l, ...ids])]);
+	}
+
+	private async list(key: string): Promise<string[]> {
+		return (await this.store.getMeta<string[]>(key)) ?? [];
+	}
+
+	private async updateList(key: string, change: (l: string[]) => string[]): Promise<void> {
+		await this.store.setMeta(key, change(await this.list(key)));
 	}
 
 	/**
@@ -363,12 +405,14 @@ export async function connect(opts: ConnectOptions): Promise<VaultSession> {
 			}
 			throw e;
 		}
+		checkVaultName(opened.vault, vaultName);
 		if (opened.membership === "active") {
 			vault = opened.vault;
 			break;
 		}
 		await pair(opened.vault);
 	}
+	checkVaultName(vault, vaultName);
 
 	const store = await opts.openStore(vault.id);
 	if ((await store.getMeta<string>(VAULT_ID)) !== vault.id) {
@@ -389,6 +433,15 @@ export async function connect(opts: ConnectOptions): Promise<VaultSession> {
 	}
 	await store.setMeta(PIN, trusted.pin);
 	return new VaultSession(api, vault, store, trusted, seed);
+}
+
+/**
+ * The server must return the vault this client asked for. The keyring checks (crypto.md 6.4)
+ * compare its signed name with `vault.name`, so without this a server could hand over another
+ * vault of the same user and its keyring would match itself.
+ */
+function checkVaultName(vault: Vault, requested: string): void {
+	if (vault.name !== requested) throw new KeyringError("wrong-vault", "the server returned another vault");
 }
 
 /** Re-open the pinned keyring version so newer versions can be checked against it. */

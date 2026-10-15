@@ -1,0 +1,113 @@
+# Runs on the public and the beta GitHub repo (Gitea uses .gitea/workflows). When
+# backend/pyproject.toml carries a version with no backend-v<version> release yet, build the
+# server's container image for amd64 and arm64, push it to the GitHub Container Registry,
+# attest its build provenance, and publish a backend-v<version> release that names the
+# image. The public repo pushes ghcr.io/<owner>/vault-syncryption, tagged <version> and
+# latest; the beta repo ghcr.io/<owner>/vault-syncryption-beta, tagged dev-<version> and
+# dev-latest (as scripts/build.sh's Prod and PubDev). The server isn't Obsidian-specific,
+# so the images don't carry the repos' names; each package belongs to the repo that pushes it. The release is never
+# marked Latest, which stays the plugin's.
+name: Backend image
+
+on:
+  push:
+    branches: [main]
+    paths: [backend/**, .github/workflows/backend-image.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the version
+        id: version
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("backend/pyproject.toml", "rb"))["project"]["version"])')
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          if [[ "$GITHUB_REPOSITORY" == *-beta ]]; then
+            image="ghcr.io/$owner/vault-syncryption-beta"
+            tags="$image:dev-$version,$image:dev-latest"
+            prerelease=true
+          else
+            image="ghcr.io/$owner/vault-syncryption"
+            tags="$image:$version,$image:latest"
+            prerelease=false
+          fi
+          {
+            echo "version=$version"
+            echo "tag=backend-v$version"
+            echo "image=$image"
+            echo "tags=$tags"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          if gh release view "backend-v$version" >/dev/null 2>&1; then
+            echo "Release backend-v$version already exists."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: docker/setup-qemu-action@v3
+        if: steps.version.outputs.new == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.version.outputs.new == 'true'
+      - uses: docker/login-action@v3
+        if: steps.version.outputs.new == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push
+        id: build
+        if: steps.version.outputs.new == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.version.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.title=Vault Syncryption server
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Attest the build provenance
+        if: steps.version.outputs.new == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.version.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Publish the release
+        if: steps.version.outputs.new == 'true'
+        run: |
+          {
+            echo "Container image of the Vault Syncryption server ${VERSION}, for linux/amd64 and linux/arm64:"
+            echo
+            for t in ${TAGS//,/ }; do echo "- \`$t\`"; done
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Pull it with \`docker pull ${TAGS%%,*}\`, or set \`image:\` to it in \`backend/docker/docker-compose.yml\`."
+            echo "Verify it with \`gh attestation verify oci://${IMAGE}@${DIGEST} -R ${GITHUB_REPOSITORY}\`."
+          } > notes.md
+          flags=(--latest=false)
+          [[ "$PRERELEASE" == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md "${flags[@]}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TAGS: ${{ steps.version.outputs.tags }}
+          IMAGE: ${{ steps.version.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}

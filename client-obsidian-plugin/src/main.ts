@@ -14,7 +14,7 @@ import {
 	REVOKED_TEXT,
 } from "./api/http";
 import { hasSecretStorage, MIN_APP_VERSION } from "./compat";
-import { generateRecoveryKey } from "./crypto/keyring";
+import { generateRecoveryKey, type KeyringDevice } from "./crypto/keyring";
 import { fingerprint, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey, type OpenSshKey } from "./crypto/openssh";
 import { loadKeyText, saveKeyText, unlockKey } from "./keys";
 import { requestUrlTransport } from "./obsidian/transport";
@@ -101,6 +101,8 @@ export default class SyncryptionPlugin extends Plugin {
 	private announced = new Set<string>();
 	private include: PathFilter | null = null;
 	private reloadAsked = false;
+	/** Plugins whose new code the reload prompt has listed, so new ones ask again after "Later". */
+	private announcedCode = new Set<string>();
 	private locks: LockManager | null = null;
 	private live: LiveLoop | null = null;
 	private lockBar: HTMLElement | null = null;
@@ -898,10 +900,18 @@ export default class SyncryptionPlugin extends Plugin {
 	}
 
 	private announce(report: SyncReport): void {
-		if (report.configChanged && !this.reloadAsked) {
-			// Asked once: after "Later", the next start of Obsidian picks the changes up.
+		const code = report.pluginCode.filter((c) => !this.announcedCode.has(c.plugin));
+		if ((report.configChanged && !this.reloadAsked) || code.length) {
+			// Asked once: after "Later", the next start of Obsidian picks the changes up. New
+			// plugin code is always listed, as it runs on this device after the reload.
 			this.reloadAsked = true;
-			new ReloadModal(this.app, () => (this.app as Commands).commands?.executeCommandById("app:reload")).open();
+			for (const c of code) this.announcedCode.add(c.plugin);
+			const devices = this.session?.keyring.devices ?? [];
+			const lines = code.map((c) => {
+				const by = devices.find((d) => d.id === c.device)?.name ?? "a device that is no longer in the vault";
+				return `${c.plugin}: ${c.added ? "added" : "code changed"} by ${by}`;
+			});
+			new ReloadModal(this.app, lines, () => (this.app as Commands).commands?.executeCommandById("app:reload")).open();
 		}
 		for (const copy of report.conflicts) {
 			new Notice(`Conflicting edits. Your version was saved as “${copy}”.`, 10_000);
@@ -938,7 +948,7 @@ export default class SyncryptionPlugin extends Plugin {
 			const pending = await session.pendingDevices();
 			const items: PendingApproval[] = pending.map((p) => ({
 				name: p.device.name,
-				fingerprint: p.device.fingerprint,
+				fingerprint: p.fingerprint,
 				code: p.code,
 				approve: async (remoteOnly) => {
 					await session.approve(p.device, { remoteOnly });
@@ -1136,18 +1146,55 @@ export default class SyncryptionPlugin extends Plugin {
 	private async finishRevocations(session: VaultSession): Promise<void> {
 		const hadRecovery = session.keyring.recovery !== undefined;
 		let replaced: boolean;
-		let names: string[];
+		let stale: Awaited<ReturnType<VaultSession["removeStaleDevices"]>>;
 		try {
 			replaced = await session.finishReplace();
-			names = await session.removeStaleDevices();
+			stale = await session.removeStaleDevices();
 		} catch {
 			return; // tried again on the next start
 		}
-		if (this.session !== session || (!replaced && names.length === 0)) return;
+		if (this.session !== session) return;
+		if (stale.unconfirmed.length) this.confirmStaleRemoval(session, stale.unconfirmed);
+		if (!replaced && stale.removed.length === 0) return;
 		this.serverDevices = null;
-		if (names.length) new Notice(`Removed the keys of ${names.join(", ")} from this vault, as they no longer have access.`);
+		if (stale.removed.length) new Notice(`Finished removing the keys of ${stale.removed.join(", ")} from this vault.`);
 		if (hadRecovery && session.keyring.recovery === undefined) this.recoveryCleared();
 		void this.syncNow();
+	}
+
+	/**
+	 * Keys the server reports removed that this device didn't remove: removed elsewhere by a
+	 * removal that didn't finish, or claimed by a server that wants a device out. The user decides.
+	 */
+	private confirmStaleRemoval(session: VaultSession, devices: KeyringDevice[]): void {
+		const names = devices.map((d) => d.name).join(", ");
+		const ids = devices.map((d) => d.id);
+		const one = devices.length === 1;
+		const [keys, was, it] = one ? ["key", "was", "it"] : ["keys", "were", "them"];
+		new ConfirmModal(this.app, {
+			title: one ? `Remove ${names}?` : "Remove these keys?",
+			text:
+				`The server reports that the ${keys} of ${names} ${was} removed from this vault, but this device didn't remove ${it}. ` +
+				`If you removed ${it} on another device, remove ${it} here too, so the vault gets a new key. ` +
+				`If you didn't, keep ${it}: the server alone can't decide who is in the vault.`,
+			confirm: "Remove",
+			cancel: "Keep",
+			warning: true,
+			onConfirm: async () => {
+				const hadRecovery = session.keyring.recovery !== undefined;
+				try {
+					await session.removeDevices(ids);
+				} catch (e) {
+					this.fail(e, true);
+					return;
+				}
+				this.serverDevices = null;
+				new Notice(`The ${keys} of ${names} ${was} removed. Files are re-encrypted with a new vault key in the background.`);
+				if (hadRecovery && session.keyring.recovery === undefined) this.recoveryCleared();
+				void this.syncNow();
+			},
+			onCancel: () => session.keepDevices(ids),
+		}).open();
 	}
 
 	/** The recovery key was set by a removed device and is gone with it. */

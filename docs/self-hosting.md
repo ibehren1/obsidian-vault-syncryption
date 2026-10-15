@@ -20,6 +20,13 @@ it into an empty folder on the host. `./data` below is relative to that folder.
 - Obsidian 1.13 or later on every device.
 
 ## 2. Configure
+The image is on Docker Hub as `ibehren1/vault-syncryption` and on the GitHub Container
+Registry as `ghcr.io/ibehren1/vault-syncryption`, tagged with the server version
+and `latest`, for `linux/amd64` and `linux/arm64`. Each version also has a `backend-v<version>`
+release on GitHub with the image's digest, and its build provenance can be checked with
+`gh attestation verify oci://ghcr.io/ibehren1/vault-syncryption@<digest> -R ibehren1/obsidian-vault-syncryption`.
+Either image works in `image:`.
+
 Everything is in `docker-compose.yml`, with the variables written inline. There is no
 `.env` file. This is the whole file, with a comment on every variable:
 

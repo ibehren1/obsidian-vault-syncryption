@@ -1,7 +1,9 @@
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "../src/api/http";
-import { generateRecoveryKey } from "../src/crypto/keyring";
+import { addKeyringDevice, generateRecoveryKey, type Keyring } from "../src/crypto/keyring";
+import { fingerprint } from "../src/crypto/openssh";
 import { secretId } from "../src/keys";
 import { MemoryStore } from "../src/store/state";
 import { connect, handOver, PIN, REPLACED, SetupCancelled, VAULT_ID } from "../src/sync/session";
@@ -74,6 +76,30 @@ describe.skipIf(noBackend)("connect", () => {
 		await expect(waiting).rejects.toBeInstanceOf(SetupCancelled);
 		const [pending] = await a.session.pendingDevices();
 		expect(codes).toEqual([pending!.code]);
+		expect(pending!.fingerprint).toBe(fingerprint(ed25519.getPublicKey(seed)));
+	});
+
+	it("shows the fingerprint of the key being approved, not the server's", async () => {
+		const username = uniqueName("fpr");
+		const vaultName = uniqueName("Vault ");
+		const a = await device(username, vaultName, "Laptop");
+		const seed = newSeed();
+		const controller = new AbortController();
+		const waiting = connect({
+			api: client(username, vaultName, seed, "Tablet"),
+			deviceName: "Tablet",
+			seed,
+			openStore: async () => new MemoryStore(),
+			callbacks: { askSharedSecret: async () => SHARED_SECRET, showPairing: () => controller.abort() },
+			signal: controller.signal,
+			pollMs: 20,
+		});
+		await expect(waiting).rejects.toBeInstanceOf(SetupCancelled);
+		const api = a.session.api;
+		const devices = api.devices.bind(api);
+		api.devices = async (id) => (await devices(id)).map((d) => ({ ...d, fingerprint: "SHA256:forged" }));
+		const [pending] = await a.session.pendingDevices();
+		expect(pending!.fingerprint).toBe(fingerprint(ed25519.getPublicKey(seed)));
 	});
 
 	it("lets a new key of an existing vault wait for approval without the shared secret", async () => {
@@ -134,6 +160,28 @@ describe.skipIf(noBackend)("connect", () => {
 			callbacks: { askSharedSecret: async () => null, showPairing: () => {} },
 		});
 		await expect(again).rejects.toMatchObject({ code: "rollback" });
+	});
+
+	it("refuses a server that returns another vault than the one asked for", async () => {
+		// Vault B's keyring also lists this device's key, so its keyring checks pass on their own.
+		const username = uniqueName("swapvault");
+		const a = await device(username, uniqueName("A "), "Laptop");
+		const b = await device(username, uniqueName("B "), "Desktop");
+		const me = a.session.keyring.devices[0]!;
+		await (b.session as unknown as { update: (f: (k: Keyring) => Keyring) => Promise<void> }).update((k) =>
+			addKeyringDevice(k, me, b.session.deviceId),
+		);
+		const api = a.session.api;
+		api.openVault = async () => ({ ...(await b.session.api.openVault(b.session.vault.name)), membership: "active" });
+		api.keyring = b.session.api.keyring.bind(b.session.api);
+		const again = connect({
+			api,
+			deviceName: "Laptop",
+			seed: (a.session as unknown as { seed: Uint8Array }).seed,
+			openStore: async () => new MemoryStore(),
+			callbacks: { askSharedSecret: async () => null, showPairing: () => {} },
+		});
+		await expect(again).rejects.toMatchObject({ code: "wrong-vault" });
 	});
 
 	it("recovers the vault with the recovery key when no device can approve", async () => {

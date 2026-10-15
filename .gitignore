@@ -12,7 +12,7 @@ __pycache__/
 
 # Node / plugin
 node_modules/
-plugin/main.js
+client-obsidian-plugin/main.js
 
 # OS / editors
 .DS_Store

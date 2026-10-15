@@ -376,7 +376,8 @@ new vault on a known device, always brings a new key.
    Crockford base32, grouped `XXXXX-XXXXX`.
 2. The server lists the pending key to the vault's active devices.
 3. The user compares the codes on both screens and approves on an active member, which
-   recomputes the code from the public key itself.
+   recomputes the code from the public key itself. The fingerprint it shows is computed
+   from that key too, never taken from the server.
 4. The approving device decrypts the keyring, adds the new device to `devices`, increments
    `version`, re-encrypts to all `devices` (+ `recovery`), uploads it signed, and approves
    the key on the server.
@@ -523,9 +524,12 @@ flowchart TD
    someone else already wrote it, so the device moves on. Files with local changes aren't
    re-encrypted; their next upload uses the new epoch anyway.
 
-If step 2 doesn't happen (the device that revoked went offline), every device removes
-keyring devices that are no longer active on the server when it connects, with the same
-rotation.
+If step 2 doesn't happen (the device that revoked went offline), the revoking device
+finishes it when it next connects: it notes each removal before step 1 and clears the note
+after step 2. Other devices don't take the server's word that a key was revoked, since a
+malicious server could use it to expel a legitimate device: when they connect and find
+keyring devices that are no longer active on the server, they ask the user, who removes
+them (the same rotation) or keeps them. A kept device isn't asked about again on that device.
 
 Because `indexKey` doesn't rotate, `fileId`s stay stable and rotation is ordinary commits.
 The trade-off: a revoked device that later obtains server data can still test path
@@ -554,7 +558,7 @@ keyring keeps every epoch (6.4): a VDK is 32 bytes, and once the old ciphertext 
 opens nothing on the server.
 
 The epochs and the chain checks are tested with `keyring.json`, and the revocation flow and
-background re-encryption against the real backend (`plugin/tests/revocation.test.ts`).
+background re-encryption against the real backend (`client-obsidian-plugin/tests/revocation.test.ts`).
 
 ## 9. Recovery key
 - Optional. A full device connected to a vault without one offers to create it once, and

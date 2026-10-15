@@ -92,7 +92,7 @@ The plugin syncs the whole vault in place, including the config folder (`.obsidi
 ## Repository
 | Path | Contents |
 |---|---|
-| `plugin/` | Obsidian plugin (TypeScript) |
+| `client-obsidian-plugin/` | Obsidian plugin (TypeScript) |
 | `backend/` | Sync server (Python, uv, FastAPI) and container |
 | `docs/` | How it works, specifications and self-hosting |
 

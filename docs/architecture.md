@@ -297,7 +297,7 @@ container unhealthy.
 starts a container behind a proxy, runs `tests/test_container.py` inside it, and checks a
 clean stop. CI runs it in the `container` job.
 
-## 4. Plugin (`plugin/`)
+## 4. Plugin (`client-obsidian-plugin/`)
 | Module | Responsibility |
 |---|---|
 | `main`, `compat`, `device` | plugin lifecycle, commands, ribbon icon and status bar, pause and resume, event wiring, the first-sync confirmation, the `SecretStorage` check, the default device name |
@@ -390,7 +390,11 @@ flowchart TD
   writes it after everything else, so plugins are on disk before Obsidian turns them on.
   The held-back revisions are saved in `meta.deferred` before the cursor moves past them.
   After a sync that wrote to the active `configDir`, the plugin asks once per session to
-  reload Obsidian (`app:reload`). On a device's first sync of a config file (no synced
+  reload Obsidian (`app:reload`). Any vault member's key can write other plugins' code
+  (`plugins/<id>/main.js`), which runs on every device after the reload, so the dialog
+  lists each plugin whose code arrived: added or changed, and by which device (the writer
+  in the revision's encrypted metadata, named from the keyring). Plugin code not listed
+  yet asks again, even after "Later". On a device's first sync of a config file (no synced
   state, both sides have it), the vault's version replaces the local one without a
   conflict copy, so a new device takes the vault's settings instead of pushing its
   defaults as conflicts. After that, config files merge like notes (JSON must still parse).
@@ -419,8 +423,10 @@ flowchart TD
   name, date added, with status and last seen from the server), this device's marked.
   "Remove" (on any key but this device's) revokes the key on the server, then uploads
   the next keyring without it under a new epoch. If the removed device set the recovery
-  key, that goes too and the user is asked to create a new one. On connect, keyring
-  keys that are no longer active on the server are removed the same way (crypto.md 8.4).
+  key, that goes too and the user is asked to create a new one. On connect, a removal this
+  device started but didn't finish is finished. Keyring keys that another device removed
+  on the server, or that the server reports removed, are shown in a dialog: Remove
+  (revokes and rotates as above) or Keep, which is remembered for that key (crypto.md 8.4).
 - **Re-encryption:** each sync ends by committing again, under the current epoch, the
   unchanged live files whose last synced revision used an older one (`SyncedFile.epoch`).
   The engine fetches the keyring when the change feed reports a newer version, or once

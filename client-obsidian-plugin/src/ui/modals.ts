@@ -228,6 +228,8 @@ interface ConfirmOptions {
 	cancel?: string;
 	warning?: boolean;
 	onConfirm(): void | Promise<void>;
+	/** The cancel button only, not closing the dialog otherwise. */
+	onCancel?(): void | Promise<void>;
 }
 
 /** A question with a confirm and a cancel button. */
@@ -243,7 +245,12 @@ export class ConfirmModal extends Modal {
 		this.setTitle(this.opts.title);
 		this.contentEl.createEl("p", { text: this.opts.text });
 		new Setting(this.contentEl)
-			.addButton((b) => b.setButtonText(this.opts.cancel ?? "Cancel").onClick(() => this.close()))
+			.addButton((b) =>
+				b.setButtonText(this.opts.cancel ?? "Cancel").onClick(() => {
+					this.close();
+					void this.opts.onCancel?.();
+				}),
+			)
 			.addButton((b) => {
 				b.setButtonText(this.opts.confirm).onClick(() => {
 					this.close();
@@ -328,8 +335,10 @@ class FirstSyncModal extends Modal {
 
 /** Asks to reload Obsidian after another device changed the settings, plugins or themes. */
 export class ReloadModal extends Modal {
+	/** `pluginCode`: one line per plugin whose code arrived, which runs after the reload. */
 	constructor(
 		app: App,
+		private readonly pluginCode: string[],
 		private readonly reload: () => void,
 	) {
 		super(app);
@@ -340,6 +349,13 @@ export class ReloadModal extends Modal {
 		this.contentEl.createEl("p", {
 			text: "Settings, plugins or themes changed on another device. Obsidian uses them after a reload.",
 		});
+		if (this.pluginCode.length) {
+			this.contentEl.createEl("p", {
+				text: "Plugin code that runs on this device after the reload. Reload only if you expected these changes:",
+			});
+			const list = this.contentEl.createEl("ul");
+			for (const line of this.pluginCode) list.createEl("li", { text: line });
+		}
 		new Setting(this.contentEl)
 			.addButton((b) => b.setButtonText("Later").onClick(() => this.close()))
 			.addButton((b) =>

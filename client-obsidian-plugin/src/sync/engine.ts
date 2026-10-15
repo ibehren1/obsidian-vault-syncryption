@@ -76,6 +76,17 @@ export interface SyncReport {
 	reencrypted: number;
 	/** Whether a remote change was written to the active config folder. */
 	configChanged: boolean;
+	/** Other plugins whose code (`main.js`) a remote change wrote: it runs after a reload. */
+	pluginCode: PluginCodeChange[];
+}
+
+export interface PluginCodeChange {
+	/** The plugin's folder name under `plugins/`. */
+	plugin: string;
+	/** The id of the device that wrote it, from the revision's encrypted metadata. */
+	device: string;
+	/** New on this device, rather than an update of a plugin it had. */
+	added: boolean;
 }
 
 /** One revision of a file, from its encrypted metadata. */
@@ -131,7 +142,7 @@ class SyncStopped extends Error {
 }
 
 function emptyReport(): SyncReport {
-	return { pulled: 0, pushed: 0, merged: 0, conflicts: [], rejected: 0, reencrypted: 0, configChanged: false };
+	return { pulled: 0, pushed: 0, merged: 0, conflicts: [], rejected: 0, reencrypted: 0, configChanged: false, pluginCode: [] };
 }
 
 export class SyncEngine {
@@ -555,7 +566,7 @@ export class SyncEngine {
 			if (unchanged || !local.exists) {
 				if (local.exists) {
 					await this.opts.fs.remove(path);
-					this.noteWrite(path);
+					await this.noteWrite(path);
 				}
 				await this.record(path, revision, meta, null);
 			} else {
@@ -606,7 +617,7 @@ export class SyncEngine {
 				// The merge goes on top of the remote revision. No mtime is recorded, so the
 				// next scan hashes the file instead of trusting its stat.
 				await this.opts.fs.write(path, merged, { mtime: this.now().getTime() });
-				this.noteWrite(path);
+				await this.noteWrite(path, meta);
 				await this.record(path, revision, meta, null);
 				await store.enqueue(path);
 			}
@@ -645,7 +656,7 @@ export class SyncEngine {
 	private async writeRemote(path: string, revision: Revision, meta: FileMeta, data: Uint8Array): Promise<void> {
 		this.checkOpen();
 		await this.opts.fs.write(path, data, { mtime: meta.mtime, ctime: meta.ctime });
-		this.noteWrite(path);
+		await this.noteWrite(path, meta);
 		await this.record(path, revision, meta, await this.opts.fs.stat(path));
 	}
 
@@ -654,7 +665,7 @@ export class SyncEngine {
 		this.checkOpen();
 		const times = { mtime: meta.mtime, ctime: meta.ctime };
 		await writeChunked(this.opts.fs, path, meta.size, meta.chunks.length, this.chunks(revision, meta), times);
-		this.noteWrite(path);
+		await this.noteWrite(path, meta);
 		await this.record(path, revision, meta, await this.opts.fs.stat(path));
 	}
 
@@ -744,8 +755,15 @@ export class SyncEngine {
 		return this.opts.configDir !== undefined && path.startsWith(`${this.opts.configDir}/`);
 	}
 
-	private noteWrite(path: string): void {
-		if (this.inConfig(path)) this.report.configChanged = true;
+	/** Called before `record`, so the store still has what this device had before. */
+	private async noteWrite(path: string, written?: FileMeta): Promise<void> {
+		if (!this.inConfig(path)) return;
+		this.report.configChanged = true;
+		const [, folder, plugin, name, ...rest] = path.split("/");
+		if (!written || folder !== "plugins" || name !== "main.js" || rest.length > 0 || plugin === undefined) return;
+		if (this.report.pluginCode.some((c) => c.plugin === plugin)) return;
+		const before = await this.opts.store.getFile(path);
+		this.report.pluginCode.push({ plugin, device: written.device, added: !before || before.deleted });
 	}
 
 	private now(): Date {

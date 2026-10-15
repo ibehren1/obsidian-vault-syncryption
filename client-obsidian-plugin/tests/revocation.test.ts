@@ -5,6 +5,7 @@ import { generateRecoveryKey } from "../src/crypto/keyring";
 import { objectEpoch } from "../src/crypto/objects";
 import { VaultCipher } from "../src/sync/cipher";
 import { LiveLoop } from "../src/sync/live";
+import { KEPT, REVOKING } from "../src/sync/session";
 import { noBackend, uniqueName } from "./harness";
 import { device, pairedDevice, type Device } from "./sync-fixture";
 
@@ -78,14 +79,35 @@ describe.skipIf(noBackend)("revocation", () => {
 		expect(b.session.keyring.recoverySetBy).toBeUndefined();
 	});
 
-	it("finishes a revocation whose key rotation didn't happen", async () => {
+	it("finishes its own revocation whose key rotation didn't happen", async () => {
 		const [a, b, c] = await threeDevices();
-		// Revoked on the server, but the device that did it stopped before rotating.
+		// Revoked on the server, but this device stopped before rotating.
+		await a.store.setMeta(REVOKING, [c.session.deviceId]);
 		await a.session.api.removeDevice(a.session.vault.id, c.session.deviceId);
-		expect(await a.session.removeStaleDevices()).toEqual(["Tablet"]);
+		expect(await a.session.removeStaleDevices()).toEqual({ removed: ["Tablet"], unconfirmed: [] });
 		expect(a.session.keyring).toMatchObject({ currentEpoch: 2, version: 4 });
-		expect(await b.session.removeStaleDevices()).toEqual([]);
+		expect(await a.store.getMeta(REVOKING)).toEqual([]);
+		expect(await b.session.removeStaleDevices()).toEqual({ removed: [], unconfirmed: [] });
 		expect(b.session.keyring.devices.map((d) => d.name)).toEqual(["Laptop", "Phone"]);
+	});
+
+	it("leaves another device's revocation to the user", async () => {
+		const [a, b, c] = await threeDevices();
+		// The server reports Tablet removed, but no device here removed it.
+		await a.session.api.removeDevice(a.session.vault.id, c.session.deviceId);
+		const stale = await b.session.removeStaleDevices();
+		expect(stale.removed).toEqual([]);
+		expect(stale.unconfirmed.map((d) => d.name)).toEqual(["Tablet"]);
+		expect(b.session.keyring).toMatchObject({ currentEpoch: 1, version: 3 });
+
+		await b.session.keepDevices([c.session.deviceId]);
+		expect(await b.session.removeStaleDevices()).toEqual({ removed: [], unconfirmed: [] });
+		expect(b.session.keyring.devices.map((d) => d.name)).toContain("Tablet");
+
+		// Removing it from the Devices list later still works, and forgets the choice.
+		await b.session.removeDevices([c.session.deviceId]);
+		expect(b.session.keyring).toMatchObject({ currentEpoch: 2, version: 4 });
+		expect(await b.store.getMeta(KEPT)).toEqual([]);
 	});
 
 	it("lets any device remove another device's key", async () => {

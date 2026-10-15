@@ -322,6 +322,7 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		};
 		const report = await b.engine.sync();
 		expect(report.configChanged).toBe(true);
+		expect(report.pluginCode).toEqual([{ plugin: "dataview", device: a.session.deviceId, added: true }]);
 		expect(report.conflicts).toEqual([]);
 		expect(written.at(-1)).toBe(".obsidian/community-plugins.json");
 		expect(written).toContain(".obsidian/plugins/dataview/main.js");
@@ -339,9 +340,16 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		await a.engine.sync();
 		const next = await b.engine.sync();
 		expect(next.configChanged).toBe(true);
+		expect(next.pluginCode).toEqual([]);
 		expect(b.fs.text(".obsidian/app.json")).toBe('{"vimMode":false}');
 		expect((await a.engine.sync()).configChanged).toBe(false);
 		expect(a.fs.text("Note.md")).toBe("hi");
+
+		// New code of a plugin it has is listed as changed, by the device that wrote it.
+		a.fs.set(".obsidian/plugins/dataview/main.js", "new plugin code");
+		a.fs.set(".obsidian/plugins/dataview/styles.css", "p {}");
+		await a.engine.sync();
+		expect((await b.engine.sync()).pluginCode).toEqual([{ plugin: "dataview", device: a.session.deviceId, added: false }]);
 	});
 
 	it("keeps a held-back revision it couldn't write", async () => {
