@@ -34,18 +34,15 @@ jobs:
           if [[ "$GITHUB_REPOSITORY" == *-beta ]]; then
             image="ghcr.io/$owner/vault-syncryption-beta"
             tags="$image:dev-$version,$image:dev-latest"
-            prerelease=true
           else
             image="ghcr.io/$owner/vault-syncryption"
             tags="$image:$version,$image:latest"
-            prerelease=false
           fi
           {
             echo "version=$version"
             echo "tag=backend-v$version"
             echo "image=$image"
             echo "tags=$tags"
-            echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
           if gh release view "backend-v$version" >/dev/null 2>&1; then
             echo "Release backend-v$version already exists."
@@ -100,9 +97,7 @@ jobs:
             echo "Pull it with \`docker pull ${TAGS%%,*}\`, or set \`image:\` to it in \`backend/docker/docker-compose.yml\`."
             echo "Verify it with \`gh attestation verify oci://${IMAGE}@${DIGEST} -R ${GITHUB_REPOSITORY}\`."
           } > notes.md
-          flags=(--latest=false)
-          [[ "$PRERELEASE" == true ]] && flags+=(--prerelease)
-          gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md "${flags[@]}"
+          gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md --latest=false
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -110,4 +105,3 @@ jobs:
           TAGS: ${{ steps.version.outputs.tags }}
           IMAGE: ${{ steps.version.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
-          PRERELEASE: ${{ steps.version.outputs.prerelease }}

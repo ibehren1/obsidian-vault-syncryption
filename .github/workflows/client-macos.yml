@@ -1,0 +1,64 @@
+# Runs on the public and the beta GitHub repo. Tests and builds the macOS client, and when
+# client-macos/project.yml carries a client version with no release yet, publishes an
+# ad-hoc-signed DMG as a release tagged client-macos-v<version>. It is never marked Latest,
+# which stays the plugin's release.
+name: macOS client
+
+on:
+  push:
+    branches: [main]
+    paths: [client-macos/**, testvectors/**, backend/**, .github/workflows/client-macos.yml]
+  pull_request:
+    paths: [client-macos/**, testvectors/**, backend/**, .github/workflows/client-macos.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  client:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Test and build
+        env:
+          REQUIRE_BACKEND: "1"
+        run: client-macos/check.sh
+      - name: Read the version
+        id: version
+        if: github.event_name != 'pull_request'
+        run: |
+          version=$(sed -n 's/^ *MARKETING_VERSION: *"\(.*\)"/\1/p' client-macos/project.yml)
+          tag="client-macos-v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build the DMG
+        id: dmg
+        if: steps.version.outputs.new == 'true'
+        run: echo "path=client-macos/$(client-macos/package.sh)" >> "$GITHUB_OUTPUT"
+      - name: Attest the build provenance
+        if: steps.version.outputs.new == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.dmg.outputs.path }}
+      - name: Publish the release
+        if: steps.version.outputs.new == 'true'
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" "${{ steps.dmg.outputs.path }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --target "$GITHUB_SHA" --latest=false \
+            --notes "The macOS client. It is signed ad hoc, not with a Developer ID, so macOS blocks the first launch: right-click the app and choose Open, or run \`xattr -d com.apple.quarantine /Applications/VaultSyncryption.app\`."
+        env:
+          GH_TOKEN: ${{ github.token }}
