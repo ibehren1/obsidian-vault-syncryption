@@ -864,8 +864,10 @@ def _line(label: str, value_id: str, row_id: str | None = None, spark: bool = Fa
     )
 
 
-def _card(title: str, rows: str) -> str:
-    return f'<section class="stripe"><h2>{title}</h2><table>{rows}</table></section>'
+def _card(title: str, rows: str, card_id: str | None = None) -> str:
+    """A titled table. With `card_id` it starts hidden, until the script has data for it."""
+    attrs = f' id="{card_id}" hidden' if card_id else ""
+    return f'<section class="stripe"{attrs}><h2>{title}</h2><table>{rows}</table></section>'
 
 
 def _performance(admin: Admin) -> HTMLResponse:
@@ -928,6 +930,31 @@ def _performance(admin: Admin) -> HTMLResponse:
         + _line("Revisions removed by retention", "pruned")
         + _line("Blobs deleted by cleanup", "deleted"),
     )
+    s3 = _card(
+        'S3 blob store <span class="muted">(last interval)</span>',
+        _line("Calls/s", "s3rps", spark=True)
+        + _line("Failed calls/s", "s3err", spark=True)
+        + _line("Latency p50 / p99", "s3p50p99")
+        + _line("Latency p95", "s3p95", spark=True)
+        + _line("Uploaded", "s3up", spark=True)
+        + _line("Downloaded", "s3down", spark=True)
+        + _line("Retries/s", "s3retries", spark=True)
+        + _line("In flight", "s3inflight")
+        + _line("Failures since start", "s3results"),
+        "card-s3",
+    )
+    litestream = _card(
+        'Database replication <span class="muted">(Litestream)</span>',
+        _line("Status", "lsup")
+        + _line("Syncs/s", "lssync", spark=True)
+        + _line("Sync errors since start", "lserr")
+        + _line("Time spent syncing", "lsbusy", spark=True)
+        + _line("WAL written for replication", "lswal", spark=True)
+        + _line("Uploads to S3/s", "lsput", spark=True)
+        + _line("Uploaded to S3", "lsbytes", spark=True)
+        + _line("Transaction ID", "lstxid"),
+        "card-litestream",
+    )
     storage = _card(
         "Storage",
         _line("Users", "users")
@@ -947,6 +974,7 @@ def _performance(admin: Admin) -> HTMLResponse:
         + requests
         + f'<div class="cols">{sync}{load}</div>'
         + f'<div class="cols">{server}{disk}</div>'
+        + f'<div class="cols">{s3}{litestream}</div>'
         + storage
     )
     return html_page(body, script="/admin/performance.js")

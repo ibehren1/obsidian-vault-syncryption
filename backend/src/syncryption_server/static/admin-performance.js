@@ -229,6 +229,105 @@
     set("blobs", count(snap.blobs));
     set("stored", size(snap.blobBytes));
     trend("stored", snap.blobBytes);
+
+    showS3(snap.s3, before ? before.s3 : null, rate);
+    showLitestream(snap.litestream, before ? before.litestream : null, rate);
+  }
+
+  // Calls to the S3 bucket for blobs: only with S3.
+  function showS3(s3, then, rate) {
+    $("card-s3").hidden = s3 === null;
+    if (s3 === null) return;
+    const calls = (s, keep) =>
+      s.requests.filter(keep).reduce((sum, r) => sum + r.count, 0);
+    const failed = (r) => r.result !== "ok" && r.result !== "not_found";
+    const perSecond = (keep) =>
+      then ? rate(calls(s3, keep), calls(then, keep)) : null;
+    const show = (id, value, text) => {
+      set(id, text(value));
+      trend(id, value);
+    };
+    show(
+      "s3rps",
+      perSecond(() => true),
+      (v) => number(v, 1),
+    );
+    show("s3err", perSecond(failed), (v) => number(v, 2));
+    const bytes = (now, before) => (then ? rate(now, before) : null);
+    const perSecondSize = (v) => (v === null ? DASH : `${size(v)}/s`);
+    show("s3up", bytes(s3.uploadedBytes, then?.uploadedBytes), perSecondSize);
+    show(
+      "s3down",
+      bytes(s3.downloadedBytes, then?.downloadedBytes),
+      perSecondSize,
+    );
+    const retries = (s) => Object.values(s.retries).reduce((a, b) => a + b, 0);
+    show("s3retries", then ? rate(retries(s3), retries(then)) : null, (v) =>
+      number(v, 2),
+    );
+    set("s3inflight", String(s3.inFlight));
+
+    // Latency of all operations together, from the buckets filled in this interval.
+    const merged = s3.buckets.concat([Infinity]).map(() => 0);
+    if (then) {
+      const old = new Map(then.durations.map((d) => [d.operation, d.buckets]));
+      for (const d of s3.durations) {
+        const before = old.get(d.operation) || d.buckets.map(() => 0);
+        d.buckets.forEach((n, i) => (merged[i] += n - before[i]));
+      }
+    }
+    const last = s3.buckets[s3.buckets.length - 1];
+    const q = (p) => quantile(p, merged, s3.buckets);
+    const p95 = q(0.95);
+    set("s3p50p99", `${latency(q(0.5), last)} / ${latency(q(0.99), last)}`);
+    set("s3p95", latency(p95, last));
+    trend("s3p95", p95 === Infinity ? null : p95);
+
+    const results = new Map();
+    for (const r of s3.requests.filter(failed))
+      results.set(r.result, (results.get(r.result) || 0) + r.count);
+    const listed = [...results]
+      .filter(([, n]) => n > 0)
+      .map(([result, n]) => `${result.replace("_", " ")} ${count(n)}`);
+    set("s3results", listed.length ? listed.join(", ") : "none");
+  }
+
+  // Litestream's replication of meta.db to the bucket: only while it replicates.
+  function showLitestream(ls, then, rate) {
+    $("card-litestream").hidden = ls === null;
+    if (ls === null) return;
+    const delta = (key) =>
+      then && ls[key] !== null && then[key] !== null
+        ? rate(ls[key], then[key])
+        : null;
+    const show = (id, value, text) => {
+      set(id, text(value));
+      trend(id, value);
+    };
+    const total = (ops) =>
+      ops ? Object.values(ops).reduce((a, b) => a + b, 0) : null;
+    const opsRate = (key) =>
+      then && ls.up && then.up ? rate(total(ls[key]), total(then[key])) : null;
+    const perSecondSize = (v) => (v === null ? DASH : `${size(v)}/s`);
+
+    set(
+      "lsup",
+      !ls.up
+        ? "not answering"
+        : ls.diskFull
+          ? "paused: local disk full"
+          : "replicating",
+    );
+    show("lssync", delta("syncs"), (v) => number(v, 1));
+    set("lserr", ls.syncErrors === null ? DASH : count(ls.syncErrors));
+    const busy = delta("syncSeconds");
+    show("lsbusy", busy === null ? null : busy * 100, (v) =>
+      v === null ? DASH : `${number(v, 1)} %`,
+    );
+    show("lswal", delta("walBytes"), perSecondSize);
+    show("lsput", opsRate("replicaOperations"), (v) => number(v, 2));
+    show("lsbytes", opsRate("replicaBytes"), perSecondSize);
+    set("lstxid", ls.txid === null ? DASH : count(ls.txid));
   }
 
   // The last readings of each value with a sparkline, drawn as a small SVG line.
@@ -334,9 +433,9 @@
       : bounds[i];
   }
 
-  function latency(seconds) {
+  function latency(seconds, last = 60) {
     if (seconds === null) return DASH;
-    if (seconds === Infinity) return "> 60 s";
+    if (seconds === Infinity) return `> ${last} s`;
     return seconds < 1
       ? `${Math.round(seconds * 1000)} ms`
       : `${seconds.toFixed(1)} s`;

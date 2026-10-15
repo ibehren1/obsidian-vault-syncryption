@@ -175,9 +175,9 @@ def home_page(state: AppState, origin: str, health: dict[str, object]) -> HTMLRe
     return admin.html_page(body, title="Vault Syncryption")
 
 
-def make_blob_store(settings: Settings) -> BlobStore:
+def make_blob_store(settings: Settings, s3_metrics: metrics.S3Metrics | None = None) -> BlobStore:
     if settings.blob_s3 is not None:
-        return S3BlobStore(settings.blob_s3)
+        return S3BlobStore(settings.blob_s3, s3_metrics)
     return LocalBlobStore(settings.data_dir)
 
 
@@ -229,7 +229,11 @@ def create_app(
 ) -> FastAPI:
     """Build the app. With no arguments, settings come from the environment."""
     settings = settings or load_settings()
-    app_metrics = metrics.Metrics(settings.data_dir)
+    app_metrics = metrics.Metrics(
+        settings.data_dir,
+        s3=settings.blob_s3 is not None,
+        litestream=settings.litestream_metrics,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -241,7 +245,7 @@ def create_app(
             await asyncio.to_thread(db.close)
             log.error("%s", e)
             raise
-        blob_store = store or make_blob_store(settings)
+        blob_store = store or make_blob_store(settings, app_metrics.s3)
         await blob_store.start()
         state = AppState(settings=settings, db=db, store=blob_store, metrics=app_metrics)
         state.maintenance = await db.run(lambda: load_maintenance(db))

@@ -52,11 +52,17 @@ def caddyfile(settings: Settings) -> str:
 """
 
 
+# Litestream's metrics listener, inside the container only.
+LITESTREAM_METRICS = "127.0.0.1:9091"
+
+
 def litestream_config(settings: Settings) -> str:
     """Secrets stay in the environment: Litestream expands `${...}` when it loads the file."""
     if settings.s3 is None:
         raise ValueError("S3 is not configured")
     lines = [
+        # Its metrics, read only by the server's `/metrics` and admin page, never exposed.
+        f'addr: "{LITESTREAM_METRICS}"',
         "dbs:",
         f"  - path: {settings.db_path}",
         "    replica:",
@@ -149,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         # server stores its blobs there (not while moving off S3).
         print(f"replicate={shlex.quote(str(settings.blob_s3 is not None).upper())}")
         print(f"db_path={shlex.quote(str(settings.db_path))}")
+        print(f"litestream_metrics={shlex.quote(LITESTREAM_METRICS)}")
     elif args.command == "migrate":
         if settings.s3 is None or not (settings.migrate_to_s3 or settings.migrate_from_s3):
             print(

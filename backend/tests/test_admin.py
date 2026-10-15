@@ -159,6 +159,11 @@ def test_performance_tab(client, alice):
     for value_id in ("commits", "conflicts", "bin", "lag", "disk", "gclast"):
         assert f'id="{value_id}"' in page.text
     assert 'id="spark-rps"' in page.text
+    # Shown by the script only with S3 and while Litestream replicates.
+    assert '<section class="stripe" id="card-s3" hidden>' in page.text
+    assert '<section class="stripe" id="card-litestream" hidden>' in page.text
+    for value_id in ("s3rps", "s3p95", "s3results", "lsup", "lssync", "lsbytes"):
+        assert f'id="{value_id}"' in page.text
     js = client.get("/admin/performance.js")
     assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
     assert "innerHTML" not in js.text

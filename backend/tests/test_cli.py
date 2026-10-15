@@ -64,6 +64,9 @@ def test_render_with_caddy_and_litestream(env, tmp_path, capsys):
     assert "bucket: bucket" in litestream
     assert "${S3_SECRET_KEY}" in litestream and "s3-secret" not in litestream
     assert "endpoint: ${S3_ENDPOINT}" in litestream
+    # Litestream's metrics listen inside the container only, where the server reads them.
+    assert 'addr: "127.0.0.1:9091"' in litestream
+    assert "litestream_metrics=127.0.0.1:9091" in out
 
 
 def test_render_while_moving_off_s3(env, tmp_path, capsys):

@@ -2,7 +2,8 @@
 
 The container is configured only through the variables in `backend/docker/docker-compose.yml`.
 `SYNCRYPTION_DATA_DIR` is a development override for `/data` and is not part of the
-hosting configuration.
+hosting configuration. Neither is `SYNCRYPTION_LITESTREAM_METRICS`, which the entrypoint
+sets while Litestream replicates.
 """
 
 import ipaddress
@@ -72,6 +73,9 @@ class Settings:
     metrics_allowed: tuple[IPNetwork, ...] = tuple(
         ipaddress.ip_network(n) for n in PRIVATE_NETWORKS
     )
+    # `SYNCRYPTION_LITESTREAM_METRICS`: Litestream's metrics address (`host:port`), set by
+    # the entrypoint only while Litestream replicates meta.db. None otherwise.
+    litestream_metrics: str | None = None
 
     @property
     def db_path(self) -> Path:
@@ -187,6 +191,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     metrics_allowed = parse_networks(env.get("METRICS_ALLOWED_IPS", ""), "METRICS_ALLOWED_IPS")
 
     data_dir = Path(env.get("SYNCRYPTION_DATA_DIR", "") or "/data")
+    litestream_metrics = env.get("SYNCRYPTION_LITESTREAM_METRICS", "").strip() or None
     return Settings(
         shared_secret=shared_secret,
         admin_token=admin_token,
@@ -200,4 +205,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         admin_contact=admin_contact,
         disable_metrics=disable_metrics,
         metrics_allowed=metrics_allowed,
+        litestream_metrics=litestream_metrics,
     )

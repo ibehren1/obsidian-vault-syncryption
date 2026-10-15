@@ -327,13 +327,22 @@ Performance tab keeps working.
 | `syncryption_container_memory_bytes`, `syncryption_container_memory_working_set_bytes` | gauge | memory of the whole container (server, Caddy, Litestream), with and without inactive page cache; the working set is what `docker stats` shows |
 | `syncryption_container_memory_limit_bytes` | gauge | the container's memory limit, only when it has one |
 | `syncryption_container_cpu_seconds_total` | counter | CPU time of the whole container |
+| `syncryption_s3_requests_total{operation,result}` | counter | calls to the S3 bucket for blobs, only when blobs are stored in S3. `operation` is `put`, `get`, `head`, `delete`, `list` or `ping` (the health check); `result` is `ok`, `not_found` (a missing blob), `throttled` (`SlowDown`, other 503 and 429 answers), `client_error` (other 4xx, e.g. `AccessDenied`), `server_error` (5xx), `connection` (no answer: refused, timed out, DNS) or `other` |
+| `syncryption_s3_request_duration_seconds{operation}` | histogram | duration of those calls, the client's retries and reading the body included |
+| `syncryption_s3_retries_total{operation}` | counter | retries the S3 client made inside the calls that got an answer; steady retries usually mean the provider is throttling or flaky |
+| `syncryption_s3_uploaded_bytes_total`, `syncryption_s3_downloaded_bytes_total` | counter | blob bytes uploaded to and downloaded from the bucket |
+| `syncryption_s3_requests_in_flight` | gauge | S3 calls being made |
+| `syncryption_litestream_up` | gauge | only while Litestream replicates `meta.db` (blobs in S3): 1 when the server could read Litestream's metrics at this scrape, else 0 |
+| `litestream_*` | | Litestream's own metrics, passed on under its names while it replicates: among others `litestream_sync_count`, `litestream_sync_error_count` and `litestream_sync_seconds` (syncs of new WAL pages, about once a second), `litestream_total_wal_bytes`, `litestream_replica_operation_total{operation}` and `litestream_replica_operation_bytes{operation}` (its uploads to the bucket), `litestream_db_size`, `litestream_wal_size`, `litestream_txid` and `litestream_disk_full`. Its Go runtime and process metrics are left out. |
 | `process_*`, `python_*` | | the Python server process only: CPU, memory, open files, Python GC |
 
 The `syncryption_container_*` metrics come from the container's own cgroup, so they need
 no host access: they are there on Linux hosts with cgroup v2 when Docker gives the
 container its own cgroup namespace (the default with cgroup v2), and absent otherwise.
 For every container on the host, or the host itself, run cAdvisor or node_exporter on
-the host. Counters start at zero when the container restarts. A Prometheus scrape job:
+the host. Counters start at zero when the container restarts. Litestream serves its
+metrics on `127.0.0.1:9091` inside the container only; the server reads them at each
+scrape and adds them to `/metrics`, so one scrape job covers both. A Prometheus scrape job:
 ```yaml
 scrape_configs:
   - job_name: vault-syncryption
@@ -347,7 +356,9 @@ A Grafana dashboard for these metrics is in
 In Grafana, open Dashboards, New, Import, upload the file and pick your Prometheus data
 source. It has an overview (scrape, version, maintenance, uptime, users, vaults, keys,
 storage), request rate, status codes, server errors and latency (without the long-polls),
-storage and cleanup, wrong secrets and tokens, the whole container's CPU and memory, and
+storage and cleanup, wrong secrets and tokens, the S3 bucket's calls, failures, latency,
+throughput and retries, Litestream's replication (syncs, errors, time spent, uploads,
+throughput, database and WAL size; both empty without S3), the whole container's CPU and memory, and
 the server process's CPU, memory and open files. The Job and Instance variables at the top choose the server when Prometheus scrapes
 more than one.
 

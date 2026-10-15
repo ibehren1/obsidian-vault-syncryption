@@ -66,6 +66,8 @@ if [ "$migrate" = TRUE ]; then
 fi
 
 if [ "$replicate" = TRUE ]; then
+	# The server reads Litestream's metrics there for /metrics and the admin page.
+	export SYNCRYPTION_LITESTREAM_METRICS="$litestream_metrics"
 	exec litestream replicate -config "$RUN_DIR/litestream.yml" -exec "$0 serve"
 fi
 exec "$0" serve

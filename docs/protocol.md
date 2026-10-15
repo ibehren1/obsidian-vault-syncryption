@@ -769,6 +769,17 @@ browser's `localStorage`).
     system), `dbBytes` and `dbWalBytes` (`null` while the file doesn't exist),
     `prunedRevisions`, `deletedBlobs`, and `gcLastRun` (Unix seconds by task, `null`
     before the first run).
+  - `s3`: `null` unless blobs are stored in S3. Else `requests`
+    (`[{"operation", "result", "count"}]`), `durations` (`[{"operation", "buckets",
+    "sum"}]`, cumulative counts for each bound in `s3.buckets`, then +Inf), `retries` (by
+    operation), `uploadedBytes`, `downloadedBytes` (totals) and `inFlight`, the same
+    numbers as the `syncryption_s3_*` metrics.
+  - `litestream`: `null` unless Litestream replicates `meta.db`. Else `up` (whether its
+    metrics could be read), `syncs`, `syncErrors`, `syncSeconds`, `walBytes` (WAL bytes
+    written for replication), `replicaOperations` and `replicaBytes` (uploads to the
+    bucket and their bytes, by operation), all totals since Litestream started, and
+    `dbBytes`, `walSize`, `txid`, `diskFull`. A value is `null` while `up` is false or
+    when Litestream doesn't report it.
   No value names a user, vault, device or path. Requests are counted also with
   `DISABLE_METRICS=TRUE`, which removes only `/metrics`.
 - **Page:** the admin pages and `/` have one inline stylesheet, which their CSP allows by
@@ -777,7 +788,9 @@ browser's `localStorage`).
   the admin pages; only the Performance tab loads it, and its CSP adds
   `script-src 'self'; connect-src 'self'`. It turns two snapshots into rates: requests per
   second (also by kind: file commits, `409` conflicts, blob uploads and downloads, logins,
-  `401`, `429`), bytes per second, CPU percent, and latency percentiles interpolated within
+  `401`, `429`), bytes per second, the S3 calls (per second, failures, latency, bytes,
+  retries) and Litestream's replication (status, syncs, time spent syncing, WAL and
+  upload throughput) in cards shown only when the snapshot has them, CPU percent, and latency percentiles interpolated within
   the histogram buckets (the overall ones leave out `/wait`). It keeps the last 60 readings
   of the main numbers and draws each as a small SVG line. A changed `startedAt` (a
   restart) starts the rates over.

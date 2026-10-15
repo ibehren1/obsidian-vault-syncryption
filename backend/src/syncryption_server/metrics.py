@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import time
+import urllib.request
 from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,6 +25,7 @@ from prometheus_client import (
 )
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
 from prometheus_client.gc_collector import GCCollector
+from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.platform_collector import PlatformCollector
 from prometheus_client.process_collector import ProcessCollector
 from prometheus_client.registry import Collector
@@ -42,6 +44,16 @@ GC_TASKS = ("expired", "retention", "blobs")
 # The event-loop lag: measured every LAG_INTERVAL seconds, the worst of the last LAG_WINDOW.
 LAG_INTERVAL = 0.5
 LAG_WINDOW = 20
+# S3 calls: one blob is at most 4 MiB, so most take well under a second.
+S3_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30)
+S3_OPERATIONS = ("put", "get", "head", "delete", "list", "ping")
+# `throttled`: SlowDown and other 503 or 429 answers, after botocore's own retries.
+# `connection`: no answer (refused, timed out, DNS). `other`: anything else that failed.
+S3_RESULTS = ("ok", "not_found", "throttled", "client_error", "server_error", "connection", "other")
+# Litestream's metrics are read at each scrape: a slow or stopped Litestream costs at most
+# LITESTREAM_TIMEOUT, and its answer at most LITESTREAM_MAX_BYTES.
+LITESTREAM_TIMEOUT = 2.0
+LITESTREAM_MAX_BYTES = 1024**2
 # Not counted: the scrapes and the admin page's own polling.
 SKIP = ("/metrics", "/admin/performance.json", "/admin/api/performance")
 
@@ -139,11 +151,106 @@ class DataCollector(Collector):
             yield GaugeMetricFamily(PREFIX + name, doc, value=size)
 
 
+class LitestreamCollector(Collector):
+    """Litestream's own metrics while it replicates meta.db to S3, read from its metrics
+    listener (`addr` in litestream.yml) by `refresh` before each scrape. `/metrics` passes
+    its `litestream_*` families on as Litestream wrote them (`text`), so they keep their
+    names; its Go runtime and process metrics are left out. This collector itself reports
+    only `syncryption_litestream_up`, whether the last read worked."""
+
+    def __init__(self, address: str):
+        self.url = f"http://{address}/metrics"
+        self.up = False
+        self.text = ""
+        # Sample name (as the parser names it: counters end in `_total`) to label sets
+        # and values, for the admin page.
+        self.samples: dict[str, list[tuple[dict[str, str], float]]] = {}
+
+    def _fetch(self) -> str:
+        with urllib.request.urlopen(self.url, timeout=LITESTREAM_TIMEOUT) as r:  # noqa: S310
+            body = r.read(LITESTREAM_MAX_BYTES + 1)
+        if len(body) > LITESTREAM_MAX_BYTES:
+            raise ValueError("Litestream's metrics are too large")
+        return body.decode()
+
+    @staticmethod
+    def _own(line: str) -> bool:
+        """Whether the exposition line belongs to a `litestream_*` family."""
+        if line.startswith("#"):
+            parts = line.split(maxsplit=3)
+            return len(parts) >= 3 and parts[1] in ("HELP", "TYPE") and _litestream(parts[2])
+        return _litestream(line)
+
+    async def refresh(self) -> None:
+        try:
+            text = await asyncio.to_thread(self._fetch)
+            kept = "".join(line + "\n" for line in text.splitlines() if self._own(line))
+            samples: dict[str, list[tuple[dict[str, str], float]]] = {}
+            for family in text_string_to_metric_families(kept):
+                for sample in family.samples:
+                    samples.setdefault(sample.name, []).append((sample.labels, sample.value))
+        except (OSError, ValueError):
+            self.up, self.text, self.samples = False, "", {}
+            return
+        self.up, self.text, self.samples = True, kept, samples
+
+    def collect(self) -> Iterator[Metric]:
+        yield GaugeMetricFamily(
+            PREFIX + "litestream_up",
+            "1 when Litestream's metrics could be read at this scrape, else 0.",
+            value=1 if self.up else 0,
+        )
+
+
+def _litestream(name: str) -> bool:
+    return name.startswith("litestream_")
+
+
+class S3Metrics:
+    """Calls to the S3 blob store, registered only when blobs go to S3. `result` is one of
+    S3_RESULTS; `operation` one of S3_OPERATIONS."""
+
+    def __init__(self, registry: CollectorRegistry) -> None:
+        r = registry
+        self.requests = Counter(
+            PREFIX + "s3_requests",
+            "S3 calls by operation and result.",
+            ["operation", "result"],
+            registry=r,
+        )
+        self.duration = Histogram(
+            PREFIX + "s3_request_duration_seconds",
+            "S3 call duration by operation, retries and reading the body included.",
+            ["operation"],
+            buckets=S3_DURATION_BUCKETS,
+            registry=r,
+        )
+        self.retries = Counter(
+            PREFIX + "s3_retries",
+            "Retries botocore made inside S3 calls, by operation.",
+            ["operation"],
+            registry=r,
+        )
+        self.in_flight = Gauge(PREFIX + "s3_requests_in_flight", "S3 calls being made.", registry=r)
+        self.uploaded = Counter(
+            PREFIX + "s3_uploaded_bytes", "Bytes uploaded to S3 in blobs.", registry=r
+        )
+        self.downloaded = Counter(
+            PREFIX + "s3_downloaded_bytes", "Bytes downloaded from S3 in blobs.", registry=r
+        )
+        for op in S3_OPERATIONS:
+            self.duration.labels(op)
+            self.retries.labels(op)
+            self.requests.labels(op, "ok")
+
+
 class Metrics:
     """The collectors of one app. Each app has its own registry, so several apps can run in
     one process (the tests build many)."""
 
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(
+        self, data_dir: Path | None = None, s3: bool = False, litestream: str | None = None
+    ) -> None:
         self.started = time.time()
         self.registry = r = CollectorRegistry()
         ProcessCollector(registry=r)
@@ -232,6 +339,10 @@ class Metrics:
         self.admin_token_failures = Counter(
             PREFIX + "admin_token_failures", "Wrong admin tokens.", registry=r
         )
+        self.s3 = S3Metrics(r) if s3 else None
+        self.litestream = LitestreamCollector(litestream) if litestream else None
+        if self.litestream is not None:
+            r.register(self.litestream)
 
 
 def _refresh(state: AppState) -> None:
@@ -262,12 +373,18 @@ async def _refresh_all(state: AppState) -> None:
     await state.db.read(lambda: _refresh(state))
     m.maintenance.set(0 if state.maintenance is None else 1)
     m.longpolls.set(sum(len(w) for w in state.notifier.waiters.values()))
+    if m.litestream is not None:
+        await m.litestream.refresh()
 
 
 async def render(state: AppState) -> bytes:
     """Refresh the gauges from the database and the process, then serialize."""
     await _refresh_all(state)
-    return generate_latest(state.metrics.registry)
+    body = generate_latest(state.metrics.registry)
+    litestream = state.metrics.litestream
+    if litestream is not None:
+        body += litestream.text.encode()
+    return body
 
 
 async def snapshot(state: AppState) -> dict:
@@ -287,13 +404,58 @@ async def snapshot(state: AppState) -> dict:
     def by(name: str, label: str) -> dict[str, int]:
         return {labels[label]: int(v) for labels, v in labelled.get(PREFIX + name, [])}
 
-    durations: dict[tuple[str, str], dict] = {}
-    for labels, value in labelled.get(PREFIX + "http_request_duration_seconds_bucket", []):
-        key = (labels["method"], labels["route"])
-        entry = durations.setdefault(key, {"method": key[0], "route": key[1], "buckets": []})
-        entry["buckets"].append(int(value))
-    for labels, value in labelled.get(PREFIX + "http_request_duration_seconds_sum", []):
-        durations[(labels["method"], labels["route"])]["sum"] = value
+    def histogram(name: str, keys: tuple[str, ...]) -> list[dict]:
+        """Each label set's cumulative bucket counts (then +Inf) and sum."""
+        out: dict[tuple[str, ...], dict] = {}
+        for labels, value in labelled.get(name + "_bucket", []):
+            key = tuple(labels[k] for k in keys)
+            entry = out.setdefault(key, {**dict(zip(keys, key, strict=True)), "buckets": []})
+            entry["buckets"].append(int(value))
+        for labels, value in labelled.get(name + "_sum", []):
+            out[tuple(labels[k] for k in keys)]["sum"] = value
+        return list(out.values())
+
+    ls = state.metrics.litestream
+    ls_samples = ls.samples if ls is not None else {}
+
+    def total(name: str) -> float | None:
+        """A Litestream value summed over its labels, or None when Litestream lacks it."""
+        values = [v for _, v in ls_samples.get(name, [])]
+        return sum(values) if values else None
+
+    def ops(name: str) -> dict[str, int]:
+        return {labels["operation"]: int(v) for labels, v in ls_samples.get(name, [])}
+
+    s3 = None
+    if state.metrics.s3 is not None:
+        s3 = {
+            "buckets": list(S3_DURATION_BUCKETS),
+            "requests": [
+                {**labels, "count": int(v)}
+                for labels, v in labelled.get(PREFIX + "s3_requests_total", [])
+            ],
+            "durations": histogram(PREFIX + "s3_request_duration_seconds", ("operation",)),
+            "retries": by("s3_retries_total", "operation"),
+            "uploadedBytes": int(one[PREFIX + "s3_uploaded_bytes_total"]),
+            "downloadedBytes": int(one[PREFIX + "s3_downloaded_bytes_total"]),
+            "inFlight": int(one[PREFIX + "s3_requests_in_flight"]),
+        }
+    litestream = None
+    if ls is not None:
+        disk_full = total("litestream_disk_full")
+        litestream = {
+            "up": ls.up,
+            "syncs": total("litestream_sync_count_total"),
+            "syncErrors": total("litestream_sync_error_count_total"),
+            "syncSeconds": total("litestream_sync_seconds_total"),
+            "walBytes": total("litestream_total_wal_bytes_total"),
+            "dbBytes": total("litestream_db_size"),
+            "walSize": total("litestream_wal_size"),
+            "txid": total("litestream_txid"),
+            "diskFull": None if disk_full is None else bool(disk_full),
+            "replicaOperations": ops("litestream_replica_operation_total"),
+            "replicaBytes": ops("litestream_replica_operation_bytes_total"),
+        }
     container = PREFIX + "container_"
     return {
         "time": time.time(),
@@ -304,7 +466,7 @@ async def snapshot(state: AppState) -> dict:
             for labels, v in labelled.get(PREFIX + "http_requests_total", [])
         ],
         # `buckets` are cumulative counts per bound in `buckets` above, then +Inf.
-        "durations": list(durations.values()),
+        "durations": histogram(PREFIX + "http_request_duration_seconds", ("method", "route")),
         "process": {
             "cpuSeconds": one.get("process_cpu_seconds_total"),
             "memoryBytes": one.get("process_resident_memory_bytes"),
@@ -345,6 +507,9 @@ async def snapshot(state: AppState) -> dict:
         },
         "adminTokenFailures": int(one[PREFIX + "admin_token_failures_total"]),
         "sharedSecretFailures": int(one[PREFIX + "shared_secret_failures_total"]),
+        # Null without S3, and without Litestream (it replicates only with blobs in S3).
+        "s3": s3,
+        "litestream": litestream,
     }
 
 

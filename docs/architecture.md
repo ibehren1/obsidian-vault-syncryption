@@ -51,11 +51,11 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `encoding` | `b64u`, RFC 3339 times, id formats |
 | `sshkeys` | devices' encryption keys (Ed25519 public keys in OpenSSH format): parsing, fingerprints, pairing codes, sshsig verification |
 | `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag, metrics |
-| `metrics` | Prometheus collectors in a per-app registry, the request middleware (labels by route template), the `/metrics` rendering, which counts users, vaults, keys, files, revisions, blobs and locks in SQLite at each scrape, and the container's memory and CPU read from its own cgroup v2 files |
+| `metrics` | Prometheus collectors in a per-app registry, the request middleware (labels by route template), the `/metrics` rendering, which counts users, vaults, keys, files, revisions, blobs and locks in SQLite at each scrape, the container's memory and CPU read from its own cgroup v2 files, and, with S3, the bucket calls by operation and result, their duration, retries and bytes, plus Litestream's own metrics, read from its listener on `127.0.0.1:9091` (the entrypoint passes the address in `SYNCRYPTION_LITESTREAM_METRICS` while Litestream replicates) and passed on unchanged |
 | `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens (5 minutes for a remote-only device, so each login renews its lease), the grace period sent at login, refusing locked devices and keeping remote-only devices out of the vault's management calls |
 | `devices` | the vault's keys (devices): list, approval (with the remote-only flag), removal, policy changes, locking and unlocking remote-only devices, `/devices/self` |
 | `vaults` | open/create the key's vault by name, keyring versions, recovery |
-| `storage` | `BlobStore` protocol, `LocalBlobStore`, `S3BlobStore` |
+| `storage` | `BlobStore` protocol, `LocalBlobStore`, `S3BlobStore` (which counts and times its bucket calls for `metrics`) |
 | `blobs` | blob upload, download and `missing`, and the garbage collector |
 | `retention` | hourly pruning of old revisions (protocol.md 9.3) |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
@@ -263,7 +263,8 @@ the environment rules live in one place (`config.py`).
    `BEHIND_PROXY=FALSE` (`admin off`, certificates in `/data/caddy`, `reverse_proxy` to
    uvicorn) and a `litestream.yml` when S3 is enabled. Credentials are not written to
    disk: the file refers to `${S3_ACCESS_KEY}` and `${S3_SECRET_KEY}`, which Litestream
-   expands when it loads it.
+   expands when it loads it. It also sets Litestream's metrics listener to
+   `127.0.0.1:9091`, reachable only inside the container.
 3. If the `S3_*` variables are set (also with `MIGRATE_FROM_S3=TRUE`): `litestream restore
    -if-db-not-exists -if-replica-exists`, so a new host can be rebuilt from the bucket.
 4. `check-data` stops the container if `meta.db` was written by a server before 0.1.4
@@ -283,7 +284,9 @@ the environment rules live in one place (`config.py`).
    - `BEHIND_PROXY=TRUE`: uvicorn on `0.0.0.0:8080` with `--no-proxy-headers`. The app
      reads `X-Forwarded-*` itself, and only from peers in `TRUSTED_PROXIES`.
    - With blobs in S3, everything runs under `litestream replicate -exec`, so the database
-     is replicated while the app runs and Litestream stops when the app does. With
+     is replicated while the app runs and Litestream stops when the app does. The app
+     gets `SYNCRYPTION_LITESTREAM_METRICS=127.0.0.1:9091` and adds Litestream's metrics
+     to `/metrics` and the admin page. With
      `MIGRATE_FROM_S3=TRUE`, blobs are served from `/data` and Litestream doesn't run.
 7. The entrypoint supervises the processes with `wait -n`: if uvicorn or Caddy exits, the
    other is stopped and the container exits with an error. `docker stop` (SIGTERM) shuts
