@@ -215,7 +215,12 @@ struct EngineTests {
         let files = FileManager.default.enumerator(atPath: dir.path)!.compactMap { $0 as? String }
             .map { dir.appending(path: $0) }.filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
         #expect(!files.isEmpty)
-        for f in files { #expect(!(try Data(contentsOf: f)).contains(Data(marker.utf8)), "\(f.lastPathComponent)") }
+        // Other tests share the backend and upload meanwhile: their temporary blob files can
+        // be renamed between the listing and the read, so a file that is gone is skipped.
+        for f in files {
+            guard let data = try? Data(contentsOf: f) else { continue }
+            #expect(!data.contains(Data(marker.utf8)), "\(f.lastPathComponent)")
+        }
     }
 
     @Test func listsHistoryAndRestoresAnOldVersionEverywhere() async throws {
