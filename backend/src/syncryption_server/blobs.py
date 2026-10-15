@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
 from syncryption_server.auth import ActiveCaller, Caller, State
+from syncryption_server.config import DEMO_QUOTA
 from syncryption_server.encoding import BLOB_ID_RE
 from syncryption_server.errors import (
     ApiError,
@@ -130,6 +131,9 @@ async def put_blob(
     def check_quota() -> None:
         row = state.db.one("SELECT blob_bytes, blob_quota FROM vaults WHERE id = ?", vault_id)
         quota = row["blob_quota"]
+        if state.settings.demo_mode:
+            # Also caps vaults created before demo mode was turned on.
+            quota = min(quota or DEMO_QUOTA, DEMO_QUOTA)
         if quota is not None and row["blob_bytes"] + len(data) > quota:
             raise quota_exceeded(quota, row["blob_bytes"])
 

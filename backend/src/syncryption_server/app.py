@@ -28,7 +28,7 @@ from syncryption_server import (
     sync,
     vaults,
 )
-from syncryption_server.config import Settings, load_settings
+from syncryption_server.config import DEMO_QUOTA, DEMO_TTL, Settings, load_settings
 from syncryption_server.db import Database, OldDataError
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import (
@@ -158,7 +158,14 @@ def home_page(state: AppState, origin: str, health: dict[str, object]) -> HTMLRe
         + "<p>Self-hosted, end-to-end encrypted sync for Obsidian. Notes are encrypted on "
         "your devices; this server stores only ciphertext.</p>"
         f"{status}"
-        "<h2>Connecting</h2><ol>"
+        + (
+            '<p class="notice error">Demo server: accounts and their data are deleted '
+            f"{DEMO_TTL // 3600} hours after sign-up, and each vault is limited to "
+            f"{DEMO_QUOTA // 2**20} MB.</p>"
+            if state.settings.demo_mode
+            else ""
+        )
+        + "<h2>Connecting</h2><ol>"
         "<li>Install the Vault Syncryption plugin in Obsidian.</li>"
         f"<li>Enter this server's URL (<code>{html.escape(origin)}</code>), a username and "
         "a vault name, and create an encryption key.</li>"
@@ -188,9 +195,20 @@ async def _gc_loop(state: AppState) -> None:
 
 
 async def gc_pass(state: AppState) -> None:
-    """One hourly cleanup: expired challenges, sessions and pending keys, then old
-    revisions, then unreferenced blobs. A failing task doesn't stop the others."""
+    """One hourly cleanup: on a demo server expired users first, then expired challenges,
+    sessions and pending keys, then old revisions, then unreferenced blobs. A failing task
+    doesn't stop the others."""
     m = state.metrics
+    if state.settings.demo_mode:
+        m.gc_runs.labels("demo").inc()
+        try:
+            purged = await admin.purge_demo_users(state)
+            if purged:
+                log.info("demo mode purged %d users", purged)
+        except Exception:
+            m.gc_failures.labels("demo").inc()
+            log.exception("purging demo users failed")
+        m.gc_last_run.labels("demo").set(time.time())
     m.gc_runs.labels("expired").inc()
     try:
         # Also done at each login and key listing, but challenge-only traffic does neither.

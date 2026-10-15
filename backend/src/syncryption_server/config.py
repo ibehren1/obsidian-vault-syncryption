@@ -18,6 +18,11 @@ MIN_ADMIN_TOKEN = 32
 MIN_SHARED_SECRET = 16
 # `ADMIN_CONTACT` and the maintenance message: one line of free text.
 MAX_NOTE = 500
+# `DEMO_MODE=TRUE` (a trial server, deliberately not in the hosting docs): each vault is
+# capped at DEMO_QUOTA bytes, only head revisions are kept, users are purged DEMO_TTL seconds
+# after they join, and /admin is public and read-only.
+DEMO_QUOTA = 5 * 2**20
+DEMO_TTL = 24 * 3600
 # `TRUSTED_PROXIES` and `METRICS_ALLOWED_IPS` when unset: loopback and private ranges, where
 # a reverse proxy or a Prometheus in front of the container (on the same host, a Docker
 # network or the LAN) connects from.
@@ -76,6 +81,8 @@ class Settings:
     # `SYNCRYPTION_LITESTREAM_METRICS`: Litestream's metrics address (`host:port`), set by
     # the entrypoint only while Litestream replicates meta.db. None otherwise.
     litestream_metrics: str | None = None
+    # `DEMO_MODE=TRUE`: see DEMO_QUOTA.
+    demo_mode: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -192,6 +199,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
 
     data_dir = Path(env.get("SYNCRYPTION_DATA_DIR", "") or "/data")
     litestream_metrics = env.get("SYNCRYPTION_LITESTREAM_METRICS", "").strip() or None
+    demo_mode = _bool(env, "DEMO_MODE")
     return Settings(
         shared_secret=shared_secret,
         admin_token=admin_token,
@@ -206,4 +214,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         disable_metrics=disable_metrics,
         metrics_allowed=metrics_allowed,
         litestream_metrics=litestream_metrics,
+        demo_mode=demo_mode,
     )

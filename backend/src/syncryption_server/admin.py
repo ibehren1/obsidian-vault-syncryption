@@ -7,6 +7,8 @@ devices (one encryption key each). Users and vaults can be disabled (no access, 
 enabled again, and purged once disabled. Purging a vault also deletes its devices. Each vault
 has a grace period for its remote-only devices (remote-only.md 5) and an optional storage
 quota (protocol.md 12).
+On a demo server (`DEMO_MODE`), the page and the GET API are public and every action is
+refused, and users are purged a day after they join.
 Maintenance mode pauses the whole sync API until it is turned off (protocol.md 14.1). The
 Performance tab polls the server's metrics and shows them as rates (protocol.md 14.2).
 """
@@ -29,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from syncryption_server import PROTOCOL_VERSION, __version__, metrics
 from syncryption_server.auth import REMOTE_ONLY_GRACE, client_ip, limit_key, request_origin
-from syncryption_server.config import MAX_NOTE, note_problem
+from syncryption_server.config import DEMO_QUOTA, DEMO_TTL, MAX_NOTE, note_problem
 from syncryption_server.encoding import rfc3339
 from syncryption_server.errors import ApiError, bad_request, not_found
 from syncryption_server.retention import DELETED_DAYS, KEEP_DAYS, KEEP_VERSIONS, OLD_EPOCH_DAYS
@@ -90,6 +92,7 @@ MESSAGES = {
     "quota_set": "Storage quota saved. It applies to the next upload.",
     "bad_quota": f"The quota is a whole number of GB from 1 to {MAX_QUOTA // GB}, "
     "or empty for no quota.",
+    "demo": "This is a demo server: the admin page is read-only.",
 }
 # Codes that aren't errors, shown in green.
 SUCCESS = (
@@ -112,6 +115,8 @@ class Admin:
     # The browser session's CSRF token; None for Bearer requests, which need none.
     csrf: str | None
     session_hash: str | None = None
+    # A demo server's visitor: sees everything, changes nothing.
+    read_only: bool = False
 
 
 def _hash(token: str) -> str:
@@ -139,6 +144,8 @@ def _bearer(request: Request) -> str | None:
 
 async def _admin(request: Request, state: AppState) -> Admin | None:
     """The Bearer token, else the session cookie. None when neither is valid."""
+    if state.settings.demo_mode:
+        return Admin(csrf=None, read_only=True)
     token = _bearer(request)
     if token is not None:
         return Admin(csrf=None) if check_token(request, state, token) else None
@@ -157,6 +164,8 @@ async def _admin(request: Request, state: AppState) -> Admin | None:
 
 async def api_admin(request: Request, state: State) -> Admin:
     """The JSON API takes only the Bearer token: no cookie, so no CSRF to worry about."""
+    if state.settings.demo_mode:
+        return Admin(csrf=None, read_only=True)
     token = _bearer(request)
     if token is None or not check_token(request, state, token):
         raise ApiError(401, "unauthenticated", "Send the admin token as a Bearer token.")
@@ -293,6 +302,7 @@ def _delete_devices(db: sqlite3.Connection, where: str, value: str) -> None:
 
 async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm: str) -> str:
     """Run `action` and return the message code. Raises AdminError."""
+    _refuse_on_demo(state)
     row = await state.db.read(lambda: _row(state, kind, item_id))
     label = f"user {row['name']}" if kind == "users" else f"vault {row['username']}/{row['name']}"
     table = "users" if kind == "users" else "vaults"
@@ -317,23 +327,55 @@ async def act(state: AppState, kind: Kind, item_id: str, action: Action, confirm
     if kind == "vaults":
         await _purge_vault(state, row["user_id"], item_id)
     else:
-        for vault_id in await state.db.read(lambda: _vault_ids(state, kind, item_id)):
-            await _purge_vault(state, item_id, vault_id)
-
-        def forget() -> None:
-            with state.db.transaction() as db:
-                # Keys that were creating a vault, the only devices left.
-                _delete_devices(db, "user_id = ?", item_id)
-                db.execute("DELETE FROM challenges WHERE username = ?", (row["name"],))
-                db.execute("DELETE FROM users WHERE id = ?", (item_id,))
-
-        await state.db.run(forget)
+        await purge_user(state, item_id, row["name"])
     log.info("admin: purged %s", label)
     return "purged"
 
 
+async def purge_user(state: AppState, user_id: str, username: str) -> None:
+    """Delete the user, their vaults' data and all their devices."""
+    for vault_id in await state.db.read(lambda: _vault_ids(state, "users", user_id)):
+        await _purge_vault(state, user_id, vault_id)
+
+    def forget() -> None:
+        with state.db.transaction() as db:
+            # Keys that were creating a vault, the only devices left.
+            _delete_devices(db, "user_id = ?", user_id)
+            db.execute("DELETE FROM challenges WHERE username = ?", (username,))
+            db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    await state.db.run(forget)
+
+
+async def purge_demo_users(state: AppState) -> int:
+    """On a demo server, purge the users who joined DEMO_TTL ago or earlier. Returns how many."""
+    before = state.now() - DEMO_TTL
+    users = await state.db.read(
+        lambda: state.db.all("SELECT id, username FROM users WHERE created_at <= ?", before)
+    )
+    for user in users:
+        user_id = user["id"]
+
+        def disable(user_id: str = user_id) -> list[str]:
+            with state.db.transaction() as db:
+                db.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (state.now(), user_id))
+            return _vault_ids(state, "users", user_id)
+
+        # Disabled first, so the woken long-polls answer that rather than fail mid-purge.
+        for vault_id in await state.db.run(disable):
+            await state.notifier.notify(vault_id)
+        await purge_user(state, user_id, user["username"])
+    return len(users)
+
+
+def _refuse_on_demo(state: AppState) -> None:
+    if state.settings.demo_mode:
+        raise AdminError("demo", 403)
+
+
 async def set_grace(state: AppState, vault_id: str, seconds: int | None) -> str:
     """Set a vault's grace period for remote-only devices, None for the default."""
+    _refuse_on_demo(state)
     if seconds is not None and not MIN_GRACE <= seconds <= MAX_GRACE:
         raise AdminError("bad_grace")
     row = await state.db.read(lambda: _row(state, "vaults", vault_id))
@@ -349,6 +391,7 @@ async def set_grace(state: AppState, vault_id: str, seconds: int | None) -> str:
 
 async def set_quota(state: AppState, vault_id: str, quota: int | None) -> str:
     """Set a vault's storage quota in bytes, None for no quota."""
+    _refuse_on_demo(state)
     if quota is not None and not 1 <= quota <= MAX_QUOTA:
         raise AdminError("bad_quota")
     row = await state.db.read(lambda: _row(state, "vaults", vault_id))
@@ -364,6 +407,7 @@ async def set_quota(state: AppState, vault_id: str, quota: int | None) -> str:
 
 async def set_maintenance(state: AppState, on: bool, message: str | None = None) -> str:
     """Turn maintenance on (or update its message) or off. Returns the message code."""
+    _refuse_on_demo(state)
     if not on:
 
         def clear() -> None:
@@ -408,6 +452,14 @@ def status(state: AppState) -> dict:
 # JSON API
 
 
+def _api_error(e: AdminError) -> ApiError:
+    if e.status == 404:
+        return not_found()
+    if e.status == 403:
+        return ApiError(403, e.code, MESSAGES[e.code])
+    return bad_request(MESSAGES[e.code])
+
+
 class PurgeRequest(BaseModel):
     confirm: str = Field(max_length=64, description="The username or vault name, to confirm.")
 
@@ -441,7 +493,7 @@ async def api_maintenance(
     try:
         await set_maintenance(state, switch == "on", body.message if body else None)
     except AdminError as e:
-        raise bad_request(MESSAGES[e.code]) from e
+        raise _api_error(e) from e
     return Response(status_code=204)
 
 
@@ -456,9 +508,7 @@ async def api_grace(vault_id: str, body: GraceRequest, admin: ApiAdmin, state: S
     try:
         await set_grace(state, vault_id, body.graceSeconds)
     except AdminError as e:
-        if e.status == 404:
-            raise not_found() from e
-        raise bad_request(MESSAGES[e.code]) from e
+        raise _api_error(e) from e
     return Response(status_code=204)
 
 
@@ -473,9 +523,7 @@ async def api_quota(vault_id: str, body: QuotaRequest, admin: ApiAdmin, state: S
     try:
         await set_quota(state, vault_id, body.quotaBytes)
     except AdminError as e:
-        if e.status == 404:
-            raise not_found() from e
-        raise bad_request(MESSAGES[e.code]) from e
+        raise _api_error(e) from e
     return Response(status_code=204)
 
 
@@ -675,6 +723,8 @@ def _button(admin: Admin, kind: Kind, item: dict, action: Action, name: str) -> 
 
 
 def _actions(admin: Admin, kind: Kind, item: dict, name: str) -> str:
+    if admin.read_only:
+        return ""
     if not item["disabled"]:
         return _button(admin, kind, item, "disable", name)
     return (
@@ -686,6 +736,8 @@ def _grace_form(admin: Admin, vault: dict) -> str:
     """The vault's grace period in hours; empty means the default."""
     grace = vault["remoteOnlyGrace"]
     value = str(grace // 3600) if grace is not None else ""
+    if admin.read_only:
+        return f"{value or REMOTE_ONLY_GRACE // 3600} h"
     csrf = (
         f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf)}">' if admin.csrf else ""
     )
@@ -701,6 +753,8 @@ def _grace_form(admin: Admin, vault: dict) -> str:
 def _quota_form(admin: Admin, vault: dict) -> str:
     """The vault's storage quota in whole GB; empty means no quota."""
     quota = vault["quota"]
+    if admin.read_only:
+        return _size(quota) if quota is not None else "none"
     # A quota set through the API in bytes shows rounded up to whole GB.
     value = str(-(-quota // GB)) if quota is not None else ""
     csrf = (
@@ -718,6 +772,9 @@ def _quota_form(admin: Admin, vault: dict) -> str:
 def _maintenance_section(admin: Admin, state: AppState) -> str:
     csrf = f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf or "")}">'
     m = state.maintenance
+    if admin.read_only:
+        since = f"on since {_when(rfc3339(m.since))}" if m else "off"
+        return f'<section><h2>Maintenance</h2><p class="muted">{since}.</p></section>'
     if m is None:
         return (
             "<section><h2>Maintenance</h2>"
@@ -803,13 +860,23 @@ def _dashboard(
     if message:
         parts.append(f'<p class="notice{" error" if error else ""}">{html.escape(message)}</p>')
     parts.append(_maintenance_section(admin, state))
+    if state.settings.demo_mode:
+        kept = (
+            "Demo server: this page is read-only. Only the current version of each file is "
+            f"kept, each vault has a {_size(DEMO_QUOTA)} quota, and users are deleted with "
+            f"their data {DEMO_TTL // 3600} hours after they join. "
+        )
+    else:
+        kept = (
+            "Stored size counts history and deleted files still kept. "
+            f"The server keeps every version for {KEEP_DAYS} days, at least the last "
+            f"{KEEP_VERSIONS} of each file, and deleted files for {DELETED_DAYS} days; the "
+            f"copies a key change leaves behind go after {OLD_EPOCH_DAYS} days. Older versions "
+            "are removed automatically. "
+        )
     parts.append(
         f'<p class="muted">{len(users)} users, {sum(len(u["vaults"]) for u in users)} vaults, '
-        f"{_size(total)} stored. Stored size counts history and deleted files still kept. "
-        f"The server keeps every version for {KEEP_DAYS} days, at least the last "
-        f"{KEEP_VERSIONS} of each file, and deleted files for {DELETED_DAYS} days; the copies "
-        f"a key change leaves behind go after {OLD_EPOCH_DAYS} days. Older versions are "
-        "removed automatically. "
+        f"{_size(total)} stored. {kept}"
         "Each device is one encryption key in one vault; purging a vault deletes its devices."
         "</p>"
     )
@@ -1024,6 +1091,8 @@ async def performance_js() -> Response:
 
 @router.post("/login")
 async def login(request: Request, state: State) -> Response:
+    if state.settings.demo_mode:
+        return RedirectResponse("/admin", status_code=303)
     token = (await _form(request)).get("token", "").strip()
     if not check_token(request, state, token):
         return _login_page("Wrong token.", status=401)
@@ -1076,6 +1145,8 @@ async def _form_admin(request: Request, state: AppState, form: dict[str, str]) -
 
 @router.post("/logout")
 async def logout(request: Request, state: State) -> Response:
+    if state.settings.demo_mode:
+        return RedirectResponse("/admin", status_code=303)
     try:
         admin = await _form_admin(request, state, await _form(request))
     except AdminError:

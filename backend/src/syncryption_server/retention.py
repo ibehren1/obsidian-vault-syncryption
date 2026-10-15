@@ -50,20 +50,17 @@ _SAME_HEAD = (
 async def prune(state: AppState) -> int:
     """Delete the revisions the retention rules drop. Returns how many were deleted."""
     now = state.now()
-    params = await state.db.read(
-        lambda: [
-            dict(r)
-            for r in state.db.conn.execute(
-                _SELECT,
-                {
-                    "deleted_before": now - DELETED_DAYS * DAY,
-                    "epoch_before": now - OLD_EPOCH_DAYS * DAY,
-                    "keep_before": now - KEEP_DAYS * DAY,
-                    "keep_versions": KEEP_VERSIONS,
-                },
-            )
-        ]
-    )
+    if state.settings.demo_mode:
+        # A demo server keeps no history: every non-head revision goes.
+        rules = {"deleted_before": now, "epoch_before": now, "keep_before": now, "keep_versions": 1}
+    else:
+        rules = {
+            "deleted_before": now - DELETED_DAYS * DAY,
+            "epoch_before": now - OLD_EPOCH_DAYS * DAY,
+            "keep_before": now - KEEP_DAYS * DAY,
+            "keep_versions": KEEP_VERSIONS,
+        }
+    params = await state.db.read(lambda: [dict(r) for r in state.db.conn.execute(_SELECT, rules)])
 
     def delete(batch: list[dict]) -> int:
         with state.db.transaction() as db:

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from syncryption_server.auth import ActiveCaller, AnyCaller, Caller, FullCaller, State, vault_name
+from syncryption_server.config import DEMO_QUOTA
 from syncryption_server.encoding import b64u, from_b64u, is_uuid4, rfc3339
 from syncryption_server.errors import (
     ApiError,
@@ -193,9 +194,15 @@ def _create_vault(body: CreateRequest, caller: Caller, state: AppState) -> Vault
     try:
         with state.db.transaction() as db:
             db.execute(
-                "INSERT INTO vaults (id, user_id, name, keyring_version, created_at) "
-                "VALUES (?, ?, ?, 1, ?)",
-                (body.id, caller.user_id, name, now),
+                "INSERT INTO vaults (id, user_id, name, keyring_version, created_at, blob_quota) "
+                "VALUES (?, ?, ?, 1, ?, ?)",
+                (
+                    body.id,
+                    caller.user_id,
+                    name,
+                    now,
+                    DEMO_QUOTA if state.settings.demo_mode else None,
+                ),
             )
             db.execute("UPDATE devices SET vault_id = ? WHERE id = ?", (body.id, caller.device_id))
             db.execute(
