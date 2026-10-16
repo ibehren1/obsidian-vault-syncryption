@@ -69,7 +69,8 @@ services:
       MIGRATE_FROM_S3: "FALSE"
 
       # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
-      # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
+      # counts only (requests, users, vaults, keys, storage, S3 calls and database
+      # replication), no names. TRUE turns it off.
       DISABLE_METRICS: "FALSE"
 
       # Optional. The client IP addresses or CIDRs, separated by commas, that may read

@@ -12,7 +12,7 @@ public struct SetupCancelled: Error, CustomStringConvertible {
     public let description = "Setup was cancelled."
 }
 
-/// The macOS client syncs full devices only (PLAN, macOS Client): a key approved as
+/// The macOS client syncs full devices only: a key approved as
 /// remote-only, or made remote-only later, doesn't sync.
 public struct RemoteOnlyRefused: Error, CustomStringConvertible {
     public let description = "This key is remote-only. The macOS client supports full devices only: remove this key from another device of the vault, or make it a full device there."

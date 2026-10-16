@@ -1,7 +1,7 @@
 import Foundation
 import SyncryptionCrypto
 
-/// Which paths a macOS folder syncs: generic rules, not Obsidian's (PLAN, macOS Client).
+/// Which paths a macOS folder syncs: generic rules, not Obsidian's.
 /// Dot files sync; OS clutter, version-control and package folders, the client's own temp
 /// files and names no vault path may have don't.
 public struct PathFilter: @unchecked Sendable {  // the compiled patterns are never mutated

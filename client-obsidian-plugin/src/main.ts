@@ -159,7 +159,7 @@ export default class SyncryptionPlugin extends Plugin {
 		this.addSettingTab(new SyncryptionSettingTab(this.app, this));
 		this.userPaused = this.app.loadLocalStorage(PAUSED) === true;
 		registerIcon();
-		this.addRibbonIcon(ICON, "Vault Syncryption: sync status", () => this.openStatus());
+		this.addRibbonIcon(ICON, "Open sync status", () => this.openStatus());
 		this.statusBar = this.addStatusBarItem();
 		this.lockBar = this.addStatusBarItem();
 		for (const item of [this.statusBar, this.lockBar]) {
@@ -1347,7 +1347,7 @@ export default class SyncryptionPlugin extends Plugin {
 
 	private render(): void {
 		if (!this.statusBar) return;
-		// The glyph says which plugin this is, so the text is only the state (PLAN, Status bar).
+		// The glyph says which plugin this is, so the text is only the state.
 		const waiting = this.waiting ? ` · ${plural(this.waiting, "change")} waiting` : "";
 		const label: Record<State, string> = {
 			off: "Off",

@@ -25,7 +25,8 @@ Registry as `ghcr.io/ibehren1/vault-syncryption`, tagged with the server version
 and `latest`, for `linux/amd64` and `linux/arm64`. Each version also has a `backend-v<version>`
 release on GitHub with the image's digest, and its build provenance can be checked with
 `gh attestation verify oci://ghcr.io/ibehren1/vault-syncryption@<digest> -R ibehren1/obsidian-vault-syncryption`.
-Either image works in `image:`.
+Either image works in `image:`. Beta plugins may need a newer server: its image is
+`ghcr.io/ibehren1/vault-syncryption-beta`, tagged `dev-<version>` and `dev-latest`.
 
 Everything is in `docker-compose.yml`, with the variables written inline. There is no
 `.env` file. This is the whole file, with a comment on every variable:
@@ -99,7 +100,8 @@ services:
       MIGRATE_FROM_S3: "FALSE"
 
       # TRUE or FALSE. The server serves Prometheus metrics at /metrics, without a token:
-      # counts only (requests, users, vaults, keys, storage), no names. TRUE turns it off.
+      # counts only (requests, users, vaults, keys, storage, S3 calls and database
+      # replication), no names. TRUE turns it off.
       DISABLE_METRICS: "FALSE"
 
       # Optional. The client IP addresses or CIDRs, separated by commas, that may read
@@ -227,8 +229,11 @@ percentiles (without the `/wait` long-polls) and the busiest routes; sync activi
 commits, conflicts, blob uploads and downloads, logins, 401 and 429 answers per second);
 bytes received and sent per second, requests in flight, open long-polls and event-loop lag;
 CPU and memory of the process and of the container; free space on the data disk, the size
-of the database and its write-ahead log, and the cleanup's runs and results; and the
-stored totals. Rates cover the time since the previous refresh. A small line next to the
+of the database and its write-ahead log, and the cleanup's runs and results; the stored
+totals; and, only when blobs are in S3, the bucket calls per second, failed calls by
+result, latency percentiles, upload and download throughput, retries and calls in flight,
+and Litestream's replication of the database (status, syncs and sync errors, time spent
+syncing, WAL written, uploads to S3 and their throughput). Rates cover the time since the previous refresh. A small line next to the
 main numbers shows their last 60 readings; it is kept in the browser and starts over when
 the page reloads. The process and container lines need Linux and
 show "–" elsewhere. This tab works also with `DISABLE_METRICS: "TRUE"`.

@@ -5,6 +5,8 @@
 
 Vault Syncryption is self-hosted, end-to-end encrypted sync solution for Obsidian. You run the server, your devices hold the keys, and the server stores only ciphertext. There's no subscription, no third-party cloud and no telemetry, and it works on desktop, iPhone, iPad and Android.
 
+![An Obsidian vault synced with Vault Syncryption: the status bar shows "Synced · 14 files"](images/screenshots/obsidian-note.png)
+
 > [!NOTE]
 > **Testers wanted on Android and Windows.** Most testing so far has been on macOS and iOS. If you use Vault Syncryption on an Android device or on Windows, please share what works and what doesn't in [GitHub Issues](https://github.com/ibehren1/obsidian-vault-syncryption/issues).
 
@@ -18,6 +20,14 @@ Vault Syncryption is self-hosted, end-to-end encrypted sync solution for Obsidia
 - **You're in control.** A status window shows what's synced, what's waiting to upload and what's being edited on another device. On a slow or metered connection, pause sync with one click: changes keep queuing and upload when you resume.
 - **Remote-only devices.** Keep a work laptop or a phone you might lose from holding your notes in plaintext. See [Remote-only devices](#remote-only-devices) below.
 - **Share a vault, not a password.** Share a vault by sharing its username and vault name. The other person generates their own key and joins once an existing device approves them.
+
+The sync status window: the last sync, what's waiting to upload, this device's key and every key of the vault.
+
+![The sync status window](images/screenshots/obsidian-sync-status.png)
+
+"Show file history" lists a file's versions on the server. Preview any of them, or restore it as the current version.
+
+![The file history of a note](images/screenshots/obsidian-file-history.png)
 
 ## Remote-only devices
 Some devices shouldn't keep a readable copy of your vault: a shared or work computer, or a phone that could be lost. Make such a device **remote-only** and its notes and attachments are never stored on it in plaintext. Obsidian still opens, edits, searches and links them as usual.
@@ -35,9 +45,22 @@ The config folder (settings, themes, plugins) stays in plaintext so Obsidian can
 - **One container**, configured with a few environment variables in [`backend/docker/docker-compose.yml`](backend/docker/docker-compose.yml).
 - **HTTPS out of the box** with built-in Let's Encrypt, or plain HTTP behind your own reverse proxy.
 - **Storage your way:** local disk by default (the `./data` folder, nothing to configure), or S3 and S3-compatible storage for effectively unlimited space.
-- **An admin page** to manage users and vaults, plus a maintenance mode for upgrades.
+- **An admin page** to manage users, vaults and their storage quotas, a Performance tab with live server metrics, and a maintenance mode for upgrades.
+- **Prometheus metrics** at `/metrics`, with a ready-made Grafana dashboard.
 
 See [docs/self-hosting.md](docs/self-hosting.md) to get it running.
+
+Opening the server's URL in a browser shows users how to connect, the server's status and how to reach the admin:
+
+![The server's home page](images/screenshots/home.png)
+
+The admin page lists every user, vault and device key, with each vault's size, file count and storage quota:
+
+![The admin page's Vaults tab](images/screenshots/admin-vaults.png)
+
+Its Performance tab shows requests, sync activity, traffic, CPU and memory, disk and database, and storage, refreshed live:
+
+![The admin page's Performance tab](images/screenshots/admin-performance.png)
 
 ## Requirements
 - A Vault Syncryption server that you run yourself. The plugin does nothing without one.
@@ -61,17 +84,19 @@ Beta versions are published to [ibehren1/obsidian-vault-syncryption-beta](https:
 3. Click Connect. Creating a new vault asks for the server's shared secret, which the server admin provides. A device joining an existing vault doesn't need it: a device that already syncs the vault approves it instead.
 4. Create a recovery key when the plugin offers it. It is the only way back in if you lose every device.
 
+![The plugin settings](images/screenshots/obsidian-settings.png)
+
 The shared secret keeps strangers from creating accounts on your server. It doesn't protect your data (your encryption keys do), so an organization can treat it as an internal configuration value. Opening the server URL in a browser shows how to connect and how to contact the admin.
 
 ## Add another device
 1. Create a vault on that device.
 2. Install the Vault Syncryption plugin.  All other plugins will sync once connected.
 3. Open the plugin settings and enter the server URL, matching username and matching vault name.
-3. Generate an encryption key for the device by pressing the button and give it a device name (so you later know which device the key belongs to).
-3. Click Connect. You will see a code.  On your existing Obsidian device, open the plugin and under the Approve New Keys section press Approve. Verify the code matches your new device. (Do not approve keys that you do not recognize.  Requests will timeout and disappear after 5 days.)
+4. Generate an encryption key for the device by pressing the button and give it a device name (so you later know which device the key belongs to).
+5. Click Connect. You will see a code.  On your existing Obsidian device, open the plugin and under the Approve New Keys section press Approve. Verify the code matches your new device. (Do not approve keys that you do not recognize.  Requests that aren't approved expire after 24 hours.)
 
 ## Network use and privacy
-- The plugin connects **only to the server URL you enter**. There is no telemetry, no analytics, and no other network traffic. If you add S3 storage, you will see puts/gets to/from the S3 provider.
+- The plugin connects **only to the server URL you enter**. There is no telemetry, no analytics, and no other network traffic. If the server uses S3, the server (not your device) reads and writes the bucket.
 - File contents, file paths and the vault key are encrypted on your device before upload. The server sees ciphertext plus some metadata: usernames, vault names and device names, file counts, sizes and timestamps (the full list is in [docs/crypto.md](docs/crypto.md), section 1).
 - Your private encryption key stays in Obsidian's secret storage on each device. It is never written to the plugin's `data.json` or sent to the server and you don't need to back it up.  Create a recovery key and put that in your favorite password manager as your last resort to access a vault.
 - An account on the server is needed. It is created when you create your first vault, with the shared secret from the server's administrator.
@@ -95,6 +120,7 @@ The plugin syncs the whole vault in place, including the config folder (`.obsidi
 | `client-obsidian-plugin/` | Obsidian plugin (TypeScript) |
 | `backend/` | Sync server (Python, uv, FastAPI) and container |
 | `docs/` | How it works, specifications and self-hosting |
+| `testvectors/` | Crypto test vectors shared by the test suites |
 
 ## License
 [MIT](LICENSE)

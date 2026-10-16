@@ -1,6 +1,6 @@
 {
 	"name": "syncryption-plugin",
-	"version": "0.1.37",
+	"version": "0.1.39",
 	"private": true,
 	"description": "Vault Syncryption Obsidian plugin",
 	"type": "module",

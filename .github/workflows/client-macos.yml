@@ -59,6 +59,6 @@ jobs:
           gh release create "${{ steps.version.outputs.tag }}" "${{ steps.dmg.outputs.path }}" \
             --title "${{ steps.version.outputs.tag }}" \
             --target "$GITHUB_SHA" --latest=false \
-            --notes "The macOS client. It is signed ad hoc, not with a Developer ID, so macOS blocks the first launch: right-click the app and choose Open, or run \`xattr -d com.apple.quarantine /Applications/VaultSyncryption.app\`."
+            --notes "The macOS client. It is signed ad hoc, not with a Developer ID, so macOS blocks it: after copying it to Applications, run \`xattr -dr com.apple.quarantine /Applications/VaultSyncryption.app\` (see Read Me.txt in the DMG)."
         env:
           GH_TOKEN: ${{ github.token }}

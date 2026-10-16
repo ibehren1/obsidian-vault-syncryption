@@ -60,9 +60,9 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `retention` | hourly pruning of old revisions (protocol.md 9.3) |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
 | `locks` | lease locks and `locksSeq` |
-| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode, each vault's remote-only grace period) |
+| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode, each vault's remote-only grace period and storage quota, the Performance tab with its snapshot JSON and `static/admin-performance.js`) |
 | `migrate` | `MIGRATE_TO_S3` and `MIGRATE_FROM_S3` one-shot copies, run by the entrypoint before serving |
-| `__main__` | the entrypoint's commands: `check`, `check-data`, `render`, `migrate`, `health`, and `openapi` (the schema `npm run api-types` reads) |
+| `__main__` | the entrypoint's commands: `check`, `check-data`, `render`, `migrate`, `health`, `openapi` (the schema `npm run api-types` reads) and `apidocs` (generates `docs/api.md`) |
 
 ### 2.1 Data model (SQLite)
 ```mermaid
@@ -514,8 +514,8 @@ The plugin uses no Node APIs outside desktop-only code: WebCrypto, `@noble/*`,
 
 ## 5. Repository and CI
 - `testvectors/` is read by both the pytest and the vitest suites.
-- CI (Gitea Actions, `.gitea/workflows/ci.yml`) runs on every PR and on pushes to `main`,
-  in three check jobs, and one more on pushes to `main` once all three pass:
+- CI runs on every PR and on pushes to `main`, in three check jobs, and two more on
+  pushes to `main` once all three pass:
   - `backend`: `uv sync --locked`, `ruff check`, `ruff format --check`, `pytest`.
   - `container`: `backend/container-checks.sh` (section 3).
   - `plugin`: checks that the root `manifest.json` and `versions.json` match the plugin's,
@@ -523,6 +523,15 @@ The plugin uses no Node APIs outside desktop-only code: WebCrypto, `@noble/*`,
     against the real backend (started with uv) and against `ssh-keygen` and the Go `age`
     CLI for interop, and fail rather than skip if either is missing (`REQUIRE_BACKEND=1`,
     `REQUIRE_AGE=1`).
-  - `release`: if `manifest.json` has a plugin version with no Gitea release yet, builds
-    the plugin and creates the release (tag = version) with `main.js`, `manifest.json` and
+  - `image`: if `backend/pyproject.toml` has a server version with no
+    `backend-v<x.y.z>` release yet, builds the server image, pushes it tagged `<x.y.z>` and
+    `latest`, and creates that release.
+  - `release`: if `manifest.json` has a plugin version with no release yet, builds the
+    plugin and creates the release (tag = version) with `main.js`, `manifest.json` and
     `styles.css`.
+- On GitHub, `.github/workflows/release.yml` publishes each new plugin version as a
+  release with `main.js`, `manifest.json` and `styles.css`, each with a build provenance
+  attestation. `.github/workflows/backend-image.yml` builds each new server version for
+  amd64 and arm64, pushes it to `ghcr.io/ibehren1/vault-syncryption` tagged `<x.y.z>` and
+  `latest`, attests it, and publishes a `backend-v<x.y.z>` release, which is never marked
+  Latest (Latest stays the plugin's, which Obsidian and BRAT read).
