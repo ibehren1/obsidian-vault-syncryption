@@ -27,15 +27,15 @@ struct SyncryptionApp: App {
             WelcomeView(model: delegate.model)
         }
         .windowResizability(.contentSize)
-        .defaultLaunchBehavior(delegate.model.folders.isEmpty ? .presented : .suppressed)
+        .defaultLaunchBehavior(delegate.model.vaults.isEmpty ? .presented : .suppressed)
 
-        Window("Add Folder", id: "add") {
-            AddFolderView(model: delegate.model)
+        Window("Add Vault", id: "add") {
+            AddVaultView(model: delegate.model)
         }
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
 
-        Window("Vault Syncryption Settings", id: "settings") {
+        Window("Vault Syncryption Client Settings", id: "settings") {
             SettingsView(model: delegate.model)
         }
         .defaultSize(width: 860, height: 620)
@@ -55,16 +55,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         FolderIcon.logo = NSImage(named: "Logo")
         FinderExtension.turnOnOnce()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        model.onPendingApproval = { folder, devices in
+        model.onPendingApproval = { vault, devices in
             let content = UNMutableNotificationContent()
-            content.title = "Approve a device for \(folder.config.vaultName)?"
+            content.title = "Approve a device for \(vault.config.vaultName)?"
             content.body = devices.count == 1 ? "\(devices[0].name) is waiting. Compare its pairing code \(devices[0].code) before approving."
                 : "\(devices.count) devices are waiting for approval."
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
         model.startAll()
         // A menu bar app isn't active at launch: bring the welcome window forward.
-        if model.folders.isEmpty { activate() }
+        if model.vaults.isEmpty { activate() }
         #if DEBUG
         Snapshot.runIfAsked(model)
         #endif
@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Opening the app again (from Finder, Launchpad or the Dock) while it runs shows its
     /// status window: the way in when the menu bar can't show the icon.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { WindowOpener.shared.open(model.folders.isEmpty ? "welcome" : "status") }
+        if !flag { WindowOpener.shared.open(model.vaults.isEmpty ? "welcome" : "status") }
         return true
     }
 
@@ -96,7 +96,7 @@ struct MenuBarLabel: View {
         icon.onAppear { WindowOpener.shared.openWindow = openWindow }
     }
 
-    /// Green when every folder is synced, yellow while syncing, red when one needs attention.
+    /// Green when every vault is synced, yellow while syncing, red when one needs attention.
     /// The menu bar draws SwiftUI images as templates, so a colored icon has to be an NSImage
     /// that isn't one.
     private var icon: Image {
@@ -107,7 +107,7 @@ struct MenuBarLabel: View {
         case .error, .warn: .systemRed
         case .off: nil
         }
-        guard let color, let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "Vault Syncryption")?
+        guard let color, let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "Vault Syncryption Client")?
             .withSymbolConfiguration(.init(paletteColors: [color])) else { return Image(systemName: name) }
         symbol.isTemplate = false
         return Image(nsImage: symbol)

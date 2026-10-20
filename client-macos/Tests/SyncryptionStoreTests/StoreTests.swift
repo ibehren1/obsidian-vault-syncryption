@@ -37,7 +37,25 @@ import Testing
         try store.dequeue(first[1])
         #expect(try store.outbox().map(\.path) == ["a.md"])
 
+        let r = RemoteFile(rev: 7, deleted: false, size: 3, revision: Data("{}".utf8))
+        try store.putRemote("Notes/a.md", r)
+        #expect(try store.remoteFile("Notes/a.md") == r)
+        #expect(try store.remoteFiles() == [PathKey("Notes/a.md"): r])
+
         try store.clear()
         #expect(try store.files().isEmpty && store.outbox().isEmpty && store.meta(MetaKey.cursor, as: Int.self) == nil)
+        #expect(try store.remoteFiles().isEmpty)
+    }
+
+    @Test(arguments: try stores())
+    func forgetsOneFolder(store: any SyncStore) throws {
+        let f = SyncedFile(fileId: "id", rev: 1, deleted: false, sha256: "ab", size: 2, mtime: 5, epoch: 1)
+        for p in ["Notes/a.md", "Notes/x/b.md", "Notes2/a.md", "Code/a.swift"] {
+            try store.putFile(p, f)
+            try store.enqueue(p)
+        }
+        try store.forget(folder: "Notes")
+        #expect(Set(try store.files().keys.map(\.path)) == ["Notes2/a.md", "Code/a.swift"])
+        #expect(Set(try store.outbox().map(\.path)) == ["Notes2/a.md", "Code/a.swift"])
     }
 }

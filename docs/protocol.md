@@ -249,6 +249,7 @@ Response `200`:
 | `PUT` | `/api/v1/vaults/{id}/devices/{deviceId}/policy` | `{"remoteOnly": true}` or `false`: change another active device's policy |
 | `PUT` | `/api/v1/vaults/{id}/devices/{deviceId}/lock` | `{"locked": true}` or `false`: lock or unlock another remote-only device |
 | `DELETE` | `/api/v1/vaults/{id}/devices/{deviceId}` | remove (revoke) |
+| `PUT` | `/api/v1/vaults/{id}/devices/self/meta` | `{"meta": "<b64u>"}` or `null`: set or clear the caller's device metadata |
 
 The vault routes need an active device of that vault. `GET .../devices` returns
 `{"devices": [<device object>, ...]}`, oldest first, removed devices included. Approve,
@@ -271,7 +272,8 @@ device), `vaultName` and `username`.
   "createdAt": "...",
   "lastSeenAt": "...",
   "remoteOnly": false,
-  "locked": false
+  "locked": false,
+  "meta": null
 }
 ```
 - `status` is `pending`, `active` or `revoked`. A vault has at most 5 pending devices (a
@@ -309,6 +311,14 @@ device), `vaultName` and `username`.
   remote-only files stay locked, but nothing is deleted. Unlocking (`{"locked": false}`)
   lets it log in again. A full device, a pending or removed one, or the caller itself
   returns `400 bad_request`.
+- **Device metadata** (`PUT .../devices/self/meta`): an object of at most 64 KiB that the
+  device encrypts under the vault key ([crypto.md](crypto.md) section 8.5). The server
+  stores it opaque and returns it as `meta` (base64url, `null` when unset) in every device
+  object, so each device of the vault can read the others'. A device sets only its own;
+  a remote-only device gets `403 remote_only`, a larger object `413 too_large`. Removing a
+  device clears it. Setting it doesn't wake long-polls: clients read it with the device
+  list. A client that syncs a vault as separate folders keeps there which folders the
+  device syncs, and where.
 
 ## 7. Vaults and keyring
 

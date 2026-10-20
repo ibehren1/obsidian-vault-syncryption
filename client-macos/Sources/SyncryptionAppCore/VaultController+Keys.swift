@@ -4,11 +4,11 @@ import SyncryptionCrypto
 import SyncryptionStore
 import SyncryptionSync
 
-/// Vault management from a connected folder (docs/protocol.md 6 and 7, crypto.md 6, 8.4 and 9):
+/// Vault management once connected (docs/protocol.md 6 and 7, crypto.md 6, 8.4 and 9):
 /// the keys of the vault, the recovery key, file history, and replacing this Mac's key.
-extension FolderController {
+extension VaultController {
     public struct NotConnected: Error, CustomStringConvertible {
-        public let description = "This folder isn't connected to its vault. Wait until it is, or choose Try Again."
+        public let description = "This Mac isn't connected to the vault. Wait until it is, or choose Try Again."
     }
 
     func connected() throws -> VaultSession {
@@ -21,7 +21,7 @@ extension FolderController {
         return engine
     }
 
-    // MARK: This folder's key
+    // MARK: This Mac's key
 
     public struct KeyInfo: Equatable, Sendable {
         public let fingerprint: String
@@ -55,7 +55,7 @@ extension FolderController {
         public let added: String?
 
         /// The server's view of the key, for its dot.
-        public var serverKind: FolderController.Kind {
+        public var serverKind: VaultController.Kind {
             switch status {
             case "active": locked ? .warn : .ok
             case "pending": .warn
@@ -197,7 +197,7 @@ extension FolderController {
 
     // MARK: Replacing this Mac's key
 
-    /// Replace this folder's key: the new key joins the vault, this key approves it, the new
+    /// Replace this Mac's key: the new key joins the vault, this key approves it, the new
     /// key is saved, and its session removes the old one and rotates the vault key.
     public func replaceKey() async throws {
         let session = try connected()

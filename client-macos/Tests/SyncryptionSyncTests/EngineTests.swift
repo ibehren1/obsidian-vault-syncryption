@@ -181,7 +181,8 @@ struct EngineTests {
         a.fs.set("a/.hidden.md", "hidden")
         a.fs.set("kept.md", "kept")
         try await syncAll(a, b)
-        #expect(b.fs.paths == ["a/.hidden.md", "kept.md"])
+        // No Obsidian rules: a folder's config files sync like any dot file.
+        #expect(b.fs.paths == [".obsidian/workspace.json", "a/.hidden.md", "kept.md"])
     }
 
     @Test func runsOneSyncAtATime() async throws {
@@ -193,6 +194,58 @@ struct EngineTests {
         let (r1, r2) = try await (first, second)
         #expect(r1.pushed + r2.pushed >= 2)
         #expect(try a.store.files().count == 2)
+    }
+
+    @Test func closingStopsARunningSyncAtOnce() async throws {
+        let (a, _) = try await twoDevices()
+        try await a.engine.sync()
+        for i in 0..<20 { a.fs.set("n\(i).md", "note \(i)") }
+        let log = Log()
+        let engine = a.engine
+        a.transport.before = { r in
+            log.add(r.method)
+            // Closed while the change feed is read: nothing is uploaded after.
+            if r.url.path.hasSuffix("/changes") {
+                Task {
+                    await engine.close()
+                    log.add("closed")
+                }
+            }
+            return nil
+        }
+        do {
+            try await a.engine.sync()
+            Issue.record("The sync finished")
+        } catch {
+            // Stopped, not a server that can't be reached.
+            #expect(error is SyncStopped || error is CancellationError)
+        }
+        while !log.all.contains("closed") { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(log.all.last == "closed")
+        #expect(!log.all.contains("PUT"))
+        #expect(try a.store.files().isEmpty)
+        await #expect(throws: SyncStopped.self) { try await a.engine.sync() }
+    }
+
+    @Test func reportsEachFilesProgressChunkByChunk() async throws {
+        let (a, b) = try await twoDevices()
+        let big = Bytes(repeating: 7, count: Objects.chunkSize + 1000)
+        a.fs.set("big.bin", big)
+        let log = Log()
+        func progress(_ d: TestDevice) async -> SyncEngine {
+            var o = EngineOptions(api: d.session.api, vaultId: d.session.vault.id, cipher: d.session.cipher, fs: d.fs, store: d.store,
+                                  deviceId: await d.session.deviceId(), deviceName: d.name, filter: PathFilter(exclude: []),
+                                  keyring: d.session)
+            o.onProgress = { if case .file(let path, let done, let total) = $0 { log.add("\(path) \(done)/\(total)") } }
+            return SyncEngine(o)
+        }
+        try await progress(a).sync()
+        let size = big.count, first = Objects.chunkSize
+        #expect(log.all == ["big.bin 0/\(size)", "big.bin \(first)/\(size)", "big.bin \(size)/\(size)"])
+        try await progress(b).sync()
+        #expect(log.all.suffix(3) == ["big.bin 0/\(size)", "big.bin \(first)/\(size)", "big.bin \(size)/\(size)"])
+        #expect(try b.fs.read("big.bin") == big)
     }
 
     @Test func startsOverFromAnEmptyStateWithoutDuplicates() async throws {

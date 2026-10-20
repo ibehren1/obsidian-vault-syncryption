@@ -1,3 +1,4 @@
+from syncryption_server.encoding import b64u
 from tests.helpers import META, SECRET, Device, blob, file_id
 
 
@@ -131,3 +132,39 @@ def test_removed_device_keeps_its_history(client, alice):
     assert alice.delete(f"/api/v1/vaults/{vault}/devices/{phone.device_id}").status_code == 200
     changes = alice.get(f"/api/v1/vaults/{vault}/changes").json()["changes"]
     assert [c["device"] for c in changes] == [phone.device_id]
+
+
+def test_device_meta(client, alice):
+    phone = Device(client, "alice", name="Pixel")
+    phone.join(alice)
+    path = f"/api/v1/vaults/{alice.vault_id}/devices/self/meta"
+    assert [d["meta"] for d in devices(phone)] == [None, None]
+    r = alice.put(path, json={"meta": b64u(b"\x01sealed")})
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == alice.device_id and r.json()["meta"] == b64u(b"\x01sealed")
+    # Every device of the vault reads it; each sets only its own.
+    assert [d["meta"] for d in devices(phone)] == [b64u(b"\x01sealed"), None]
+    assert phone.put(path, json={"meta": b64u(b"mine")}).status_code == 200
+    assert [d["meta"] for d in devices(alice)] == [b64u(b"\x01sealed"), b64u(b"mine")]
+    assert alice.put(path, json={"meta": None}).json()["meta"] is None
+    assert alice.put(path, json={"meta": "not base64!"}).status_code == 400
+    assert alice.put(path, json={"meta": b64u(bytes(64 * 1024 + 1))}).status_code == 413
+    assert alice.put(path, json={"meta": b64u(bytes(64 * 1024))}).status_code == 200
+    # Removing a device clears it.
+    r = alice.delete(f"/api/v1/vaults/{alice.vault_id}/devices/{phone.device_id}")
+    assert r.status_code == 200 and r.json()["meta"] is None
+
+
+def test_device_meta_is_per_vault_and_not_for_remote_only(client, alice):
+    bob = Device(client, "bob")
+    bob.login(SECRET)
+    bob.create_vault()
+    r = bob.put(f"/api/v1/vaults/{alice.vault_id}/devices/self/meta", json={"meta": "AA"})
+    assert r.status_code == 403
+    phone = Device(client, "alice", name="Phone")
+    phone.login()
+    path = f"/api/v1/vaults/{alice.vault_id}/devices"
+    assert phone.put(f"{path}/self/meta", json={"meta": "AA"}).status_code == 403  # pending
+    alice.post(f"{path}/{phone.device_id}/approve", json={"remoteOnly": True})
+    r = phone.put(f"{path}/self/meta", json={"meta": "AA"})
+    assert r.status_code == 403 and r.json()["error"] == "remote_only"

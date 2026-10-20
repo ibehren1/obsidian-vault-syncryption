@@ -227,6 +227,7 @@ indexKey     HKDF(ikm = VDK[1], salt = "", info = "syncryption/v1/index", 32)
              and kept unchanged across rotations
 fileId       HMAC(indexKey, utf8(normPath))                      32 bytes
 fileKey[e]   HKDF(ikm = VDK[e], salt = "", info = "syncryption/v1/file" || fileId, 32)
+deviceKey[e] HKDF(ikm = VDK[e], salt = "", info = "syncryption/v1/device" || utf8(deviceId), 32)
 ```
 - `fileId` is sent to the server as `b64u(fileId)` (43 characters).
 - The same `fileKey` is used for every revision of a file. Nonces are random 24-byte
@@ -444,6 +445,9 @@ object = header || nonce || ct                                   overhead 45 byt
 |---|---|
 | metadata | `utf8("syncryption/v1/meta") || fileId` |
 | chunk `i` | `utf8("syncryption/v1/chunk") || fileId || u32be(i)` |
+| device metadata (8.5) | `utf8("syncryption/v1/device") || utf8(deviceId)` |
+
+Metadata and chunks use `fileKey[epoch]`; device metadata uses `deviceKey[epoch]`.
 
 The `epoch` is in clear so the reader knows which `VDK` to use. It is bound by the AD.
 
@@ -560,6 +564,26 @@ opens nothing on the server.
 The epochs and the chain checks are tested with `keyring.json`, and the revocation flow and
 background re-encryption against the real backend (`client-obsidian-plugin/tests/revocation.test.ts`).
 
+### 8.5 Device metadata
+Each device may store one small object on the server (protocol.md 6, `meta` in the device
+object) that every device of the vault can read. It uses the 8.1 framing under
+`deviceKey[epoch]`, with the device's server id (`d_...`) in both the key and the AD, so
+the server can't hand one device's object out as another's. The plaintext is UTF-8 JSON, at
+most 64 KiB encrypted:
+```json
+{"v": 1, "folders": [{"name": "Notes", "path": "/Users/me/Notes"}]}
+```
+- `v` is 1. Readers ignore fields they don't know.
+- `folders`: the top-level vault folders this device syncs, each with the local folder it
+  syncs with, for clients that sync a vault as separate folders. `name` is one path segment in NFC.
+- A device writes its object again under the current epoch after a rotation (8.4). Objects
+  under older epochs stay readable, since the keyring keeps every epoch.
+- The server could still serve an older object of the same device, so it is shown as
+  information for the user: a client never syncs or deletes anything because of another
+  device's object alone.
+
+The vector is `deviceMeta` in `objects.json`.
+
 ## 9. Recovery key
 - Optional. A full device connected to a vault without one offers to create it once, and
   the settings can create or replace it at any time.
@@ -599,7 +623,7 @@ values (nonces, ephemeral keys, salts) as inputs.
 | `age-ssh-ed25519.json` | deterministic wraps, malformed and foreign stanzas, files encrypted by rage and Go `age` to known keys; plugin output (files and keyrings) checked by `age -d` in CI | reference script, rage (`pyrage`), Go `age` |
 | `sshsig.json` | signatures in both namespaces, plus wrong-namespace, wrong-hash, wrong-key-type and tampered cases; plugin signatures checked by `ssh-keygen -Y verify` | `ssh-keygen -Y sign`, reference script |
 | `kdf.json` | `indexKey`, `fileId` (including NFC cases), `fileKey`, invalid paths, pairing codes, the local key with sealed content and a sealed hash | reference script |
-| `objects.json` | meta and chunk objects with fixed nonces, and tampered-header cases | reference script |
+| `objects.json` | meta, chunk and device metadata objects with fixed nonces, and tampered-header cases | reference script |
 | `keyring.json` | a keyring chain (genesis, recovery key set, pairing, rotation, recovery) with the recovery key and its signing key, remote-only policies, and rollback, chain-gap, wrong-vault, wrong-signer, policy and inconsistency cases | reference script, rage (`pyrage`) |
 
 The reference script is a small Python program (`testvectors/generate.py`) using

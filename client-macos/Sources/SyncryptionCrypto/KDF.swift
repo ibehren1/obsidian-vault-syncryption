@@ -32,6 +32,11 @@ public enum KDF {
     public static func fileIdString(_ fileId: Bytes) -> String { fileId.b64u }
 
     /// `fileKey[e] = HKDF(VDK[e], "", "syncryption/v1/file" || fileId)`.
+    /// The key of a device's metadata object (crypto.md 8.5).
+    public static func deviceKey(vdk: Bytes, deviceId: String) -> Bytes {
+        Primitives.hkdf(ikm: vdk, salt: [], info: Bytes(utf8: "syncryption/v1/device") + Bytes(utf8: deviceId))
+    }
+
     public static func fileKey(vdk: Bytes, fileId: Bytes) -> Bytes {
         Primitives.hkdf(ikm: vdk, salt: [], info: Bytes(utf8: "syncryption/v1/file") + fileId)
     }

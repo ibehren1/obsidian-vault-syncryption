@@ -3,8 +3,8 @@ import FinderSync
 
 /// The Finder Sync extension. It watches the synced folders that show the folder icon, so that
 /// Finder shows the app's icon for them in the sidebar (Finder ignores custom folder icons
-/// there). It reads the folder list from the app's folders.json (a read-only sandbox
-/// exception) and reloads it when the app rewrites the file.
+/// there). It reads the folders of every vault from the app's vaults.json (a read-only
+/// sandbox exception) and reloads it when the app rewrites the file.
 final class FinderSyncExtension: FIFinderSync {
     private let directory: URL
     private var source: DispatchSourceFileSystemObject?
@@ -24,12 +24,15 @@ final class FinderSyncExtension: FIFinderSync {
             let path: String
             let showsFolderIcon: Bool?
         }
-        let data = try? Data(contentsOf: directory.appending(path: "folders.json"))
-        let folders = data.flatMap { try? JSONDecoder().decode([Folder].self, from: $0) } ?? []
+        struct Vault: Decodable {
+            let folders: [Folder]?
+        }
+        let data = try? Data(contentsOf: directory.appending(path: "vaults.json"))
+        let folders = (data.flatMap { try? JSONDecoder().decode([Vault].self, from: $0) } ?? []).flatMap { $0.folders ?? [] }
         FIFinderSyncController.default().directoryURLs = Set(folders.filter { $0.showsFolderIcon ?? true }.map { URL(filePath: $0.path, directoryHint: .isDirectory) })
     }
 
-    /// folders.json is replaced atomically, which changes its directory.
+    /// vaults.json is replaced atomically, which changes its directory.
     private func watch() {
         let fd = open(directory.path, O_EVTONLY)
         guard fd >= 0 else { return }

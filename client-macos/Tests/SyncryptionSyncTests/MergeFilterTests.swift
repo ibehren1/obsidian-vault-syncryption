@@ -78,15 +78,14 @@ private func dec(_ b: [UInt8]?) -> String? { b.map { String(decoding: $0, as: UT
     let f = PathFilter(exclude: PathFilter.parseExcludes("# comment\nPrivate\n*.tmp\nArchive/**/old\n\n"))
 
     @Test func syncsNormalAndDotFiles() {
-        for p in ["a.md", "Notes/b.md", ".hidden", "Notes/.config/x.json", ".obsidian/app.json", ".obsidian/plugins/other/main.js",
-                  "Notes/.obsidian/workspace.json"] {
+        for p in ["a.md", "Notes/b.md", ".hidden", "Notes/.config/x.json", ".obsidian/app.json", ".obsidian/workspace.json",
+                  ".obsidian/plugins/vault-syncryption/data.json"] {
             #expect(f.includes(p), "\(p)")
         }
     }
 
-    @Test func skipsClutterAndPerDeviceFiles() {
+    @Test func skipsClutter() {
         for p in [".DS_Store", "x/.DS_Store", "x/._a.md", ".git/config", "a/node_modules/x.js", ".trash/a.md", "Icon\r",
-                  ".obsidian/workspace.json", ".obsidian/workspaces.json", ".obsidian/plugins/vault-syncryption/data.json",
                   "Notes/.syncryption-tmp-1234", ".fseventsd/x", "a\\b.md", "C:/x.md"] {
             #expect(!f.includes(p), "\(p.debugDescription)")
         }
@@ -104,5 +103,25 @@ private func dec(_ b: [UInt8]?) -> String? { b.map { String(decoding: $0, as: UT
         #expect(f.skipsFolder("Private"))
         #expect(f.skipsFolder("a/.git"))
         #expect(!f.skipsFolder("Notes"))
+    }
+
+    @Test func syncsOnlyMappedFoldersWithTheirOwnExcludes() {
+        let f = PathFilter(folders: ["Notes": ["drafts", "*.tmp"], "Code": []])
+        for p in ["Notes/a.md", "Notes/x/b.tmp", "Code/drafts/a.swift", "Code/a.tmp", "Notes/.hidden"] {
+            #expect(f.includes(p), "\(p)")
+        }
+        // Root-level files, unmapped folders, and each folder's own excludes.
+        for p in ["a.md", "Notes", "Photos/a.jpg", "notes/a.md", "Notes/drafts/a.md", "Notes/a.tmp", "Code/.git/HEAD"] {
+            #expect(!f.includes(p), "\(p)")
+        }
+        #expect(f.skipsFolder("Photos"))
+        #expect(!f.skipsFolder("Notes"))
+        #expect(f.skipsFolder("Notes/drafts"))
+        #expect(!f.skipsFolder("Code/drafts"))
+    }
+
+    @Test func checksFolderNames() {
+        for n in ["Notes", ".config", "My Files", "Ünïcode"] { #expect(PathFilter.isFolderName(n), "\(n)") }
+        for n in ["", ".git", "node_modules", ".DS_Store", "a/b", "..", "._x", "C:"] { #expect(!PathFilter.isFolderName(n), "\(n)") }
     }
 }

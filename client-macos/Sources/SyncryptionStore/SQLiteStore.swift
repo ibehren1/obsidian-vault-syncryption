@@ -1,8 +1,8 @@
 import Foundation
 import SQLite3
 
-/// The sync state of one folder in SQLite (`state.db`), with the plugin's three tables: meta
-/// (JSON values), files (the synced state per path) and outbox. Paths are stored as UTF-8
+/// The sync state of one vault in SQLite (`state.db`): meta (JSON values), files (the synced
+/// state per path), outbox, and remote (the latest revision of every vault path). Paths are stored as UTF-8
 /// blobs, so an NFC and an NFD name stay two rows.
 public final class SQLiteStore: SyncStore, @unchecked Sendable {
     private var db: OpaquePointer?
@@ -23,6 +23,7 @@ public final class SQLiteStore: SyncStore, @unchecked Sendable {
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS files (path BLOB PRIMARY KEY, value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox (path BLOB PRIMARY KEY, id TEXT NOT NULL, queued_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS remote (path BLOB PRIMARY KEY, value BLOB NOT NULL);
             """)
     }
 
@@ -113,6 +114,24 @@ public final class SQLiteStore: SyncStore, @unchecked Sendable {
         return out
     }
 
+    public func remoteFile(_ path: String) throws -> RemoteFile? {
+        var data: Data?
+        try run("SELECT value FROM remote WHERE path = ?", [Self.pathData(path)]) { data = Self.blob($0, 0) }
+        return try data.map { try JSONDecoder().decode(RemoteFile.self, from: $0) }
+    }
+
+    public func putRemote(_ path: String, _ file: RemoteFile) throws {
+        try run("INSERT OR REPLACE INTO remote (path, value) VALUES (?, ?)", [Self.pathData(path), .blob(try JSONEncoder().encode(file))])
+    }
+
+    public func remoteFiles() throws -> [PathKey: RemoteFile] {
+        var rows: [(Data, Data)] = []
+        try run("SELECT path, value FROM remote") { rows.append((Self.blob($0, 0), Self.blob($0, 1))) }
+        var out: [PathKey: RemoteFile] = [:]
+        for (p, v) in rows { out[PathKey(Self.path(p))] = try JSONDecoder().decode(RemoteFile.self, from: v) }
+        return out
+    }
+
     public func enqueue(_ path: String) throws {
         try run("""
             INSERT INTO outbox (path, id, queued_at) VALUES (?, ?, ?)
@@ -133,6 +152,6 @@ public final class SQLiteStore: SyncStore, @unchecked Sendable {
     }
 
     public func clear() throws {
-        try exec("DELETE FROM meta; DELETE FROM files; DELETE FROM outbox;")
+        try exec("DELETE FROM meta; DELETE FROM files; DELETE FROM outbox; DELETE FROM remote;")
     }
 }

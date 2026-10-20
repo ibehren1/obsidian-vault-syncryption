@@ -195,6 +195,17 @@ func fake(seed: Bytes = Primitives.random(32), vaultName: String = "Notes", time
         await #expect(throws: ConnectionError.self) { try await api.login() }
     }
 
+    @Test func aCancelledRequestIsCancelledNotUnreachable() async throws {
+        let (api, _) = try fake(timeout: 30) { _ in
+            try await Task.sleep(for: .seconds(60))
+            return json(200, [:])
+        }
+        let t = Task { try await api.login() }
+        try await Task.sleep(for: .milliseconds(50))
+        t.cancel()
+        await #expect(throws: CancellationError.self) { try await t.value }
+    }
+
     @Test func errorTexts() {
         let base = "The server is in maintenance, so sync is paused. It resumes by itself."
         #expect(ApiError(status: 503, code: "maintenance", message: "x", details: ["note": "  ", "adminContact": .null]).maintenanceText

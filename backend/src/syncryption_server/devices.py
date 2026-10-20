@@ -19,13 +19,16 @@ from syncryption_server.auth import (
     State,
     sweep_expired,
 )
-from syncryption_server.encoding import rfc3339
-from syncryption_server.errors import ApiError, bad_request, not_found
+from syncryption_server.encoding import b64u, from_b64u, rfc3339
+from syncryption_server.errors import ApiError, bad_request, not_found, too_large
 from syncryption_server.sshkeys import fingerprint, pairing_code, parse_public_key
 from syncryption_server.state import AppState
 from syncryption_server.vaults import require_member
 
 router = APIRouter(prefix="/api/v1", tags=["devices"])
+
+# protocol.md 6: the largest device metadata object.
+MAX_META_SIZE = 64 * 1024
 
 
 class Device(BaseModel):
@@ -40,6 +43,11 @@ class Device(BaseModel):
     remoteOnly: bool = Field(default=False, description="Approved as remote-only.")
     locked: bool = Field(
         default=False, description="A remote-only device locked by another device of the vault."
+    )
+    meta: str | None = Field(
+        default=None,
+        description="The device's metadata, base64url, encrypted by the device (crypto.md 8.5). "
+        "Null if it set none; cleared when the device is removed.",
     )
 
 
@@ -59,6 +67,13 @@ class PolicyRequest(BaseModel):
 
 class LockRequest(BaseModel):
     locked: bool = Field(description="Lock or unlock a remote-only device (remote-only.md 5).")
+
+
+class MetaUpload(BaseModel):
+    meta: str | None = Field(
+        max_length=2 * MAX_META_SIZE,
+        description="Base64url, at most 64 KiB decoded, or null to clear it.",
+    )
 
 
 class SelfDevice(Device):
@@ -84,6 +99,7 @@ def _fields(row: sqlite3.Row) -> dict:
         "lastSeenAt": rfc3339(row["last_seen_at"]) if row["last_seen_at"] else None,
         "remoteOnly": bool(row["remote_only"]),
         "locked": bool(row["locked"]),
+        "meta": b64u(row["meta"]) if row["meta"] is not None else None,
     }
 
 
@@ -249,7 +265,9 @@ async def remove_device(vault_id: str, device_id: str, caller: FullCaller, state
             ).fetchone()[0]
             if row["status"] == "active" and others == 0:
                 raise ApiError(409, "exists", "The last active device of a vault can't be removed.")
-            db.execute("UPDATE devices SET status = 'revoked' WHERE id = ?", (device_id,))
+            db.execute(
+                "UPDATE devices SET status = 'revoked', meta = NULL WHERE id = ?", (device_id,)
+            )
             db.execute("DELETE FROM sessions WHERE device_id = ?", (device_id,))
             _release_locks(db, vault_id, device_id)
         return device_model(_vault_device(state, vault_id, device_id))
@@ -258,3 +276,28 @@ async def remove_device(vault_id: str, device_id: str, caller: FullCaller, state
     # Always: the removed device's long-poll wakes and finds its session gone (remote-only.md 5).
     await state.notifier.notify(vault_id)
     return device
+
+
+@router.put("/vaults/{vault_id}/devices/self/meta")
+async def set_device_meta(
+    vault_id: str, body: MetaUpload, caller: FullCaller, state: State
+) -> Device:
+    """Store the calling device's metadata, an object it encrypts under the vault key
+    (crypto.md 8.5). The server keeps it opaque and returns it in every device list, so the
+    other devices of the vault can read it. A remote-only device can't set it."""
+    data = None
+    if body.meta is not None:
+        try:
+            data = from_b64u(body.meta)
+        except ValueError as e:
+            raise bad_request("meta must be base64url.") from e
+        if len(data) > MAX_META_SIZE:
+            raise too_large("The device metadata is larger than 64 KiB.")
+
+    def store() -> Device:
+        require_member(state, caller, vault_id)
+        with state.db.transaction() as db:
+            db.execute("UPDATE devices SET meta = ? WHERE id = ?", (data, caller.device_id))
+        return device_model(_vault_device(state, vault_id, caller.device_id))
+
+    return await state.db.run(store)

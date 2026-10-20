@@ -90,6 +90,7 @@ def schema_5_database(path) -> None:
     db.migrate()
     db.conn.execute("ALTER TABLE devices DROP COLUMN remote_only")
     db.conn.execute("ALTER TABLE devices DROP COLUMN locked")
+    db.conn.execute("ALTER TABLE devices DROP COLUMN meta")
     db.conn.execute("ALTER TABLE vaults DROP COLUMN remote_only_grace")
     db.conn.execute("ALTER TABLE vaults DROP COLUMN blob_bytes")
     db.conn.execute("ALTER TABLE vaults DROP COLUMN blob_quota")
@@ -109,17 +110,17 @@ def schema_5_database(path) -> None:
     db.close()
 
 
-def test_schema_5_migrates_to_9_with_epochs_remote_only_and_quotas(tmp_path):
+def test_schema_5_migrates_to_10_with_epochs_remote_only_quotas_and_meta(tmp_path):
     schema_5_database(tmp_path / "meta.db")
     db = Database(tmp_path / "meta.db")
     db.migrate()
-    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 9
+    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 10
     assert BASE_VERSION + len(MIGRATIONS) == SCHEMA_VERSION
     epochs = [r[0] for r in db.all("SELECT epoch FROM revisions ORDER BY rev")]
     assert epochs == [1, 3, 65536, 1]  # a header that can't be read keeps the default
     indexes = {r[0] for r in db.all("SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "revisions_file_epoch" in indexes
-    assert {"remote_only", "locked"} <= {r[1] for r in db.all("PRAGMA table_info(devices)")}
+    assert {"remote_only", "locked", "meta"} <= {r[1] for r in db.all("PRAGMA table_info(devices)")}
     assert "remote_only_grace" in {r[1] for r in db.all("PRAGMA table_info(vaults)")}
     # The stored bytes are counted from the blobs; no quota.
     assert tuple(db.one("SELECT blob_bytes, blob_quota FROM vaults WHERE id = 'v'")) == (123, None)

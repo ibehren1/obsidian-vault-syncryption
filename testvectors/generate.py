@@ -812,6 +812,14 @@ def meta_domain(fid: bytes) -> bytes:
     return b"syncryption/v1/meta" + fid
 
 
+def device_key(vdk: bytes, device_id: str) -> bytes:
+    return hkdf_empty_salt(vdk, b"syncryption/v1/device" + device_id.encode())
+
+
+def device_domain(device_id: str) -> bytes:
+    return b"syncryption/v1/device" + device_id.encode()
+
+
 def chunk_domain(fid: bytes, i: int) -> bytes:
     return b"syncryption/v1/chunk" + fid + struct.pack(">I", i)
 
@@ -862,6 +870,24 @@ def objects_vectors() -> dict:
     tomb_plain = json.dumps(tombstone, separators=(",", ":")).encode()
     tomb_nonce = fixed("objects tombstone nonce", 24)
     tomb_obj = seal_object(file_key(vdk1, fid), 1, meta_domain(fid), tomb_plain, tomb_nonce)
+
+    # Device metadata (crypto.md 8.5): bound to the device id, here under epoch 2. The same
+    # object read as another device's fails.
+    device = "d_0123456789abcdefABCDEF"
+    folders = {"v": 1, "folders": [{"name": "Notes", "path": "/Users/me/Notes"}]}
+    dm_plain = json.dumps(folders, separators=(",", ":")).encode()
+    dm_nonce = fixed("objects device meta nonce", 24)
+    dm_obj = seal_object(device_key(vdk2, device), 2, device_domain(device), dm_plain, dm_nonce)
+    device_meta = {
+        "epoch": 2,
+        "deviceId": device,
+        "key": device_key(vdk2, device).hex(),
+        "nonce": dm_nonce.hex(),
+        "plaintext": dm_plain.hex(),
+        "object": dm_obj.hex(),
+        "value": folders,
+        "otherDeviceId": "d_ZYXWVUTSRQPONMLKJIHGFEDC",
+    }
 
     return {
         "description": "Encrypted objects (crypto.md 8) with fixed nonces. Keys come from the "
@@ -945,6 +971,7 @@ def objects_vectors() -> dict:
                 "fileId": other_fid.hex(),
             },
         ],
+        "deviceMeta": device_meta,
     }
 
 

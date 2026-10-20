@@ -1,6 +1,6 @@
 import Foundation
 
-extension FolderController {
+extension VaultController {
     /// One line for the menu.
     public var statusText: String {
         switch status {
@@ -16,7 +16,7 @@ extension FolderController {
         case .paused: "Paused"
         case .error(let why): why
         case .refused: "This key is remote-only. The macOS client syncs full devices only: make it a full device from another device, or remove it."
-        case .revoked: "This Mac's key was removed from the vault. Create a new key to pair this Mac again, or remove the folder."
+        case .revoked: "This Mac's key was removed from the vault. Create a new key to pair this Mac again, or remove the vault from this Mac."
         case .keyProblem(let why): why
         }
     }
@@ -37,7 +37,7 @@ extension FolderController {
     }
 }
 
-extension FolderController {
+extension VaultController {
     /// How much attention a status needs, for its colour.
     public enum Kind: Sendable { case ok, busy, warn, error, off }
 
@@ -69,6 +69,27 @@ extension FolderController {
         }
     }
 
+    /// The pill of one of this Mac's folders: Paused when it or the whole vault is paused;
+    /// Syncing while a file of it is received or pushed, or until its first sync finishes;
+    /// else Synced. A problem of the whole vault (offline, an error…) shows as the vault's
+    /// state. Nil when not mapped here.
+    public func folderStatus(_ name: String) -> (name: String, kind: Kind)? {
+        switch folderState(name) {
+        case .notMapped: return nil
+        case .paused: return ("Paused", .warn)
+        case .missing: return ("Missing", .error)
+        case .active:
+            if config.paused { return ("Paused", .warn) }
+            switch status {
+            case .synced, .syncing, .connecting:
+                let synced = syncedFolders.contains(name) && (status.isSynced || !busyFolders.contains(name))
+                return synced ? ("Synced", .ok) : ("Syncing", .busy)
+            default:
+                return (statusName, statusKind)
+            }
+        }
+    }
+
     /// The status line beyond the state name: shown when it says more than "Synced".
     public var statusDetail: String? {
         switch status {
@@ -77,4 +98,8 @@ extension FolderController {
         default: statusText
         }
     }
+}
+
+extension VaultController.Status {
+    var isSynced: Bool { if case .synced = self { true } else { false } }
 }

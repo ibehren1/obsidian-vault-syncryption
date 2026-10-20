@@ -5,7 +5,7 @@ import SyncryptionSync
 
 /// Browse a file's revisions, save an old version, or restore it on every device.
 struct HistoryTab: View {
-    let folder: FolderController
+    let vault: VaultController
     @State private var paths: [String] = []
     @State private var deleted: [String] = []
     @State private var showDeleted = false
@@ -83,9 +83,9 @@ struct HistoryTab: View {
 
     private func loadPaths() async {
         do {
-            paths = try await folder.syncedPaths()
-            deleted = try await folder.deletedPaths()
-            names = await folder.deviceNames()
+            paths = try await vault.syncedPaths()
+            deleted = try await vault.deletedPaths()
+            names = await vault.deviceNames()
             error = nil
         } catch {
             self.error = "\(error)"
@@ -94,7 +94,7 @@ struct HistoryTab: View {
 
     private func loadHistory(_ path: String, more: Bool) async {
         do {
-            let page = try await folder.history(path, before: more ? next : nil)
+            let page = try await vault.history(path, before: more ? next : nil)
             entries = more ? entries + page.entries : page.entries
             rejected = more ? rejected + page.rejected : page.rejected
             next = page.next
@@ -113,7 +113,7 @@ struct HistoryTab: View {
         busy = true
         Task {
             do {
-                guard let data = try await folder.readRevision(path, rev: rev) else { throw NSError(domain: "deleted", code: 0) }
+                guard let data = try await vault.readRevision(path, rev: rev) else { throw NSError(domain: "deleted", code: 0) }
                 try Data(data).write(to: url)
                 info = "Saved."
                 error = nil
@@ -129,7 +129,7 @@ struct HistoryTab: View {
         busy = true
         Task {
             do {
-                try await folder.restore(path, rev: rev)
+                try await vault.restore(path, rev: rev)
                 info = "Restored on every device."
                 error = nil
                 await loadPaths()

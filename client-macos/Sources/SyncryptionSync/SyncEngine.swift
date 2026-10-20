@@ -31,7 +31,10 @@ public enum SyncProgress: Sendable {
     /// revision's file is being received.
     case pull(done: Int, rev: Int, path: String?)
     case scan(done: Int, total: Int)
-    case push(done: Int, total: Int)
+    /// `path`: the queued file being pushed.
+    case push(done: Int, total: Int, path: String)
+    /// The file being received or uploaded: `done` of its `total` bytes, one chunk at a time.
+    case file(path: String, done: Int, total: Int)
 }
 
 /// One revision of a file, from its encrypted metadata.
@@ -119,15 +122,25 @@ public actor SyncEngine {
 
     public init(_ options: EngineOptions) { o = options }
 
-    /// Stop for good: a running sync fails at its next write or commit.
-    public func close() { closed = true }
+    /// Stop for good: a running sync is cancelled with its requests in flight, and this
+    /// returns once it has stopped. Nothing is written or committed after that.
+    public func close() async {
+        closed = true
+        guard let running else { return }
+        running.cancel()
+        _ = try? await running.value
+    }
 
-    private func checkOpen() throws { if closed { throw SyncStopped() } }
+    private func checkOpen() throws {
+        if closed { throw SyncStopped() }
+        try Task.checkCancellation()
+    }
 
     /// Pull, scan, push. Calls made while a sync is running are folded into one more run
     /// after it, so changes made during a sync are never missed.
     @discardableResult
     public func sync() async throws -> SyncReport {
+        try checkOpen()
         if let running {
             again = true
             return try await running.value
@@ -140,6 +153,7 @@ public actor SyncEngine {
             repeat {
                 self.again = false
                 try await self.pull()
+                try await self.adopt()
                 try await self.scan()
                 try await self.push()
                 try await self.reencrypt()
@@ -231,6 +245,7 @@ public actor SyncEngine {
             let page = try await o.api.changes(o.vaultId, since: cursor)
             if let k = o.keyring, page.keyringVersion > (await k.version()) { try await k.refresh() }
             for r in page.changes {
+                try checkOpen()
                 try await applyOrKeep(r, &failed)
                 pullDone += 1
                 o.onProgress(.pull(done: pullDone, rev: r.rev, path: nil))
@@ -245,6 +260,91 @@ public actor SyncEngine {
         for r in earlier { try await applyOrKeep(r, &failed, first: false) }
         try o.store.setMeta(MetaKey.failed, failed)
     }
+
+    /// Apply the remote files of folders synced here that the feed skipped while they weren't
+    /// (a folder just mapped or resumed): the remote index has their latest revisions.
+    func adopt() async throws {
+        guard let current = o.filter.folderNames else { return }
+        let before = Set((try o.store.meta(MetaKey.syncedFolders, as: [String].self) ?? []).map(PathKey.init))
+        let added = current.filter { !before.contains(PathKey($0)) }.map { Array(($0 + "/").utf8) }
+        if added.isEmpty {
+            try o.store.setMeta(MetaKey.syncedFolders, current)
+            return
+        }
+        let synced = try o.store.files()
+        var failed: [Revision] = []
+        for (path, r) in try o.store.remoteFiles().sorted(by: { $0.value.rev < $1.value.rev })
+            where o.filter.includes(path.path) && added.contains(where: { path.path.utf8.starts(with: $0) })
+        {
+            if let s = synced[path] { if r.rev <= s.rev { continue } } else if r.deleted { continue }
+            guard let revision = try? JSONDecoder().decode(Revision.self, from: r.revision) else { continue }
+            try await applyOrKeep(revision, &failed)
+        }
+        if !failed.isEmpty {
+            try o.store.setMeta(MetaKey.failed, (try o.store.meta(MetaKey.failed, as: [Revision].self) ?? []) + failed)
+        }
+        try o.store.setMeta(MetaKey.syncedFolders, current)
+    }
+
+    /// Remember `revision` as the latest of `path` in the remote index.
+    private func noteRemote(_ path: String, _ revision: Revision, _ meta: FileMeta) throws {
+        if let known = try o.store.remoteFile(path), known.rev >= revision.rev { return }
+        try o.store.putRemote(path, RemoteFile(rev: revision.rev, deleted: meta.deleted, size: meta.size,
+                                               revision: try JSONEncoder().encode(revision)))
+    }
+
+    /// The top-level folders of the vault that have files, with how many and their size.
+    public func remoteFolders() throws -> [String: (files: Int, size: Int)] {
+        var out: [String: (files: Int, size: Int)] = [:]
+        for (path, r) in try o.store.remoteFiles() where !r.deleted {
+            guard let slash = path.path.firstIndex(of: "/") else { continue }
+            let name = String(path.path[..<slash])
+            out[name, default: (0, 0)].files += 1
+            out[name, default: (0, 0)].size += r.size
+        }
+        return out
+    }
+
+    public struct FolderSynced: Error, CustomStringConvertible {
+        public let description = "This folder is synced on this Mac. Unmap it first."
+    }
+
+    /// Delete every file of the top-level folder `name` in the vault, for every device. Only
+    /// for a folder this Mac doesn't sync. Returns how many files were deleted.
+    @discardableResult
+    public func deleteFolder(_ name: String) async throws -> Int {
+        let prefix = Array((name + "/").utf8)
+        var deleted = 0
+        for (path, r) in try o.store.remoteFiles() where !r.deleted && path.path.utf8.starts(with: prefix) {
+            if o.filter.includes(path.path) { throw FolderSynced() }
+            try checkOpen()
+            var parent = r.rev
+            for _ in 0..<3 {
+                let t = now()
+                let sealed = try o.cipher.seal(path: path.path, data: nil, mtime: t, ctime: t, device: o.deviceId)
+                let fileId = try o.cipher.fileId(path.path)
+                do {
+                    let revision = try await o.api.commit(o.vaultId, fileId, CommitRequest(blobs: [], deleted: true, meta: sealed.meta,
+                                                                                           parentRev: parent))
+                    try noteRemote(path.path, revision, try o.cipher.openMeta(fileId: fileId, meta: revision.meta))
+                    deleted += 1
+                    break
+                } catch let e as ApiError where e.code == "stale_parent" {
+                    // Written again since: delete the newer head, unless it is a deletion already.
+                    guard let head = e.details["head"], head != .null, let h = try? decodeRevision(head),
+                          let meta = try? o.cipher.openMeta(fileId: fileId, meta: h.meta) else { break }
+                    try noteRemote(path.path, h, meta)
+                    if meta.deleted { break }
+                    parent = h.rev
+                }
+            }
+        }
+        return deleted
+    }
+
+    /// Stop syncing the top-level folder `name` here: forget its synced state and queued
+    /// changes, so nothing is pushed for it. Its files stay in the vault.
+    public func forgetFolder(_ name: String) throws { try o.store.forget(folder: name) }
 
     /// Apply a remote revision. If writing it here fails (a name the disk refuses, or one that
     /// clashes with another file's), keep it to try again on the next pull, and warn the first
@@ -276,6 +376,7 @@ public actor SyncEngine {
         var present = Set<PathKey>()
         let files = try o.fs.list(skip: o.filter.skipsFolder).filter { o.filter.includes($0.path) }
         for (i, file) in files.enumerated() {
+            try checkOpen()
             o.onProgress(.scan(done: i, total: files.count))
             present.insert(PathKey(file.path))
             let s = synced[PathKey(file.path)]
@@ -303,7 +404,8 @@ public actor SyncEngine {
             let entries = try o.store.outbox()
             if entries.isEmpty { return }
             for (i, entry) in entries.enumerated() {
-                o.onProgress(.push(done: i, total: entries.count))
+                try checkOpen()
+                o.onProgress(.push(done: i, total: entries.count, path: entry.path))
                 do { try await pushPath(entry.path) } catch let e as ApiError where refused.contains(e.status) {
                     // A request the server refuses for this file only: keep it queued, go on.
                     o.onWarning("Couldn't upload a file (\(e.code)). It stays queued.")
@@ -321,6 +423,7 @@ public actor SyncEngine {
         let current = o.cipher.currentEpoch
         for (path, file) in try o.store.files() {
             if again { return }
+            try checkOpen()
             if file.deleted || file.epoch >= current || !o.filter.includes(path.path) { continue }
             do { try await pushPath(path.path, again: true) } catch let e as ApiError where refused.contains(e.status) {
                 o.onWarning("Couldn't re-encrypt a file (\(e.code)).")
@@ -353,7 +456,17 @@ public actor SyncEngine {
         let sealed = try o.cipher.seal(path: path, data: local.exists ? local.data! : nil, mtime: local.stat?.mtime ?? t,
                                        ctime: local.stat?.ctime ?? t, device: o.deviceId)
         let missing = Set(try await o.api.missingBlobs(o.vaultId, sealed.chunks.map(\.id)))
-        for c in sealed.chunks where missing.contains(c.id) { try await o.api.putBlob(o.vaultId, c.id, Data(c.object)) }
+        let total = sealed.chunks.reduce(0) { $0 + $1.size }
+        var sent = 0
+        if !sealed.chunks.isEmpty { o.onProgress(.file(path: path, done: 0, total: total)) }
+        for c in sealed.chunks {
+            if missing.contains(c.id) {
+                try checkOpen()
+                try await o.api.putBlob(o.vaultId, c.id, Data(c.object))
+            }
+            sent += c.size
+            o.onProgress(.file(path: path, done: sent, total: total))
+        }
         let fileId = try o.cipher.fileId(path)
         try checkOpen()
         let revision: Revision
@@ -373,6 +486,8 @@ public actor SyncEngine {
         try o.store.putFile(path, SyncedFile(fileId: fileId, rev: revision.rev, deleted: !local.exists,
                                              sha256: local.exists ? sealed.sha256 : "", size: local.data?.count ?? 0,
                                              mtime: local.stat?.mtime ?? 0, epoch: try o.cipher.epoch(meta: sealed.meta)))
+        try o.store.putRemote(path, RemoteFile(rev: revision.rev, deleted: !local.exists, size: local.data?.count ?? 0,
+                                               revision: try JSONEncoder().encode(revision)))
         if again { report.reencrypted += 1 } else { report.pushed += 1 }
     }
 
@@ -386,6 +501,7 @@ public actor SyncEngine {
             return
         }
         let path = meta.path
+        try noteRemote(path, revision, meta)
         guard o.filter.includes(path) else { return }
         let synced = try o.store.file(path)
         if let synced, revision.rev <= synced.rev { return }
@@ -500,9 +616,13 @@ public actor SyncEngine {
     /// file's hash after the last one: this throws instead of finishing.
     private func chunks(_ revision: Revision, _ meta: FileMeta, _ append: (Bytes) throws -> Void) async throws {
         var opener = try o.cipher.contentOpener(fileId: revision.fileId, meta: meta)
+        var received = 0
+        if !meta.chunks.isEmpty { o.onProgress(.file(path: meta.path, done: 0, total: meta.size)) }
         for (i, chunk) in meta.chunks.enumerated() {
             try checkOpen()
             try append(try opener.open(i, try await blob(chunk.id)))
+            received += chunk.size
+            o.onProgress(.file(path: meta.path, done: received, total: meta.size))
         }
         try opener.finish()
     }

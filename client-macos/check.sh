@@ -17,7 +17,7 @@ xcodegen --quiet
 
 echo "==> xcodebuild"
 log=$(mktemp)
-if ! xcodebuild -project VaultSyncryption.xcodeproj -scheme VaultSyncryption \
+if ! xcodebuild -project VaultSyncryptionClient.xcodeproj -scheme VaultSyncryptionClient \
   -destination 'platform=macOS' -configuration Debug -derivedDataPath .build/xcode build >"$log" 2>&1; then
   grep -E "error:" "$log" || tail -30 "$log"
   exit 1

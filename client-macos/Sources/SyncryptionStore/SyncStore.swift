@@ -27,6 +27,24 @@ public struct SyncedFile: Codable, Equatable, Sendable {
     }
 }
 
+/// The latest revision seen of a vault path, whether it is synced here or not: the vault's
+/// folder list, and what a folder mapped later starts from.
+public struct RemoteFile: Codable, Equatable, Sendable {
+    public var rev: Int
+    public var deleted: Bool
+    /// The plaintext size.
+    public var size: Int
+    /// The revision as the server sent it (JSON), to apply later without fetching it again.
+    public var revision: Data
+
+    public init(rev: Int, deleted: Bool, size: Int, revision: Data) {
+        self.rev = rev
+        self.deleted = deleted
+        self.size = size
+        self.revision = revision
+    }
+}
+
 /// A path with local changes to push. What to push is decided when it is pushed.
 public struct OutboxEntry: Equatable, Sendable {
     public var path: String
@@ -49,6 +67,10 @@ public protocol SyncStore: Sendable {
     func outbox() throws -> [OutboxEntry]
     /// Remove `entry`, unless the path was queued again since it was read.
     func dequeue(_ entry: OutboxEntry) throws
+    func remoteFile(_ path: String) throws -> RemoteFile?
+    func putRemote(_ path: String, _ file: RemoteFile) throws
+    /// Every vault path seen in the change feed, by exact bytes.
+    func remoteFiles() throws -> [PathKey: RemoteFile]
     /// Forget everything, e.g. when the vault was recreated on the server.
     func clear() throws
 }
@@ -66,6 +88,8 @@ public enum MetaKey {
     public static let revokingDevices = "revokingDevices"
     /// Devices the server reports removed that the user chose to keep in the keyring.
     public static let keptDevices = "keptDevices"
+    /// The top-level folders synced at the end of the last adopt.
+    public static let syncedFolders = "syncedFolders"
 }
 
 extension SyncStore {
@@ -74,6 +98,15 @@ extension SyncStore {
 
     /// The plaintext bytes in sync: the sizes of the synced files, without deletions.
     public func totalSize() throws -> Int { try files().values.filter { !$0.deleted }.reduce(0) { $0 + $1.size } }
+
+    /// Forget the synced state and queued changes of every path in the top-level folder
+    /// `name`, so nothing there is pushed: the folder is no longer synced here.
+    public func forget(folder name: String) throws {
+        let prefix = Array((name + "/").utf8)
+        func inside(_ p: String) -> Bool { p.utf8.starts(with: prefix) }
+        for path in try files().keys where inside(path.path) { try removeFile(path.path) }
+        for entry in try outbox() where inside(entry.path) { try dequeue(entry) }
+    }
 }
 
 /// Paths are compared by their exact characters, not Swift's canonical equivalence: on disk
@@ -90,6 +123,7 @@ public final class MemoryStore: SyncStore, @unchecked Sendable {
     private var metaValues: [String: Data] = [:]
     private var synced: [PathKey: SyncedFile] = [:]
     private var queue: [PathKey: OutboxEntry] = [:]
+    private var remote: [PathKey: RemoteFile] = [:]
 
     public init() {}
 
@@ -108,6 +142,10 @@ public final class MemoryStore: SyncStore, @unchecked Sendable {
     public func removeFile(_ path: String) throws { _ = lock.withLock { synced.removeValue(forKey: PathKey(path)) } }
 
     public func files() throws -> [PathKey: SyncedFile] { lock.withLock { synced } }
+
+    public func remoteFile(_ path: String) throws -> RemoteFile? { lock.withLock { remote[PathKey(path)] } }
+    public func putRemote(_ path: String, _ file: RemoteFile) throws { lock.withLock { remote[PathKey(path)] = file } }
+    public func remoteFiles() throws -> [PathKey: RemoteFile] { lock.withLock { remote } }
 
     public func enqueue(_ path: String) throws {
         lock.withLock {
@@ -128,6 +166,7 @@ public final class MemoryStore: SyncStore, @unchecked Sendable {
             metaValues = [:]
             synced = [:]
             queue = [:]
+            remote = [:]
         }
     }
 }

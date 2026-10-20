@@ -45,10 +45,10 @@ func client(_ username: String, _ vaultName: String, _ seed: Bytes, _ name: Stri
 }
 
 func engineFor(_ session: VaultSession, fs: any VaultFs, store: any SyncStore, name: String, deviceId: String, warnings: Log,
-               exclude: [String] = []) -> SyncEngine
+               exclude: [String] = [], filter: PathFilter? = nil) -> SyncEngine
 {
     var o = EngineOptions(api: session.api, vaultId: session.vault.id, cipher: session.cipher, fs: fs, store: store, deviceId: deviceId,
-                          deviceName: name, filter: PathFilter(exclude: exclude), keyring: session)
+                          deviceName: name, filter: filter ?? PathFilter(exclude: exclude), keyring: session)
     o.onWarning = { warnings.add($0) }
     o.blobRetries = [.milliseconds(10), .milliseconds(20)]
     return SyncEngine(o)

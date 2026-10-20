@@ -26,7 +26,7 @@ from pathlib import Path
 BASE_VERSION = 5
 # Read-only connections for `Database.read`, each on its own thread.
 READERS = 5
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 OLD_DATA_MESSAGE = (
     "This server's data predates server 0.1.4 (one key per device per vault). "
     "Delete ./data (or the S3 data) and start again."
@@ -70,7 +70,9 @@ CREATE TABLE devices (
     -- remote-only.md 4: the server's copy of the keyring policy
     remote_only INTEGER NOT NULL DEFAULT 0,
     -- remote-only.md 5: a remote-only device locked by another device can't log in
-    locked INTEGER NOT NULL DEFAULT 0
+    locked INTEGER NOT NULL DEFAULT 0,
+    -- protocol.md 6: the device's metadata, encrypted by the client (crypto.md 8.5)
+    meta BLOB
 );
 CREATE INDEX devices_vault ON devices(vault_id, status);
 CREATE INDEX devices_user_vault_name ON devices(user_id, vault_name);
@@ -195,6 +197,8 @@ MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [
     "ALTER TABLE vaults ADD COLUMN blob_quota INTEGER;"
     "UPDATE vaults SET blob_bytes = "
     "(SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.vault_id = vaults.id)",
+    # Schema 10: per-device metadata, encrypted by the client (protocol.md 6).
+    "ALTER TABLE devices ADD COLUMN meta BLOB",
 ]
 
 

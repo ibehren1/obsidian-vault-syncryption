@@ -132,6 +132,21 @@ public actor VaultSession: KeyringSource {
     /// Every key of this vault on the server, revoked ones included.
     public func devices() async throws -> [Device] { try await api.devices(vault.id) }
 
+    /// Store this device's folders in its device metadata (crypto.md 8.5), under the current epoch.
+    public func publishFolders(_ folders: [DeviceMeta.Folder]) async throws {
+        guard let me = await api.deviceId else { return }
+        _ = try await api.setDeviceMeta(vault.id, try cipher.sealDeviceMeta(deviceId: me, DeviceMeta(folders: folders)))
+    }
+
+    /// The active keys of the vault with the folders each syncs: nil when a device stored
+    /// none, or its metadata can't be read (another kind of client, or tampered with).
+    public func deviceFolders() async throws -> [(device: Device, folders: [DeviceMeta.Folder]?)] {
+        let c = cipher
+        return try await devices().filter { $0.status == "active" }.map { d in
+            (d, d.meta.flatMap { try? c.openDeviceMeta(deviceId: d.id, $0).folders })
+        }
+    }
+
     /// Keys waiting for approval, with the pairing code computed here, not by the server.
     /// Keys waiting for approval. The pairing code and fingerprint are computed here from the
     /// public key that approving adds: the server's `fingerprint` could name another key.

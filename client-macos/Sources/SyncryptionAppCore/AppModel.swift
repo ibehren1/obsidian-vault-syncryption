@@ -4,10 +4,10 @@ import ServiceManagement
 import SyncryptionAPI
 import SyncryptionCrypto
 
-/// The app's folders and their controllers.
+/// The app's vaults and their controllers.
 @MainActor @Observable
 public final class AppModel {
-    public private(set) var folders: [FolderController] = []
+    public private(set) var vaults: [VaultController] = []
     public private(set) var loadError: String?
     private let configs: ConfigStore
     private let keys: KeyStore
@@ -21,66 +21,72 @@ public final class AppModel {
         self.keys = keys
         self.transport = transport
         do {
-            folders = try configs.load().map(makeController)
+            vaults = try configs.load().map(makeController)
         } catch {
-            loadError = "Couldn't read the folder list: \(error)"
+            loadError = "Couldn't read the vault list: \(error)"
         }
     }
 
-    /// Called when keys start waiting for approval in a folder's vault.
-    public var onPendingApproval: (FolderController, [FolderController.PendingDevice]) -> Void = { _, _ in } {
-        didSet { for f in folders { f.onPendingApproval = onPendingApproval } }
+    /// Called when keys start waiting for approval in a vault.
+    public var onPendingApproval: (VaultController, [VaultController.PendingDevice]) -> Void = { _, _ in } {
+        didSet { for v in vaults { v.onPendingApproval = onPendingApproval } }
     }
 
-    private func makeController(_ config: FolderConfig) -> FolderController {
-        let c = FolderController(config: config, configs: configs, keys: keys, transport: transport) { [weak self] updated in self?.saved(updated) }
+    private func makeController(_ config: VaultConfig) -> VaultController {
+        let c = VaultController(config: config, configs: configs, keys: keys, transport: transport) { [weak self] updated in self?.saved(updated) }
         c.onPendingApproval = { [weak self] f, d in self?.onPendingApproval(f, d) }
+        c.allVaults = { [weak self] in self?.vaults.map(\.config) ?? [] }
         return c
     }
 
-    private func saved(_ updated: FolderConfig) {
-        var all = folders.map(\.config)
+    private func saved(_ updated: VaultConfig) {
+        var all = vaults.map(\.config)
         if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated }
         try? configs.save(all)
     }
 
-    public func startAll() { for f in folders { f.start() } }
-    public func stopAll() { for f in folders { f.stop() } }
+    public func startAll() { for v in vaults { v.start() } }
+    public func stopAll() { for v in vaults { v.stop() } }
 
     /// A summary for the menu bar icon.
     public var hasProblem: Bool {
-        folders.contains {
+        vaults.contains {
             switch $0.status {
             case .error, .refused, .revoked, .needsSecret, .pairing, .keyProblem: true
-            default: !$0.pendingApprovals.isEmpty || !$0.unconfirmedRemovals.isEmpty
+            default: !$0.pendingApprovals.isEmpty || !$0.unconfirmedRemovals.isEmpty || !$0.folderProblems.isEmpty
             }
         }
     }
 
-    /// The state of all folders together, for the menu's header.
+    /// The state of all vaults together, for the menu's header.
     public var overallName: String {
         if hasProblem { return "Attention" }
         if isSyncing { return "Syncing" }
-        return folders.isEmpty ? "Idle" : "Synced"
+        if allPaused { return "Paused" }
+        return vaults.isEmpty ? "Idle" : "Synced"
     }
 
-    public var overallKind: FolderController.Kind {
+    public var overallKind: VaultController.Kind {
         if hasProblem { return .warn }
         if isSyncing { return .busy }
-        return folders.isEmpty ? .off : .ok
+        if allPaused { return .warn }
+        return vaults.isEmpty ? .off : .ok
     }
 
-    /// The menu bar icon's color: a problem, syncing, or every folder synced. Anything else
-    /// (offline, paused, no folders) is `.off`, the plain menu bar icon.
-    public var menuBarKind: FolderController.Kind {
+    /// Every vault is paused on this Mac.
+    public var allPaused: Bool { !vaults.isEmpty && vaults.allSatisfy(\.config.paused) }
+
+    /// The menu bar icon's color: a problem, syncing, or every vault synced. Anything else
+    /// (offline, paused, no vaults) is `.off`, the plain menu bar icon.
+    public var menuBarKind: VaultController.Kind {
         if hasProblem { return .error }
         if isSyncing { return .busy }
-        let synced = folders.allSatisfy { if case .synced = $0.status { true } else { false } }
-        return !folders.isEmpty && synced ? .ok : .off
+        let synced = vaults.allSatisfy { if case .synced = $0.status { true } else { false } }
+        return !vaults.isEmpty && synced ? .ok : .off
     }
 
     public var isSyncing: Bool {
-        folders.contains {
+        vaults.contains {
             switch $0.status {
             case .syncing, .connecting: true
             default: false
@@ -92,11 +98,11 @@ public final class AppModel {
         public let description: String
     }
 
-    /// Link a folder to a vault: a new encryption key goes in the Keychain, and the folder
+    /// Link this Mac to a vault: a new encryption key goes in the Keychain, and the vault
     /// starts connecting. Its controller then asks for the shared secret (a new vault) or
-    /// shows the pairing code (an existing one).
+    /// shows the pairing code (an existing one). Folders are added once it is connected.
     @discardableResult
-    public func addFolder(path: String, endpoint: String, username: String, vaultName: String, deviceName: String) throws -> FolderController {
+    public func addVault(endpoint: String, username: String, vaultName: String, deviceName: String) throws -> VaultController {
         let origin = try normalizeEndpoint(endpoint)
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let vault = normalizeVaultName(vaultName)
@@ -104,36 +110,35 @@ public final class AppModel {
         guard !user.isEmpty else { throw AddError(description: "Enter a username.") }
         guard !vault.isEmpty else { throw AddError(description: "Enter a vault name.") }
         guard !device.isEmpty else { throw AddError(description: "Enter a device name.") }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
-            throw AddError(description: "Choose an existing folder.")
-        }
         let key = OpenSSH.generate(comment: "syncryption \(user)@\(device)")
-        let config = FolderConfig(path: URL(filePath: path).standardizedFileURL.path, endpoint: origin, username: user, vaultName: vault,
-                                  deviceName: device, publicKey: OpenSSH.publicKeyText(key.publicKey))
-        try ConfigStore.check(config, against: folders.map(\.config))
+        let config = VaultConfig(endpoint: origin, username: user, vaultName: vault, deviceName: device,
+                                 publicKey: OpenSSH.publicKeyText(key.publicKey))
+        try ConfigStore.check(config, against: vaults.map(\.config))
         try keys.save(key, slot: config.keySlot)
         let controller = makeController(config)
-        folders.append(controller)
-        try configs.save(folders.map(\.config))
+        vaults.append(controller)
+        try configs.save(vaults.map(\.config))
         controller.start()
         return controller
     }
 
-    /// Stop syncing a folder and forget it: this Mac's key is removed from the vault (if it
-    /// can still reach the server) and from the Keychain, and the sync state is deleted. The
-    /// files stay in the folder.
-    public func removeFolder(_ controller: FolderController) async {
+    /// Stop syncing a vault and forget it: this Mac's key is removed from the vault (if it can
+    /// still reach the server) and from the Keychain, and the sync state is deleted. The
+    /// folders stay in place, or with `keepFiles` false go to the Trash.
+    public func removeVault(_ controller: VaultController, keepFiles: Bool = true) async {
         if let session = controller.session {
             let me = await session.deviceId()
             try? await session.api.removeDevice(session.vault.id, me)
         }
         controller.stop()
-        if controller.config.showsFolderIcon { FolderIcon.remove(from: controller.config.url) }
+        for f in controller.config.folders where FileManager.default.fileExists(atPath: f.path) {
+            if f.showsFolderIcon { FolderIcon.remove(from: f.url) }
+            if !keepFiles { try? FileManager.default.trashItem(at: f.url, resultingItemURL: nil) }
+        }
         try? keys.delete(controller.config.keySlot)
         configs.removeState(controller.id)
-        folders.removeAll { $0.id == controller.id }
-        try? configs.save(folders.map(\.config))
+        vaults.removeAll { $0.id == controller.id }
+        try? configs.save(vaults.map(\.config))
     }
 
     // MARK: Login item

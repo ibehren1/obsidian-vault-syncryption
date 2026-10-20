@@ -3,79 +3,80 @@ import SwiftUI
 import SyncryptionAppCore
 import SyncryptionSync
 
-/// Which folder the status window shows, so the menu can open it at one.
+/// Which vault the status window shows, so the menu can open it at one.
 @MainActor @Observable
 final class StatusSelection {
     static let shared = StatusSelection()
-    var folder: UUID?
+    var vault: UUID?
 }
 
-/// The sync status of a folder, like the plugin's status window: state and actions, the
-/// figures, what waits to upload, this Mac, and the keys of the vault.
+/// The sync status of a vault, like the plugin's status window: state and actions, the
+/// figures, this Mac's folders, what waits to upload, this Mac, and the keys of the vault.
 struct StatusWindow: View {
     let model: AppModel
     @State private var selection = StatusSelection.shared
     @Environment(\.openWindow) private var openWindow
 
-    private var folder: FolderController? {
-        model.folders.first { $0.id == selection.folder } ?? model.folders.first
+    private var vault: VaultController? {
+        model.vaults.first { $0.id == selection.vault } ?? model.vaults.first
     }
 
     var body: some View {
         Group {
-            if let folder {
+            if let vault {
                 ScrollView {
-                    FolderStatus(folder: folder) { tab in
-                        SettingsSelection.shared.select(folder.id, tab: tab)
+                    FolderStatus(vault: vault) { tab in
+                        SettingsSelection.shared.select(vault.id, tab: tab)
                         openWindow(id: "settings")
                     }
                     .padding(24)
                 }
-                .id(folder.id)
+                .id(vault.id)
             } else {
                 VStack(spacing: 14) {
                     Logo(size: 72)
-                    Text("No folders yet").font(.title2.weight(.semibold))
-                    Text("Add a folder to sync it, end-to-end encrypted, with a vault on your server.").foregroundStyle(.secondary)
-                    Button("Add Folder…") { openWindow(id: "add") }.buttonStyle(.borderedProminent).controlSize(.large)
+                    Text("No vaults yet").font(.title2.weight(.semibold))
+                    Text("Add a vault, then the folders to sync with it, end-to-end encrypted.").foregroundStyle(.secondary)
+                    Button("Add Vault…") { openWindow(id: "add") }.buttonStyle(.borderedProminent).controlSize(.large)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 860, minHeight: 640)
         .toolbar {
-            if model.folders.count > 1 {
+            if model.vaults.count > 1 {
                 ToolbarItem(placement: .principal) {
-                    Picker("Folder", selection: Binding(get: { folder?.id }, set: { selection.folder = $0 })) {
-                        ForEach(model.folders) { f in Text(f.config.title).tag(Optional(f.id)) }
+                    Picker("Vault", selection: Binding(get: { vault?.id }, set: { selection.vault = $0 })) {
+                        ForEach(model.vaults) { f in Text(f.config.title).tag(Optional(f.id)) }
                     }
                     .pickerStyle(.segmented)
                 }
             }
         }
-        .navigationTitle(folder.map { "Sync Status — \($0.config.title)" } ?? "Sync Status")
+        .navigationTitle(vault.map { "Sync Status — \($0.config.title)" } ?? "Sync Status")
     }
 }
 
 struct FolderStatus: View {
-    let folder: FolderController
+    let vault: VaultController
     let openSettings: (SettingsTab) -> Void
-    @State private var queue: [FolderController.QueuedChange] = []
-    @State private var keys: [FolderController.VaultKey]?
+    @State private var queue: [VaultController.QueuedChange] = []
+    @State private var keys: [VaultController.VaultKey]?
     @State private var keysError: String?
-    @State private var approving: FolderController.PendingDevice?
+    @State private var approving: VaultController.PendingDevice?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             header
-            if let detail = folder.statusDetail { callout(detail) }
+            if let detail = vault.statusDetail { callout(detail) }
             TimelineView(.periodic(from: .now, by: 15)) { context in tiles(now: context.date) }
             HStack(alignment: .top, spacing: 16) {
-                queueCard
+                foldersCard
                 deviceCard
             }
+            queueCard
             keysCard
-            if !folder.warnings.isEmpty || !(folder.lastReport?.conflicts.isEmpty ?? true) { problemsCard }
+            if !vault.warnings.isEmpty || !(vault.lastReport?.conflicts.isEmpty ?? true) { problemsCard }
             HStack {
                 Text("Approve, remove and change devices, set the recovery key and restore old versions in Settings.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -83,14 +84,14 @@ struct FolderStatus: View {
                 Button("Open Settings…") { openSettings(.devices) }
             }
         }
-        .task(id: folder.lastSync) { await reload() }
+        .task(id: vault.lastSync) { await reload() }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
-                queue = await folder.queuedChanges()
+                queue = await vault.queuedChanges()
             }
         }
-        .sheet(item: $approving) { p in ApproveSheet(device: p, folder: folder) { approving = nil; Task { await reload() } } }
+        .sheet(item: $approving) { p in ApproveSheet(device: p, vault: vault) { approving = nil; Task { await reload() } } }
     }
 
     // MARK: Header
@@ -100,38 +101,44 @@ struct FolderStatus: View {
             Logo(size: 48)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 10) {
-                    Text(folder.config.title).font(.title2.weight(.semibold))
-                    StatePill(text: folder.statusName, kind: folder.statusKind)
+                    Text(vault.config.title).font(.title2.weight(.semibold))
+                    StatePill(text: vault.statusName, kind: vault.statusKind)
                 }
-                Text("\(folder.config.vaultName) · \(host(folder.config.endpoint)) · \(folder.config.username)")
+                Text("\(host(vault.config.endpoint)) · \(vault.config.username)")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
-            Button(folder.config.paused ? "Resume Sync" : "Pause Sync") { folder.setPaused(!folder.config.paused) }
+            Button(vault.config.paused ? "Resume Sync" : "Pause Sync") { vault.setPaused(!vault.config.paused) }
                 .controlSize(.large)
-            Button(folder.session == nil ? "Connect" : "Sync Now") { folder.syncNow() }
+            Button(vault.session == nil ? "Connect" : "Sync Now") { vault.syncNow() }
                 .buttonStyle(.borderedProminent).controlSize(.large)
-                .disabled(folder.config.paused || folder.statusKind == .busy)
+                .disabled(vault.config.paused || vault.statusKind == .busy)
         }
     }
 
     private func callout(_ text: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: folder.statusSymbol).foregroundStyle(folder.statusKind.color)
+                Image(systemName: vault.statusSymbol).foregroundStyle(vault.statusKind.color)
                 Text(text).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
-            StatusActions(folder: folder, open: openSettings)
+            if let f = vault.currentFile {
+                HStack(spacing: 8) {
+                    FileProgressLine(fraction: f.fraction)
+                    Text(f.path).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(f.path)
+                }
+            }
+            StatusActions(vault: vault, open: openSettings)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(folder.statusKind.color.opacity(0.08)))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(vault.statusKind.color.opacity(0.08)))
     }
 
     // MARK: Tiles
 
     private func tiles(now: Date) -> some View {
-        let r = folder.lastReport
+        let r = vault.lastReport
         var extra: [String] = []
         if let r, r.merged > 0 { extra.append(plural(r.merged, "merge")) }
         if let r, !r.conflicts.isEmpty { extra.append(plural(r.conflicts.count, "conflict copy", "conflict copies")) }
@@ -139,13 +146,13 @@ struct FolderStatus: View {
         let oldest = queue.map(\.queuedAt).min()
         return Grid(horizontalSpacing: 12) {
             GridRow {
-                Tile(label: "Last sync", value: folder.lastSync.map { relative($0, to: now, capitalized: true) } ?? "Never",
-                     detail: folder.lastSync?.formatted(date: .abbreviated, time: .standard) ?? "No sync on this Mac yet", systemImage: "clock")
+                Tile(label: "Last sync", value: vault.lastSync.map { relative($0, to: now, capitalized: true) } ?? "Never",
+                     detail: vault.lastSync?.formatted(date: .abbreviated, time: .standard) ?? "No sync on this Mac yet", systemImage: "clock")
                 Tile(label: "Last run", value: r.map { "\($0.pushed) ↑  \($0.pulled) ↓" } ?? "—",
                      detail: runDetail(r, extra), systemImage: "arrow.up.arrow.down")
-                Tile(label: "Files in sync", value: folder.session == nil && folder.fileCount == 0 ? "—" : folder.fileCount.formatted(),
-                     detail: "Full device", systemImage: "doc.on.doc")
-                Tile(label: "Waiting to upload", value: folder.engine == nil ? "—" : queue.count.formatted(),
+                Tile(label: "Files in sync", value: vault.session == nil && vault.fileCount == 0 ? "—" : vault.fileCount.formatted(),
+                     detail: "\(plural(vault.config.folders.count, "folder")) · \(vault.sizeText)", systemImage: "doc.on.doc")
+                Tile(label: "Waiting to upload", value: vault.engine == nil ? "—" : queue.count.formatted(),
                      detail: oldest.map { "Oldest \($0.formatted(date: .omitted, time: .shortened))" } ?? "", systemImage: "tray.and.arrow.up")
             }
         }
@@ -159,8 +166,8 @@ struct FolderStatus: View {
     // MARK: Columns
 
     private var queueCard: some View {
-        Card(title: "Waiting to upload", count: folder.engine == nil ? nil : plural(queue.count, "change")) {
-            if folder.engine == nil {
+        Card(title: "Waiting to upload", count: vault.engine == nil ? nil : plural(queue.count, "change")) {
+            if vault.engine == nil {
                 note("Connect to see the changes waiting on this Mac.")
             } else if queue.isEmpty {
                 note("Nothing: every noted change is uploaded.")
@@ -187,23 +194,15 @@ struct FolderStatus: View {
     private var deviceCard: some View {
         Card(title: "This Mac") {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
-                KeyValue(label: "Device") { Text(folder.config.deviceName) }
-                KeyValue(label: "Folder") {
-                    HStack(spacing: 6) {
-                        Text(folder.config.path).lineLimit(1).truncationMode(.middle).help(folder.config.path)
-                        Button { NSWorkspace.shared.activateFileViewerSelecting([folder.config.url]) } label: {
-                            Image(systemName: "arrow.up.forward.square")
-                        }.buttonStyle(.borderless).help("Show in Finder")
-                    }
-                }
-                KeyValue(label: "Server") { Text(folder.config.endpoint).lineLimit(1).truncationMode(.middle) }
-                KeyValue(label: "Vault") { Text(folder.config.vaultName) }
+                KeyValue(label: "Device") { Text(vault.config.deviceName) }
+                KeyValue(label: "Server") { Text(vault.config.endpoint).lineLimit(1).truncationMode(.middle) }
+                KeyValue(label: "Vault") { Text(vault.config.vaultName) }
                 KeyValue(label: "Encryption key") {
-                    if let k = folder.keyInfo { Fingerprint(value: k.fingerprint) } else { Text("None").foregroundStyle(.secondary) }
+                    if let k = vault.keyInfo { Fingerprint(value: k.fingerprint) } else { Text("None").foregroundStyle(.secondary) }
                 }
                 KeyValue(label: "Mode") { Text("Full device") }
                 KeyValue(label: "Recovery key") {
-                    if let r = folder.recoveryState {
+                    if let r = vault.recoveryState {
                         HStack(spacing: 6) {
                             StatusDot(kind: r.isSet ? .ok : .warn, size: 7)
                             Text(r.isSet ? "Set\(r.setBy.map { " by \($0)" } ?? "")" : "Not set")
@@ -218,12 +217,44 @@ struct FolderStatus: View {
         }
     }
 
+    private var foldersCard: some View {
+        Card(title: "Folders on This Mac", count: plural(vault.config.folders.count, "folder")) {
+            if vault.config.folders.isEmpty {
+                note("None yet. Add or map a folder in Settings → Folders.")
+            }
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+                ForEach(vault.config.folders) { f in
+                    GridRow(alignment: .firstTextBaseline) {
+                        Text(f.name).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                        HStack(spacing: 6) {
+                            Text((f.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle).help(f.path)
+                            FolderPausePill(vault: vault, name: f.name)
+                            Button { FolderActions.show(f) } label: { Image(systemName: "arrow.up.forward.square") }
+                                .buttonStyle(.borderless).help("Show in Finder")
+                        }
+                    }
+                }
+                ForEach(vault.vaultFolders.filter { $0.mapping == nil }) { f in
+                    GridRow(alignment: .firstTextBaseline) {
+                        Text(f.name).foregroundStyle(.tertiary).gridColumnAlignment(.trailing)
+                        Text("-").foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .font(.callout)
+            HStack {
+                Spacer()
+                Button("Folders…") { openSettings(.folders) }.controlSize(.small)
+            }
+        }
+    }
+
     // MARK: Keys
 
     private var keysCard: some View {
         Card(title: "Vault keys", count: keys.map { plural($0.count, "key") }) {
-            if !folder.pendingApprovals.isEmpty {
-                ForEach(folder.pendingApprovals) { p in
+            if !vault.pendingApprovals.isEmpty {
+                ForEach(vault.pendingApprovals) { p in
                     HStack(spacing: 10) {
                         StatusDot(kind: .warn)
                         Text("\(p.name) is waiting for approval").font(.callout.weight(.medium))
@@ -270,7 +301,7 @@ struct FolderStatus: View {
             } else if let keysError {
                 note(keysError)
             } else {
-                note(folder.session == nil ? "Connect to see the keys of this vault." : "Loading…")
+                note(vault.session == nil ? "Connect to see the keys of this vault." : "Loading…")
             }
         }
     }
@@ -278,10 +309,10 @@ struct FolderStatus: View {
     private var problemsCard: some View {
         Card(title: "Recent problems", count: nil) {
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(folder.lastReport?.conflicts ?? [], id: \.self) { c in
+                ForEach(vault.lastReport?.conflicts ?? [], id: \.self) { c in
                     Label("Conflict copy: \(c)", systemImage: "doc.on.doc").font(.callout)
                 }
-                ForEach(Array(folder.warnings.suffix(8).enumerated()), id: \.offset) {
+                ForEach(Array(vault.warnings.suffix(8).enumerated()), id: \.offset) {
                     Label($0.element, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.secondary)
                 }
             }
@@ -293,13 +324,28 @@ struct FolderStatus: View {
     }
 
     private func reload() async {
-        queue = await folder.queuedChanges()
-        guard folder.session != nil else { return }
+        queue = await vault.queuedChanges()
+        guard vault.session != nil else { return }
         do {
-            keys = try await folder.vaultKeys()
+            keys = try await vault.vaultKeys()
             keysError = nil
         } catch {
             keysError = "\(error)"
         }
+    }
+}
+
+/// How far the current file is: a light blue line, about an inch long, that fills dark blue
+/// from the left.
+struct FileProgressLine: View {
+    let fraction: Double
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(Color.blue.opacity(0.25))
+            Capsule().fill(Color.blue).frame(width: 72 * fraction)
+        }
+        .frame(width: 72, height: 4)
+        .animation(.linear(duration: 0.2), value: fraction)
     }
 }

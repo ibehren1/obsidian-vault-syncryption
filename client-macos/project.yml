@@ -1,6 +1,6 @@
 # XcodeGen spec for the app (and later the FSKit extension). Generate with `xcodegen` in
 # client-macos/; the .xcodeproj is not checked in.
-name: VaultSyncryption
+name: VaultSyncryptionClient
 options:
   bundleIdPrefix: com.behrenshome.syncryption
   deploymentTarget:
@@ -10,7 +10,7 @@ packages:
     path: .
 settings:
   base:
-    MARKETING_VERSION: "0.1.20"
+    MARKETING_VERSION: "0.1.30"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
     CODE_SIGN_IDENTITY: "-"
@@ -20,7 +20,7 @@ settings:
     Release:
       CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 targets:
-  VaultSyncryption:
+  VaultSyncryptionClient:
     type: application
     platform: macOS
     sources:
@@ -39,7 +39,7 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: Vault Syncryption
+        CFBundleDisplayName: Vault Syncryption Client
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSUIElement: true
@@ -58,7 +58,7 @@ targets:
     info:
       path: SyncryptionFinder/Info.plist
       properties:
-        CFBundleDisplayName: Vault Syncryption
+        CFBundleDisplayName: Vault Syncryption Client
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "26.0"
@@ -70,7 +70,7 @@ targets:
       path: SyncryptionFinder/SyncryptionFinder.entitlements
       properties:
         com.apple.security.app-sandbox: true
-        # Read folders.json, nothing else: the extension never touches the synced files.
+        # Read vaults.json, nothing else: the extension never touches the synced files.
         com.apple.security.temporary-exception.files.home-relative-path.read-only:
           - /Library/Application Support/Vault Syncryption/
     settings:

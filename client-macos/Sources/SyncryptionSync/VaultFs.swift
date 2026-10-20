@@ -12,7 +12,7 @@ public struct FileStat: Equatable, Sendable {
 }
 
 public struct ListedFile: Sendable {
-    /// Folder-relative, `/`-separated, as named on disk.
+    /// Relative to the listed folder, `/`-separated, as named on disk.
     public var path: String
     public var stat: FileStat
 }
@@ -103,7 +103,10 @@ public struct PlainFolderFs: VaultFs {
         guard let h = FileHandle(forReadingAtPath: full(path)) else { throw CocoaError(.fileReadNoSuchFile) }
         defer { try? h.close() }
         var s = SHA256Stream()
-        while let chunk = try h.read(upToCount: 1 << 20), !chunk.isEmpty { s.update(Bytes(chunk)) }
+        while let chunk = try h.read(upToCount: 1 << 20), !chunk.isEmpty {
+            try Task.checkCancellation()
+            s.update(Bytes(chunk))
+        }
         return s.finalize().hex
     }
 
@@ -204,6 +207,55 @@ public struct PlainFolderFs: VaultFs {
             dir = Self.split(dir).dir
         }
     }
+}
+
+public struct NotMapped: Error, CustomStringConvertible {
+    public let description = "This path isn't in a folder synced on this Mac."
+}
+
+/// A vault on the Mac: each top-level vault folder in `folders` is a folder on disk, which
+/// may be anywhere. Vault paths are `<folder>/<path in it>`; the root has no files.
+public struct MappedFs: VaultFs {
+    public let folders: [String: any VaultFs]
+
+    public init(folders: [String: any VaultFs]) { self.folders = folders }
+
+    /// Each folder on disk.
+    public init(roots: [String: URL]) { folders = roots.mapValues { PlainFolderFs(root: $0) } }
+
+    private func resolve(_ path: String) throws -> (fs: any VaultFs, rest: String) {
+        guard let slash = path.firstIndex(of: "/") else { throw NotMapped() }
+        let name = String(path[..<slash])
+        // By exact bytes, like every path here.
+        guard let fs = folders.first(where: { $0.key.utf8.elementsEqual(name.utf8) })?.value else { throw NotMapped() }
+        return (fs, String(path[path.index(after: slash)...]))
+    }
+
+    public func list(skip: (String) -> Bool) throws -> [ListedFile] {
+        var out: [ListedFile] = []
+        for (name, fs) in folders.sorted(by: { $0.key < $1.key }) where !skip(name) {
+            for f in try fs.list(skip: { skip(name + "/" + $0) }) {
+                out.append(ListedFile(path: name + "/" + f.path, stat: f.stat))
+            }
+        }
+        return out
+    }
+
+    public func stat(_ path: String) throws -> FileStat? {
+        guard let (fs, rest) = try? resolve(path) else { return nil }
+        return try fs.stat(rest)
+    }
+
+    public func read(_ path: String) throws -> Bytes { let r = try resolve(path); return try r.fs.read(r.rest) }
+    public func hash(_ path: String) throws -> String { let r = try resolve(path); return try r.fs.hash(r.rest) }
+
+    public func write(_ path: String, _ data: Bytes, mtime: Int, ctime: Int?) throws {
+        let r = try resolve(path)
+        try r.fs.write(r.rest, data, mtime: mtime, ctime: ctime)
+    }
+
+    public func beginWrite(_ path: String) throws -> any ChunkWriter { let r = try resolve(path); return try r.fs.beginWrite(r.rest) }
+    public func remove(_ path: String) throws { let r = try resolve(path); try r.fs.remove(r.rest) }
 }
 
 /// Files in memory, for tests.

@@ -20,6 +20,8 @@ public enum Objects {
         concat(Bytes(utf8: "syncryption/v1/chunk"), fileId, u32be(UInt32(index)))
     }
 
+    public static func deviceDomain(_ deviceId: String) -> Bytes { Bytes(utf8: "syncryption/v1/device") + Bytes(utf8: deviceId) }
+
     private static func header(_ epoch: Int) -> Bytes {
         precondition(epoch >= 1 && epoch <= Int(UInt32.max), "invalid epoch")
         return [formatVersion] + u32be(UInt32(epoch))
@@ -48,6 +50,28 @@ public enum Objects {
                                                  ad: h + domain)
         else { throw Failure("object failed to decrypt") }
         return plain
+    }
+
+    /// A device's metadata object (crypto.md 8.5), under `deviceKey(VDK[epoch], deviceId)`.
+    public static func sealDeviceMeta(vdk: Bytes, epoch: Int, deviceId: String, _ meta: DeviceMeta,
+                                      nonce: Bytes = Primitives.random(24)) throws(Failure) -> Bytes
+    {
+        let json: Data
+        do { json = try jsonEncoder.encode(meta) } catch { throw Failure("device metadata can't be encoded") }
+        let object = seal(fileKey: KDF.deviceKey(vdk: vdk, deviceId: deviceId), epoch: epoch, domain: deviceDomain(deviceId),
+                          Bytes(json), nonce: nonce)
+        guard object.count <= maxMetaSize else { throw Failure("device metadata too large") }
+        return object
+    }
+
+    /// Decrypt a device's metadata; `vdk` is the VDK of the object's epoch (`epoch(of:)`).
+    public static func openDeviceMeta(vdk: Bytes, deviceId: String, _ object: Bytes) throws(Failure) -> DeviceMeta {
+        guard object.count <= maxMetaSize else { throw Failure("device metadata too large") }
+        let plain = try open(fileKey: KDF.deviceKey(vdk: vdk, deviceId: deviceId), domain: deviceDomain(deviceId), object)
+        guard let meta = try? JSONDecoder().decode(DeviceMeta.self, from: Data(plain)), meta.v == 1 else {
+            throw Failure("device metadata has the wrong shape")
+        }
+        return meta
     }
 
     /// Blob id: `hex(SHA-256(object))`.
@@ -191,4 +215,30 @@ public struct FileMeta: Codable, Equatable, Sendable {
 
 func isHex64(_ s: String) -> Bool {
     s.utf8.count == 64 && s.utf8.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66) }
+}
+
+/// The plaintext of a device's metadata object (crypto.md 8.5).
+public struct DeviceMeta: Codable, Equatable, Sendable {
+    /// A top-level vault folder this device syncs, and the local folder it syncs with.
+    public struct Folder: Codable, Equatable, Sendable {
+        public var name: String
+        public var path: String
+        public init(name: String, path: String) {
+            self.name = name
+            self.path = path
+        }
+    }
+
+    public var v = 1
+    public var folders: [Folder]
+
+    public init(folders: [Folder]) { self.folders = folders }
+
+    private enum CodingKeys: String, CodingKey { case v, folders }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        v = try c.decode(Int.self, forKey: .v)
+        folders = try c.decodeIfPresent([Folder].self, forKey: .folders) ?? []
+    }
 }

@@ -7,10 +7,11 @@ import SyncryptionCrypto
 import SyncryptionStore
 import SyncryptionSync
 
-/// One synced folder at run time: connects to its vault, runs the engine on file events,
-/// on a timer and on long-poll wake-ups, and turns errors into a status for the menu.
+/// One vault at run time: connects to it, runs the engine over the vault folders this Mac
+/// syncs on file events, on a timer and on long-poll wake-ups, and turns errors into a status
+/// for the menu.
 @MainActor @Observable
-public final class FolderController: Identifiable {
+public final class VaultController: Identifiable {
     public enum Status: Equatable {
         case idle
         case connecting
@@ -30,12 +31,12 @@ public final class FolderController: Identifiable {
         case refused
         /// This key was removed from the vault.
         case revoked
-        /// The folder's key can't be read from the Keychain: `retry`, or `resetKey`.
+        /// The vault's key can't be read from the Keychain: `retry`, or `resetKey`.
         case keyProblem(String)
     }
 
     public nonisolated let id: UUID
-    public private(set) var config: FolderConfig
+    public private(set) var config: VaultConfig
     public private(set) var status: Status = .idle
     public private(set) var fileCount = 0
     /// The plaintext size of those files, in bytes.
@@ -52,15 +53,49 @@ public final class FolderController: Identifiable {
     public private(set) var pendingApprovals: [PendingDevice] = []
     /// Keys the server reports removed that this Mac didn't remove: Remove or Keep is the user's.
     public internal(set) var unconfirmedRemovals: [StaleKey] = []
-    /// This folder's public key and fingerprint, for the Encryption Key view.
+    /// This vault's public key on this Mac, for the Encryption Key view.
     public var publicKeyText: String { config.publicKey }
+    /// The vault's folders: every top-level folder with files, mapped here or on another
+    /// device, with each device's local folder.
+    public internal(set) var vaultFolders: [VaultFolder] = []
+    /// The other active devices of the vault, the columns of the folder table.
+    public internal(set) var otherDevices: [OtherDevice] = []
+    /// Folders this Mac maps but can't sync now (the local folder is missing), by name.
+    public private(set) var folderProblems: [String: String] = [:]
+    /// The file the running sync is receiving or uploading, with how far it is.
+    public struct FileProgress: Equatable, Sendable {
+        /// The vault path (folder/…), shown only on this Mac.
+        public let path: String
+        public let done: Int
+        public let total: Int
+        public var fraction: Double { total > 0 ? min(1, Double(done) / Double(total)) : 1 }
+    }
 
-    private let configs: ConfigStore
+    public private(set) var currentFile: FileProgress?
+    /// Folders with a file received or pushed in the running sync.
+    public private(set) var busyFolders: Set<String> = []
+    /// Folders the last finished sync covered: a folder just mapped or resumed isn't synced
+    /// until a sync with it finishes.
+    public private(set) var syncedFolders: Set<String> = []
+
+    let configs: ConfigStore
     private let keys: KeyStore
-    private let onConfigChange: (FolderConfig) -> Void
+    private let onConfigChange: (VaultConfig) -> Void
     private var api: ApiClient?
     private var seed: Bytes?
-    private var watcher: FolderWatcher?
+    private var watchers: [FolderWatcher] = []
+    /// This Mac's folder list as last stored on the server, and the epoch it was stored under.
+    struct Published: Equatable {
+        let epoch: Int
+        let folders: [DeviceMeta.Folder]
+    }
+
+    var published: Published?
+    var publishing = false
+    /// The last engine rebuild, so rebuilds run one after another.
+    var rebuild: Task<Void, Never>?
+    /// The folders the engine syncs.
+    private var engineFolders: [String] = []
     private var live: LiveLoop?
     private var connectTask: Task<Void, Never>?
     private var debounce: Task<Void, Never>?
@@ -78,8 +113,8 @@ public final class FolderController: Identifiable {
 
     let transport: @Sendable () -> any Transport
 
-    public init(config: FolderConfig, configs: ConfigStore, keys: KeyStore, transport: @escaping @Sendable () -> any Transport,
-                onConfigChange: @escaping (FolderConfig) -> Void)
+    public init(config: VaultConfig, configs: ConfigStore, keys: KeyStore, transport: @escaping @Sendable () -> any Transport,
+                onConfigChange: @escaping (VaultConfig) -> Void)
     {
         self.transport = transport
         id = config.id
@@ -91,25 +126,20 @@ public final class FolderController: Identifiable {
 
     // MARK: Lifecycle
 
-    /// Show or hide the synced-folder icon in Finder.
-    public func setShowsFolderIcon(_ on: Bool) {
-        config.showsFolderIcon = on
-        onConfigChange(config)
-        updateFolderIcon()
-    }
-
-    /// Put the icon on the folder (or take it off) to match the setting.
-    public func updateFolderIcon() {
-        if config.showsFolderIcon {
-            if !FolderIcon.isApplied(to: config.url) { FolderIcon.apply(to: config.url) }
-        } else if FolderIcon.isApplied(to: config.url) {
-            FolderIcon.remove(from: config.url)
+    /// Put the icon on each folder (or take it off) to match its setting.
+    public func updateFolderIcons() {
+        for f in config.folders where FileManager.default.fileExists(atPath: f.path) {
+            if f.showsFolderIcon {
+                if !FolderIcon.isApplied(to: f.url) { FolderIcon.apply(to: f.url) }
+            } else if FolderIcon.isApplied(to: f.url) {
+                FolderIcon.remove(from: f.url)
+            }
         }
     }
 
     /// Connect and start syncing, unless paused.
     public func start() {
-        updateFolderIcon()
+        updateFolderIcons()
         guard !config.paused else {
             status = .paused
             return
@@ -119,15 +149,16 @@ public final class FolderController: Identifiable {
         connectTask = Task { await self.connectAndRun() }
     }
 
-    /// Stop syncing. A running sync stops at its next write or commit.
+    /// Stop syncing. A running sync is cancelled now, with its requests in flight.
     public func stop() {
         connectTask?.cancel()
         connectTask = nil
         debounce?.cancel()
         fallback?.cancel()
         retry?.cancel()
-        watcher?.stop()
-        watcher = nil
+        for w in watchers { w.stop() }
+        watchers = []
+        published = nil
         pathMonitor?.cancel()
         pathMonitor = nil
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
@@ -147,6 +178,8 @@ public final class FolderController: Identifiable {
         onConfigChange(config)
         if paused {
             stop()
+            currentFile = nil
+            busyFolders = []
             status = .paused
         } else {
             status = .idle
@@ -154,13 +187,47 @@ public final class FolderController: Identifiable {
         }
     }
 
-    public func updateExclude(_ text: String) {
-        config.exclude = text
+    /// Every vault linked on this Mac, to check a new folder against (set by the app model).
+    public var allVaults: () -> [VaultConfig] = { [] }
+
+    /// Save folders without reconnecting: for settings the engine doesn't use.
+    func setFoldersWithoutRestart(_ folders: [FolderMapping]) {
+        config.folders = folders
         onConfigChange(config)
-        if session != nil {
-            stop()
-            start()
+    }
+
+    /// Save a change to the folders and sync with it: the running sync is cancelled now (a
+    /// folder just paused or unmapped gets nothing more), and the engine is rebuilt over the
+    /// new set, on the same session (no new login).
+    func changeFolders(_ change: (inout [FolderMapping]) -> Void) {
+        change(&config.folders)
+        onConfigChange(config)
+        updateFolderIcons()
+        guard let session, !config.paused else {
+            if !config.paused && connectTask == nil { restart() }
+            return
         }
+        let old = engine
+        engine = nil
+        for w in watchers { w.stop() }
+        watchers = []
+        let previous = rebuild
+        let next = Task {
+            await old?.close()
+            await previous?.value
+            await buildEngine(session)
+        }
+        rebuild = next
+        Task {
+            await next.value
+            await runSync()
+        }
+    }
+
+    private func restart() {
+        stop()
+        status = .idle
+        start()
     }
 
     /// The shared secret from the user, or nil if they cancelled.
@@ -218,8 +285,8 @@ public final class FolderController: Identifiable {
     // MARK: Connecting
 
     private final class Callbacks: ConnectCallbacks, @unchecked Sendable {
-        weak var owner: FolderController?
-        init(_ owner: FolderController) { self.owner = owner }
+        weak var owner: VaultController?
+        init(_ owner: VaultController) { self.owner = owner }
 
         func askSharedSecret() async -> String? {
             await withCheckedContinuation { c in
@@ -242,12 +309,12 @@ public final class FolderController: Identifiable {
             // Off the main thread: macOS may ask the user to allow access first.
             let keys = keys, slot = config.keySlot
             do { loaded = try await Task.detached { try keys.load(slot) }.value } catch {
-                status = .keyProblem("This Mac's Keychain refused to give the app this folder's encryption key (\(error)). Choose Try Again and allow access, or create a new key, which pairs this Mac with the vault again.")
+                status = .keyProblem("This Mac's Keychain refused to give the app this vault's encryption key (\(error)). Choose Try Again and allow access, or create a new key, which pairs this Mac with the vault again.")
                 connectTask = nil
                 return
             }
             guard let key = loaded else {
-                status = .keyProblem("This folder's encryption key isn't in the Keychain. Create a new key to pair this Mac with the vault again.")
+                status = .keyProblem("This vault's encryption key isn't in the Keychain. Create a new key to pair this Mac with the vault again.")
                 connectTask = nil
                 return
             }
@@ -271,26 +338,30 @@ public final class FolderController: Identifiable {
         connectTask = nil
     }
 
+    /// The folders to sync now: mapped, not paused, and there on disk. A missing folder isn't
+    /// synced (its files would look deleted) and shows as a problem.
+    private func activeFolders() -> [FolderMapping] {
+        var problems: [String: String] = [:]
+        let active = config.folders.filter { f in
+            guard !f.paused else { return false }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: f.path, isDirectory: &isDir), isDir.boolValue else {
+                problems[f.name] = "The folder \(f.path) isn't there. Sync of \(f.name) resumes when it is back (or unmap it)."
+                return false
+            }
+            return true
+        }
+        folderProblems = problems
+        return active
+    }
+
     private func run(_ session: VaultSession) {
         self.session = session
         status = .syncing("Starting")
-        let config = config
-        let id = Task { await session.deviceId() }
         Task {
-            let deviceId = await id.value
-            var o = EngineOptions(api: session.api, vaultId: session.vault.id, cipher: session.cipher, fs: PlainFolderFs(root: config.url),
-                                  store: session.store, deviceId: deviceId, deviceName: config.deviceName,
-                                  filter: PathFilter(exclude: PathFilter.parseExcludes(config.exclude)), keyring: session)
-            o.onWarning = { [weak self] w in Task { @MainActor in self?.warn(w) } }
-            o.onProgress = { [weak self] p in Task { @MainActor in self?.progress(p) } }
-            let engine = SyncEngine(o)
+            await buildEngine(session)
             guard self.session === session else { return }
-            self.engine = engine
             Task { await self.finishRemovals(session) }
-
-            watcher = FolderWatcher(root: config.url) { [weak self] paths in
-                Task { @MainActor in self?.noteChanges(paths) }
-            }
             let store = session.store
             let live = LiveLoop(LiveLoop.Options(
                 api: session.api, vaultId: session.vault.id,
@@ -308,6 +379,34 @@ public final class FolderController: Identifiable {
                 }
             }
             await runSync()
+        }
+    }
+
+    /// The engine and file watchers over the folders to sync now. A running sync of the
+    /// previous engine is cancelled first.
+    private func buildEngine(_ session: VaultSession) async {
+        if let engine { await engine.close() }
+        engine = nil
+        for w in watchers { w.stop() }
+        watchers = []
+        let config = config
+        let active = activeFolders()
+        let deviceId = await session.deviceId()
+        let fs = MappedFs(roots: Dictionary(active.map { ($0.name, $0.url) }, uniquingKeysWith: { a, _ in a }))
+        let filter = PathFilter(folders: Dictionary(active.map { ($0.name, PathFilter.parseExcludes($0.exclude)) },
+                                                    uniquingKeysWith: { a, _ in a }))
+        var o = EngineOptions(api: session.api, vaultId: session.vault.id, cipher: session.cipher, fs: fs,
+                              store: session.store, deviceId: deviceId, deviceName: config.deviceName,
+                              filter: filter, keyring: session)
+        o.onWarning = { [weak self] w in Task { @MainActor in self?.warn(w) } }
+        o.onProgress = { [weak self] p in Task { @MainActor in self?.progress(p) } }
+        guard self.session === session else { return }
+        engine = SyncEngine(o)
+        engineFolders = active.map(\.name)
+        watchers = active.map { f in
+            FolderWatcher(root: f.url) { [weak self] paths in
+                Task { @MainActor in self?.noteChanges(paths.map { f.name + "/" + $0 }) }
+            }
         }
     }
 
@@ -358,17 +457,32 @@ public final class FolderController: Identifiable {
     }
 
     private func runSync() async {
+        // A missing folder that is back (or one that went missing) changes what to sync.
+        if let session, engine != nil, activeFolders().map(\.name) != engineFolders { await buildEngine(session) }
         guard let engine else { return }
+        let folders = engineFolders
+        defer {
+            if self.engine === engine {
+                busyFolders = []
+                currentFile = nil
+            }
+        }
         do {
             let report = try await engine.sync()
+            guard self.engine === engine else { return }
+            syncedFolders = Set(folders)
             lastReport = report
             lastSync = Date()
             status = .synced(Date())
+            await publishFolders()
             await refreshCounts()
             await refreshPending()
+            await refreshFolders()
         } catch is SyncStopped {
         } catch is CancellationError {
         } catch {
+            // Stopped (paused, or its folders changed) while it ran: not an error.
+            guard self.engine === engine else { return }
             handle(error)
             await refreshCounts()
         }
@@ -397,8 +511,8 @@ public final class FolderController: Identifiable {
         if !new.isEmpty { onPendingApproval(self, new) }
     }
 
-    /// Called when keys start waiting for approval in this folder's vault.
-    public var onPendingApproval: (FolderController, [PendingDevice]) -> Void = { _, _ in }
+    /// Called when keys start waiting for approval in this vault.
+    public var onPendingApproval: (VaultController, [PendingDevice]) -> Void = { _, _ in }
 
     private func refreshCounts() async {
         guard let engine else { return }
@@ -410,13 +524,28 @@ public final class FolderController: Identifiable {
     private func progress(_ p: SyncProgress) {
         guard session != nil else { return }
         switch p {
-        case .pull(let done, _, let path): status = .syncing(path == nil ? "Receiving (\(done))" : "Receiving \(done + 1)")
+        case .pull(let done, _, let path):
+            status = .syncing(path == nil ? "Receiving (\(done))" : "Receiving \(done + 1)")
+            if let path { noteBusy(path) }
         case .scan(let done, let total): status = .syncing("Checking files \(done + 1) of \(total)")
-        case .push(let done, let total): status = .syncing("Uploading \(done + 1) of \(total)")
+        case .push(let done, let total, let path):
+            status = .syncing("Uploading \(done + 1) of \(total)")
+            noteBusy(path)
+        case .file(let path, let done, let total):
+            // Late events of a sync that has finished are dropped.
+            guard case .syncing = status else { return }
+            currentFile = FileProgress(path: path, done: done, total: total)
+            noteBusy(path)
         }
     }
 
-    private func warn(_ w: String) {
+    private func noteBusy(_ path: String) {
+        guard let slash = path.firstIndex(of: "/") else { return }
+        let name = String(path[..<slash])
+        if !busyFolders.contains(name) { busyFolders.insert(name) }
+    }
+
+    func warn(_ w: String) {
         warnings.append(w)
         if warnings.count > 50 { warnings.removeFirst(warnings.count - 50) }
     }

@@ -65,6 +65,18 @@ public struct VaultCipher: Sendable {
         return ContentOpener(cipher: self, fileId: id, meta: meta)
     }
 
+    /// A device's metadata object (crypto.md 8.5), under the current epoch.
+    public func sealDeviceMeta(deviceId: String, _ meta: DeviceMeta) throws -> Bytes {
+        let k = keyring()
+        return try Objects.sealDeviceMeta(vdk: try k.epochKey(k.currentEpoch), epoch: k.currentEpoch, deviceId: deviceId, meta)
+    }
+
+    /// Decrypt a device's metadata object (b64u, as in the device list).
+    public func openDeviceMeta(deviceId: String, _ meta: String) throws -> DeviceMeta {
+        guard let object = Bytes(b64u: meta) else { throw Objects.Failure("not base64url") }
+        return try Objects.openDeviceMeta(vdk: try keyring().epochKey(try Objects.epoch(of: object)), deviceId: deviceId, object)
+    }
+
     /// Encrypt a file, or a deletion when `data` is nil, under the current epoch.
     public func seal(path: String, data: Bytes?, mtime: Int, ctime: Int, device: String) throws -> Sealed {
         let k = keyring()

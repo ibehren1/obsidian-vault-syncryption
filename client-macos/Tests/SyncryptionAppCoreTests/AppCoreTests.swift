@@ -36,32 +36,39 @@ enum TestKeychain {
         #expect(slot != KeyStore.slot(origin: "https://sync.example.com", username: "alice", vaultName: "Work"))
     }
 
-    @Test func savesAndLoadsFolders() throws {
+    @Test func savesAndLoadsVaults() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "cfg-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = ConfigStore(directory: dir)
         #expect(try store.load().isEmpty)
-        let f = FolderConfig(path: "/tmp/x", endpoint: "https://s.example.com", username: "u", vaultName: "V", deviceName: "Mac")
-        try store.save([f])
-        #expect(try store.load() == [f])
+        let v = VaultConfig(endpoint: "https://s.example.com", username: "u", vaultName: "V", deviceName: "Mac",
+                            folders: [FolderMapping(name: "Notes", path: "/tmp/Notes", exclude: "drafts", paused: true)])
+        try store.save([v])
+        #expect(try store.load() == [v])
+        #expect(v.folder("Notes")?.paused == true && v.folder("notes") == nil)
     }
 
-    @Test func olderFolderListsGetTheFolderIcon() throws {
-        let json = #"[{"id":"281B21F2-AE50-4EBB-A71E-7F72894138CF","path":"/tmp/x","endpoint":"https://s.example.com","username":"u","vaultName":"V","deviceName":"Mac","publicKey":"","exclude":"","paused":false}]"#
-        let f = try JSONDecoder().decode([FolderConfig].self, from: Data(json.utf8))
-        #expect(f.first?.showsFolderIcon == true)
+    @Test func refusesTheSameVaultTwice() throws {
+        let a = VaultConfig(endpoint: "https://s.example.com", username: "u", vaultName: "V", deviceName: "Mac")
+        let same = VaultConfig(endpoint: "https://s.example.com", username: "u", vaultName: "V", deviceName: "Other")
+        let other = VaultConfig(endpoint: "https://s.example.com", username: "u", vaultName: "W", deviceName: "Mac")
+        #expect(throws: ConfigStore.Invalid.self) { try ConfigStore.check(same, against: [a]) }
+        try ConfigStore.check(other, against: [a])
     }
 
-    @Test func refusesTheSameVaultTwiceAndNestedFolders() throws {
-        let a = FolderConfig(path: "/Users/me/Notes", endpoint: "https://s.example.com", username: "u", vaultName: "V", deviceName: "Mac")
-        let sameVault = FolderConfig(path: "/Users/me/Other", endpoint: "https://s.example.com", username: "u", vaultName: "V",
-                                     deviceName: "Mac")
-        let nested = FolderConfig(path: "/Users/me/Notes/Sub", endpoint: "https://s.example.com", username: "u", vaultName: "W",
-                                  deviceName: "Mac")
-        let fine = FolderConfig(path: "/Users/me/Notes2", endpoint: "https://s.example.com", username: "u", vaultName: "W", deviceName: "Mac")
-        #expect(throws: ConfigStore.Invalid.self) { try ConfigStore.check(sameVault, against: [a]) }
-        #expect(throws: ConfigStore.Invalid.self) { try ConfigStore.check(nested, against: [a]) }
-        try ConfigStore.check(fine, against: [a])
+    @Test func refusesDuplicateNamesAndNestedFolders() throws {
+        let vaults = [VaultConfig(endpoint: "https://s.example.com", username: "u", vaultName: "V", deviceName: "Mac",
+                                  folders: [FolderMapping(name: "Notes", path: "/Users/me/Notes")])]
+        func check(_ name: String, _ path: String, taken: [String] = ["Notes", "Caf\u{e9}"]) throws {
+            try ConfigStore.checkFolder(name: name, path: path, taken: taken, vaults: vaults)
+        }
+        for (name, path) in [("notes", "/Users/me/x/notes"), ("Cafe\u{301}", "/x/Cafe\u{301}"), ("CAF\u{c9}", "/x/CAF\u{c9}"),
+                             ("Sub", "/Users/me/Notes/Sub"), ("me", "/Users/me"), (".git", "/x/.git")] {
+            #expect(throws: ConfigStore.Invalid.self, "\(name)") { try check(name, path) }
+        }
+        try check("Notes2", "/Users/me/Notes2")
+        // Mapping a vault folder that exists: only this Mac's own folders count as taken.
+        try check("Code", "/Users/me/remote/Code", taken: ["Notes"])
     }
 
     @Test func keychainRoundTrip() throws {
@@ -80,7 +87,7 @@ enum TestKeychain {
 @MainActor
 @Suite(.enabled(if: TestBackend.available, "needs uv to start the backend"))
 struct AppModelTests {
-    @Test func addsAFolderCreatesTheVaultAndSyncsIt() async throws {
+    @Test func addsAVaultCreatesItThenAddsAFolder() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "app-\(UUID().uuidString)")
         let folder = dir.appending(path: "Notes")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -88,24 +95,59 @@ struct AppModelTests {
         try Data("hello\n".utf8).write(to: folder.appending(path: "a.md"))
         let keys = KeyStore(service: "Vault Syncryption tests", keychain: TestKeychain.shared)
         let model = AppModel(configs: ConfigStore(directory: dir.appending(path: "support")), keys: keys, transport: { TestBackend.transport() })
-        let c = try model.addFolder(path: folder.path, endpoint: try TestBackend.url()!, username: TestBackend.uniqueName("app"),
-                                    vaultName: TestBackend.uniqueName("Vault "), deviceName: "Test Mac")
+        let c = try model.addVault(endpoint: try TestBackend.url()!, username: TestBackend.uniqueName("app"),
+                                   vaultName: TestBackend.uniqueName("Vault "), deviceName: "Test Mac")
         defer { try? keys.delete(c.config.keySlot) }
-        for _ in 0..<200 where c.status != .needsSecret { try await Task.sleep(for: .milliseconds(25)) }
-        #expect(c.status == .needsSecret)
+        try await waitFor("the secret prompt") { c.status == .needsSecret }
         #expect(model.menuBarKind == .error)
         c.provideSecret(TestBackend.sharedSecret)
-        for _ in 0..<400 where c.fileCount != 1 { try await Task.sleep(for: .milliseconds(25)) }
-        #expect(c.fileCount == 1)
-        guard case .synced = c.status else { Issue.record("status \(c.status)"); return }
-        #expect(model.menuBarKind == .ok)
+        try await waitFor("synced") { if case .synced = c.status { true } else { false } }
+        #expect(c.fileCount == 0 && c.vaultFolders.isEmpty)
+
+        try c.addFolder(path: folder.path)
+        try await waitFor("the folder synced") { c.fileCount == 1 }
+        // The upload wakes the long-poll, so another short sync may still be running.
+        try await waitFor("everything synced") { model.menuBarKind == .ok }
+        try await waitFor("the folder listed") { c.vaultFolders.map(\.name) == ["Notes"] && c.vaultFolders.first?.files == 1 }
+        #expect(c.vaultFolders.first?.mapping?.path == folder.path && c.vaultFolders.first?.files == 1)
+        #expect(c.folderState("Notes") == .active)
+        #expect(c.folderStatus("Notes")?.name == "Synced")
+        c.setPaused(true)
+        #expect(c.folderStatus("Notes")?.name == "Paused" && model.overallName == "Paused")
+        c.setPaused(false)
+        try await waitFor("synced again") { c.folderStatus("Notes")?.name == "Synced" }
+        let other = dir.appending(path: "x/notes")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try c.addFolder(path: other.path) }
         #expect(throws: (any Error).self) {
-            try model.addFolder(path: folder.path, endpoint: try TestBackend.url()!, username: c.config.username,
-                                vaultName: c.config.vaultName, deviceName: "Test Mac")
+            try model.addVault(endpoint: try TestBackend.url()!, username: c.config.username, vaultName: c.config.vaultName,
+                               deviceName: "Test Mac")
         }
-        await model.removeFolder(c)
-        #expect(model.folders.isEmpty)
+
+        // A missing folder isn't synced (its files would look deleted) and needs attention.
+        let moved = dir.appending(path: "Moved")
+        try FileManager.default.moveItem(at: folder, to: moved)
+        c.setFolderPaused("Notes", false)  // reconnects with the folder gone
+        try await waitFor("the missing folder noticed") { c.folderState("Notes") == .missing }
+        #expect(model.hasProblem)
+        try FileManager.default.moveItem(at: moved, to: folder)
+        c.setFolderPaused("Notes", true)
+        #expect(c.folderState("Notes") == .paused && c.folderStatus("Notes")?.name == "Paused")
+
+        // Still mapped here: it can't be deleted from the vault. Unmapped, it can.
+        try await waitFor("connected") { c.engine != nil }
+        await #expect(throws: (any Error).self) { try await c.deleteFromVault("Notes") }
+        try await c.unmapFolder("Notes", keepFiles: true)
+        #expect(c.config.folders.isEmpty)
+        try await waitFor("unmapped") { c.vaultFolders.first?.isUnmapped == true }
+        #expect(try await c.deleteFromVault("Notes") == 1)
+        #expect(c.vaultFolders.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "a.md").path))
+
+        await model.removeVault(c)
+        #expect(model.vaults.isEmpty)
         #expect(try keys.load(c.config.keySlot) == nil)
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "a.md").path))
     }
 }
 
@@ -130,10 +172,12 @@ struct TwoMacsTests {
         let user = TestBackend.uniqueName("mac"), vault = TestBackend.uniqueName("Vault ")
 
         try Data("from A\n".utf8).write(to: fa.appending(path: "a.md"))
-        let ca = try a.addFolder(path: fa.path, endpoint: url, username: user, vaultName: vault, deviceName: "Mac A")
+        let ca = try a.addVault(endpoint: url, username: user, vaultName: vault, deviceName: "Mac A")
         defer { try? keys.delete(ca.config.keySlot) }
         try await waitFor("A asks for the secret") { ca.status == .needsSecret }
         ca.provideSecret(TestBackend.sharedSecret)
+        try await waitFor("A connected") { if case .synced = ca.status { true } else { false } }
+        try ca.addFolder(path: fa.path)
         try await waitFor("A synced") { ca.fileCount == 1 }
 
         // B's key is in another Keychain slot only if its endpoint differs; same vault on two
@@ -141,7 +185,7 @@ struct TwoMacsTests {
         let keysB = KeyStore(service: "Vault Syncryption tests B", keychain: TestKeychain.shared)
         let b2 = AppModel(configs: ConfigStore(directory: dir.appending(path: "supportB2")), keys: keysB, transport: { TestBackend.transport() })
         _ = b
-        let cb = try b2.addFolder(path: fb.path, endpoint: url, username: user, vaultName: vault, deviceName: "Mac B")
+        let cb = try b2.addVault(endpoint: url, username: user, vaultName: vault, deviceName: "Mac B")
         defer { try? keysB.delete(cb.config.keySlot) }
         try await waitFor("B pairing") { if case .pairing = cb.status { true } else { false } }
         guard case .pairing(let code, let canRecover) = cb.status else { return }
@@ -153,8 +197,18 @@ struct TwoMacsTests {
         let p = try #require(ca.pendingApprovals.first)
         #expect(p.code == code && p.name == "Mac B")
         try await ca.approve(p, remoteOnly: false)
+        // B sees A's folder and where A keeps it, and maps it under another parent.
+        try await waitFor("B sees the folder") { cb.vaultFolders.map(\.name) == ["A"] }
+        let aId = try #require(await ca.deviceId())
+        #expect(cb.vaultFolders.first?.mapping == nil && cb.vaultFolders.first?.elsewhere == [aId: fa.path], "\(cb.vaultFolders)")
+        #expect(cb.otherDevices.map(\.name) == ["Mac A"])
+        try cb.mapFolder("A", parent: fb.path)
         try await waitFor("B synced") { cb.fileCount == 1 }
-        #expect(try String(contentsOf: fb.appending(path: "a.md"), encoding: .utf8) == "from A\n")
+        let fbA = fb.appending(path: "A")
+        #expect(try String(contentsOf: fbA.appending(path: "a.md"), encoding: .utf8) == "from A\n")
+        ca.syncNow()
+        let bId0 = try #require(await cb.deviceId())
+        try await waitFor("A sees B's mapping") { ca.vaultFolders.first?.elsewhere[bId0] == fbA.path }
 
         // Devices view.
         let devices = try await ca.vaultKeys()
@@ -162,16 +216,16 @@ struct TwoMacsTests {
         #expect(devices.first { $0.isThisMac }?.name == "Mac A")
 
         // B edits; A gets it through the long-poll or the next sync.
-        try Data("edited on B\n".utf8).write(to: fb.appending(path: "a.md"))
+        try Data("edited on B\n".utf8).write(to: fbA.appending(path: "a.md"))
         cb.syncNow()
         ca.syncNow()
         try await waitFor("A received") { (try? String(contentsOf: fa.appending(path: "a.md"), encoding: .utf8)) == "edited on B\n" }
 
         // History and restore.
-        #expect(try await ca.syncedPaths() == ["a.md"])
-        let history = try await ca.history("a.md")
+        #expect(try await ca.syncedPaths() == ["A/a.md"])
+        let history = try await ca.history("A/a.md")
         #expect(history.entries.count == 2)
-        try await ca.restore("a.md", rev: history.entries[1].rev)
+        try await ca.restore("A/a.md", rev: history.entries[1].rev)
         #expect(try String(contentsOf: fa.appending(path: "a.md"), encoding: .utf8) == "from A\n")
         #expect(await ca.deviceNames().values.sorted() == ["Mac A", "Mac B"])
 
@@ -196,6 +250,6 @@ struct TwoMacsTests {
         cb.syncNow()
         try await waitFor("B revoked") { cb.status == .revoked }
         if cb.status != .revoked { Issue.record("B status: \(cb.status)") }
-        await a.removeFolder(ca)
+        await a.removeVault(ca)
     }
 }

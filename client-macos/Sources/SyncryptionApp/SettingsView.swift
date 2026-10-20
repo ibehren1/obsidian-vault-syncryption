@@ -5,18 +5,18 @@ import SyncryptionCrypto
 import SyncryptionSync
 
 enum SettingsTab: Hashable {
-    case general, key, devices, recovery, history
+    case folders, general, key, devices, recovery, history
 }
 
-/// Which folder and tab the Settings window shows, so the menu can open it at a place.
+/// Which vault and tab the Settings window shows, so the menu can open it at a place.
 @MainActor @Observable
 final class SettingsSelection {
     static let shared = SettingsSelection()
-    var folder: UUID?
-    var tab: SettingsTab = .general
+    var vault: UUID?
+    var tab: SettingsTab = .folders
 
-    func select(_ folder: UUID, tab: SettingsTab) {
-        self.folder = folder
+    func select(_ vault: UUID, tab: SettingsTab) {
+        self.vault = vault
         self.tab = tab
     }
 }
@@ -27,12 +27,12 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(model.folders, selection: $selection.folder) { f in
+            List(model.vaults, selection: $selection.vault) { f in
                 HStack(spacing: 8) {
-                    Image(systemName: "folder.fill").foregroundStyle(Color.accentColor.opacity(0.85))
+                    Image(systemName: "lock.rotation").foregroundStyle(Color.accentColor.opacity(0.85))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(f.config.title)
-                        Text(f.config.vaultName).font(.caption).foregroundStyle(.secondary)
+                        Text(plural(f.config.folders.count, "folder")).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     StatusDot(kind: f.statusKind, size: 7)
@@ -42,19 +42,21 @@ struct SettingsView: View {
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 210)
         } detail: {
-            if let f = model.folders.first(where: { $0.id == selection.folder }) ?? model.folders.first {
+            if let f = model.vaults.first(where: { $0.id == selection.vault }) ?? model.vaults.first {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
                         Logo(size: 36)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(f.config.title).font(.title3.weight(.semibold))
-                            Text("\(f.config.vaultName) · \(host(f.config.endpoint))").font(.callout).foregroundStyle(.secondary)
+                            Text("\(host(f.config.endpoint)) · \(f.config.username) · this Mac is “\(f.config.deviceName)”")
+                                .font(.callout).foregroundStyle(.secondary)
                         }
-                        StatePill(text: f.statusName, kind: f.statusKind)
+                        VaultPausePill(vault: f)
                         Spacer()
                     }
                     .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 12)
                     Picker("", selection: $selection.tab) {
+                        Text("Folders").tag(SettingsTab.folders)
                         Text("General").tag(SettingsTab.general)
                         Text("Encryption Key").tag(SettingsTab.key)
                         Text("Devices").tag(SettingsTab.devices)
@@ -65,11 +67,12 @@ struct SettingsView: View {
                     Divider()
                     Group {
                         switch selection.tab {
-                        case .general: GeneralTab(folder: f, model: model)
-                        case .key: KeyTab(folder: f)
-                        case .devices: DevicesTab(folder: f).padding(20)
-                        case .recovery: RecoveryTab(folder: f)
-                        case .history: HistoryTab(folder: f).padding(20)
+                        case .folders: FoldersTab(vault: f).padding(20)
+                        case .general: GeneralTab(vault: f, model: model)
+                        case .key: KeyTab(vault: f)
+                        case .devices: DevicesTab(vault: f).padding(20)
+                        case .recovery: RecoveryTab(vault: f)
+                        case .history: HistoryTab(vault: f).padding(20)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -78,11 +81,11 @@ struct SettingsView: View {
             } else {
                 VStack(spacing: 12) {
                     Logo(size: 56)
-                    Text("No folders yet. Add one from the menu bar.").foregroundStyle(.secondary)
+                    Text("No vaults yet. Add one from the menu bar.").foregroundStyle(.secondary)
                 }
             }
         }
-        .frame(minWidth: 800, minHeight: 560)
+        .frame(minWidth: 900, minHeight: 560)
     }
 }
 
@@ -95,85 +98,57 @@ struct ErrorText: View {
 }
 
 struct GeneralTab: View {
-    let folder: FolderController
+    let vault: VaultController
     let model: AppModel
-    @State private var exclude = ""
-    @State private var confirmRemove = false
-    @State private var finderExtensionOn = true
 
     var body: some View {
         Form {
             Section("Status") {
-                Label(folder.statusText, systemImage: folder.statusSymbol).fixedSize(horizontal: false, vertical: true)
-                StatusActions(folder: folder, open: { SettingsSelection.shared.tab = $0 })
-                if let r = folder.lastReport, folder.lastSync != nil {
+                Label(vault.statusText, systemImage: vault.statusSymbol).fixedSize(horizontal: false, vertical: true)
+                StatusActions(vault: vault, open: { SettingsSelection.shared.tab = $0 })
+                if let r = vault.lastReport, vault.lastSync != nil {
                     Text("Last sync: \(r.pushed) sent, \(r.pulled) received, \(r.merged) merged, \(r.conflicts.count) conflict copies")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("Connection") {
-                LabeledContent("Folder") {
-                    HStack {
-                        Text(folder.config.path).textSelection(.enabled)
-                        Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([folder.config.url]) }
-                    }
-                }
-                LabeledContent("Server", value: folder.config.endpoint)
-                LabeledContent("Username", value: folder.config.username)
-                LabeledContent("Vault", value: folder.config.vaultName)
-                LabeledContent("Device name", value: folder.config.deviceName)
+                LabeledContent("Server", value: vault.config.endpoint)
+                LabeledContent("Username", value: vault.config.username)
+                LabeledContent("Vault", value: vault.config.vaultName)
+                LabeledContent("Device name", value: vault.config.deviceName)
             }
-            Section {
-                TextEditor(text: $exclude).font(.body.monospaced()).frame(minHeight: 80)
-                HStack {
-                    Spacer()
-                    Button("Save") { folder.updateExclude(exclude) }.disabled(exclude == folder.config.exclude)
-                }
-            } header: {
-                Text("Exclude list")
-            } footer: {
-                Text("One pattern per line, relative to the folder. `*` and `?` match within a name, `**` across folders; a pattern also excludes everything inside it. Lines starting with # are comments. Excluded files stay where they are, here and on other devices.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if !folder.warnings.isEmpty {
+            if !vault.warnings.isEmpty {
                 Section("Recent problems") {
-                    ForEach(Array(folder.warnings.suffix(10).enumerated()), id: \.offset) { Text($0.element).font(.caption) }
+                    ForEach(Array(vault.warnings.suffix(10).enumerated()), id: \.offset) { Text($0.element).font(.caption) }
                 }
             }
             Section {
-                Toggle("Show the Vault Syncryption icon on the folder in Finder",
-                       isOn: Binding(get: { folder.config.showsFolderIcon }, set: { folder.setShowsFolderIcon($0) }))
-                if folder.config.showsFolderIcon && !finderExtensionOn {
-                    HStack {
-                        Text("Finder's sidebar shows the icon only with the Vault Syncryption Finder extension on.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Finder Extensions…") { FinderExtension.showSettings() }
-                    }
-                }
-                Toggle("Paused", isOn: Binding(get: { folder.config.paused }, set: { folder.setPaused($0) }))
-                Button("Remove Folder…", role: .destructive) { confirmRemove = true }
+                Toggle("Pause the whole vault", isOn: Binding(get: { vault.config.paused }, set: { vault.setPaused($0) }))
+                Button("Remove Vault from This Mac…", role: .destructive) { remove() }
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            exclude = folder.config.exclude
-            finderExtensionOn = FinderExtension.isEnabled
+    }
+
+    private func remove() {
+        let alert = NSAlert()
+        alert.messageText = "Remove \(vault.config.vaultName) from this Mac?"
+        alert.informativeText = "This Mac's key is removed from the vault and from the Keychain, and every folder stops syncing here. The vault keeps its files on the server and on other devices. Keep this Mac's folders, or move them to the Trash?"
+        alert.addButton(withTitle: "Keep the Files")
+        alert.addButton(withTitle: "Move Folders to Trash")
+        alert.addButton(withTitle: "Cancel")
+        let keep: Bool
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: keep = true
+        case .alertSecondButtonReturn: keep = false
+        default: return
         }
-        // Back from System Settings.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            finderExtensionOn = FinderExtension.isEnabled
-        }
-        .confirmationDialog("Stop syncing \(folder.config.title)?", isPresented: $confirmRemove) {
-            Button("Remove Folder", role: .destructive) { Task { await model.removeFolder(folder) } }
-        } message: {
-            Text("This Mac's key is removed from the vault and from the Keychain. The files stay in the folder, and the vault keeps them on the server.")
-        }
+        Task { await model.removeVault(vault, keepFiles: keep) }
     }
 }
 
 struct KeyTab: View {
-    let folder: FolderController
+    let vault: VaultController
     @State private var confirmReplace = false
     @State private var busy = false
     @State private var error: String?
@@ -181,12 +156,12 @@ struct KeyTab: View {
 
     var body: some View {
         Form {
-            Section("This Mac's encryption key for \(folder.config.vaultName)") {
-                KeySummary(folder: folder)
-                Text(folder.config.publicKey).font(.caption.monospaced()).textSelection(.enabled).foregroundStyle(.secondary)
+            Section("This Mac's encryption key for \(vault.config.vaultName)") {
+                KeySummary(vault: vault)
+                Text(vault.config.publicKey).font(.caption.monospaced()).textSelection(.enabled).foregroundStyle(.secondary)
             }
             Section {
-                Button("Replace Key…") { confirmReplace = true }.disabled(folder.session == nil || busy)
+                Button("Replace Key…") { confirmReplace = true }.disabled(vault.session == nil || busy)
                 if busy { ProgressView().controlSize(.small) }
                 if let done { Text(done).font(.callout) }
                 ErrorText(text: error)
@@ -205,7 +180,7 @@ struct KeyTab: View {
         busy = true
         Task {
             do {
-                try await folder.replaceKey()
+                try await vault.replaceKey()
                 done = "The new key is in use."
                 error = nil
             } catch {
@@ -218,7 +193,7 @@ struct KeyTab: View {
 
 /// A key the server reports removed that this Mac didn't remove: the user removes or keeps it.
 struct StaleKeyRow: View {
-    let key: FolderController.StaleKey
+    let key: VaultController.StaleKey
     let remove: () -> Void
     let keep: () -> Void
 
@@ -240,21 +215,21 @@ struct StaleKeyRow: View {
 }
 
 struct DevicesTab: View {
-    let folder: FolderController
-    @State private var keys: [FolderController.VaultKey] = []
+    let vault: VaultController
+    @State private var keys: [VaultController.VaultKey] = []
     @State private var error: String?
     @State private var info: String?
     @State private var loading = false
-    @State private var approving: FolderController.PendingDevice?
-    @State private var removing: FolderController.VaultKey?
+    @State private var approving: VaultController.PendingDevice?
+    @State private var removing: VaultController.VaultKey?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if folder.session == nil {
-                    Text("Connect the folder to manage the keys of its vault.").foregroundStyle(.secondary)
+                if vault.session == nil {
+                    Text("Connect to manage the keys of this vault.").foregroundStyle(.secondary)
                 }
-                ForEach(folder.pendingApprovals) { p in
+                ForEach(vault.pendingApprovals) { p in
                     HStack(spacing: 12) {
                         Image(systemName: "person.badge.plus").font(.title3).foregroundStyle(.orange)
                         VStack(alignment: .leading, spacing: 2) {
@@ -267,11 +242,11 @@ struct DevicesTab: View {
                     .padding(12)
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.08)))
                 }
-                ForEach(folder.unconfirmedRemovals) { s in
-                    StaleKeyRow(key: s, remove: { act { try await folder.confirmRemoval([s.id]) } },
-                                keep: { act { try await folder.keepKeys([s.id]) } })
+                ForEach(vault.unconfirmedRemovals) { s in
+                    StaleKeyRow(key: s, remove: { act { try await vault.confirmRemoval([s.id]) } },
+                                keep: { act { try await vault.keepKeys([s.id]) } })
                 }
-                Card(title: "Keys of \(folder.config.vaultName)", count: keys.isEmpty ? nil : plural(keys.count, "key")) {
+                Card(title: "Keys of \(vault.config.vaultName)", count: keys.isEmpty ? nil : plural(keys.count, "key")) {
                     HStack(spacing: 8) {
                         if loading { ProgressView().controlSize(.small) }
                         Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }.help("Refresh")
@@ -314,10 +289,10 @@ struct DevicesTab: View {
             }
         }
         .task { await load() }
-        .sheet(item: $approving) { p in ApproveSheet(device: p, folder: folder) { approving = nil; Task { await load() } } }
+        .sheet(item: $approving) { p in ApproveSheet(device: p, vault: vault) { approving = nil; Task { await load() } } }
         .confirmationDialog("Remove \(removing?.name ?? "")'s key?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             Button("Remove Key", role: .destructive) {
-                if let k = removing { act { try await folder.removeKey(k.id) } }
+                if let k = removing { act { try await vault.removeKey(k.id) } }
             }
         } message: {
             Text("That device can no longer sync this vault. Files it already has stay on it, unless it is remote-only.")
@@ -325,14 +300,14 @@ struct DevicesTab: View {
     }
 
     @ViewBuilder
-    private func actions(_ k: FolderController.VaultKey) -> some View {
+    private func actions(_ k: VaultController.VaultKey) -> some View {
         // A revoked key still in the keyring was kept (or not decided yet): it can still be removed.
         if !k.isThisMac && (k.status != "revoked" || k.inKeyring) {
             Menu {
                 if k.status == "active" && k.inKeyring {
-                    Button(k.remoteOnly ? "Make Full Device" : "Make Remote-Only") { act { try await folder.setRemoteOnly(k.id, !k.remoteOnly) } }
+                    Button(k.remoteOnly ? "Make Full Device" : "Make Remote-Only") { act { try await vault.setRemoteOnly(k.id, !k.remoteOnly) } }
                     if k.remoteOnly {
-                        Button(k.locked ? "Unlock" : "Lock") { act { try await folder.setLocked(k.id, !k.locked) } }
+                        Button(k.locked ? "Unlock" : "Lock") { act { try await vault.setLocked(k.id, !k.locked) } }
                     }
                     Divider()
                 }
@@ -345,10 +320,10 @@ struct DevicesTab: View {
     }
 
     private func load() async {
-        guard folder.session != nil else { return }
+        guard vault.session != nil else { return }
         loading = true
         do {
-            keys = try await folder.vaultKeys()
+            keys = try await vault.vaultKeys()
             error = nil
         } catch {
             self.error = "\(error)"
@@ -378,8 +353,8 @@ func shortDate(_ iso: String) -> String {
 }
 
 struct ApproveSheet: View {
-    let device: FolderController.PendingDevice
-    let folder: FolderController
+    let device: VaultController.PendingDevice
+    let vault: VaultController
     let close: () -> Void
     @State private var matches = false
     @State private var remoteOnly = false
@@ -410,7 +385,7 @@ struct ApproveSheet: View {
         busy = true
         Task {
             do {
-                try await folder.approve(device, remoteOnly: remoteOnly)
+                try await vault.approve(device, remoteOnly: remoteOnly)
                 close()
             } catch {
                 self.error = "\(error)"
@@ -421,7 +396,7 @@ struct ApproveSheet: View {
 }
 
 struct RecoveryTab: View {
-    let folder: FolderController
+    let vault: VaultController
     @State private var pending: RecoveryKey?
     @State private var stored = false
     @State private var busy = false
@@ -431,14 +406,14 @@ struct RecoveryTab: View {
     var body: some View {
         Form {
             Section("Recovery key") {
-                if let state = folder.recoveryState {
+                if let state = vault.recoveryState {
                     if state.isSet {
                         Label("This vault has a recovery key\(state.setBy.map { ", set by \($0)" } ?? "").", systemImage: "checkmark.shield")
                     } else {
                         Label("This vault has no recovery key. If every device is lost, nothing can open it.", systemImage: "exclamationmark.shield")
                     }
                 } else {
-                    Text("Connect the folder to manage its recovery key.").foregroundStyle(.secondary)
+                    Text("Connect to manage the recovery key of this vault.").foregroundStyle(.secondary)
                 }
                 Text("A recovery key adds a new device when no device of the vault is left to approve it. It is shown once: keep it somewhere safe, away from this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -453,13 +428,13 @@ struct RecoveryTab: View {
                     Toggle("I stored this key somewhere safe", isOn: $stored)
                     HStack {
                         Button("Cancel") { pending = nil; stored = false }
-                        Button("Use This Key") { run { try await folder.setRecovery(key) } }.disabled(!stored || busy)
+                        Button("Use This Key") { run { try await vault.setRecovery(key) } }.disabled(!stored || busy)
                     }
                 }
-            } else if let state = folder.recoveryState {
+            } else if let state = vault.recoveryState {
                 Section {
                     Button(state.isSet ? "Replace Recovery Key…" : "Create Recovery Key…") {
-                        pending = folder.newRecoveryKey()
+                        pending = vault.newRecoveryKey()
                         stored = false
                     }
                     if state.isSet { Button("Remove Recovery Key…", role: .destructive) { confirmRemove = true } }
@@ -474,7 +449,7 @@ struct RecoveryTab: View {
         }
         .formStyle(.grouped)
         .confirmationDialog("Remove the recovery key?", isPresented: $confirmRemove) {
-            Button("Remove", role: .destructive) { run { try await folder.setRecovery(nil) } }
+            Button("Remove", role: .destructive) { run { try await vault.setRecovery(nil) } }
         }
     }
 

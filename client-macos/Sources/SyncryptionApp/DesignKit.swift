@@ -4,11 +4,11 @@ import SyncryptionAppCore
 
 /// Shared building blocks, so every window reads the same way.
 
-extension FolderController.Kind {
+extension VaultController.Kind {
     var color: Color {
         switch self {
         case .ok: .green
-        case .busy: .accentColor
+        case .busy: .blue
         case .warn: .orange
         case .error: .red
         case .off: .secondary
@@ -17,7 +17,7 @@ extension FolderController.Kind {
 }
 
 struct StatusDot: View {
-    let kind: FolderController.Kind
+    let kind: VaultController.Kind
     var size: CGFloat = 8
 
     var body: some View {
@@ -28,7 +28,7 @@ struct StatusDot: View {
 /// The state as a coloured capsule.
 struct StatePill: View {
     let text: String
-    let kind: FolderController.Kind
+    let kind: VaultController.Kind
 
     var body: some View {
         HStack(spacing: 5) {

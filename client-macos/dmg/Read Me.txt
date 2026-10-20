@@ -1,30 +1,30 @@
-Vault Syncryption for macOS
-===========================
+Vault Syncryption Client for macOS
+==================================
 
-1. Drag VaultSyncryption.app onto the Applications folder.
+1. Drag VaultSyncryptionClient.app onto the Applications folder.
 
 2. Open Terminal (Applications > Utilities) and paste these commands.
 
    The app is not signed with an Apple Developer ID, so macOS blocks an app
    downloaded from the internet. This removes the download (quarantine) flag:
 
-     xattr -dr com.apple.quarantine /Applications/VaultSyncryption.app
+     xattr -dr com.apple.quarantine /Applications/VaultSyncryptionClient.app
 
    Optionally, sign the app on this Mac (an ad-hoc signature, made locally).
    Sign the Finder extension first, then the app, in this order:
 
-     codesign --force --options runtime --preserve-metadata=entitlements,identifier --sign - /Applications/VaultSyncryption.app/Contents/PlugIns/SyncryptionFinder.appex
-     codesign --force --options runtime --preserve-metadata=entitlements,identifier --sign - /Applications/VaultSyncryption.app
+     codesign --force --options runtime --preserve-metadata=entitlements,identifier --sign - /Applications/VaultSyncryptionClient.app/Contents/PlugIns/SyncryptionFinder.appex
+     codesign --force --options runtime --preserve-metadata=entitlements,identifier --sign - /Applications/VaultSyncryptionClient.app
 
    Don't use "codesign --deep": it removes the Finder extension's sandbox, and
    Finder then won't load the extension.
 
-3. Open Vault Syncryption. It runs in the menu bar (the lock icon). Opening it
-   again while it runs shows the Sync Status window.
+3. Open Vault Syncryption Client. It runs in the menu bar (the lock icon).
+   Opening it again while it runs shows the Sync Status window.
 
 After an update, macOS asks once to allow the app to use its keys in the
 Keychain: choose Always Allow.
 
-The synced folders show the Vault Syncryption icon in Finder's sidebar through
+The synced folders show the Vault Syncryption Client icon in Finder's sidebar through
 the app's Finder extension. If they don't, turn it on in System Settings >
 General > Login Items & Extensions > Finder.

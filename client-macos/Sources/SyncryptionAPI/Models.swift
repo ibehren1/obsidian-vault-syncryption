@@ -188,6 +188,8 @@ public struct Device: Codable, Equatable, Sendable {
     public var lastSeenAt: String?
     /// A remote-only device locked by another device of the vault.
     public var locked: Bool?
+    /// The device's metadata, base64url, encrypted by the device (crypto.md 8.5). Null if it set none; cleared when the device is removed.
+    public var meta: String?
     public var name: String
     public var pairingCode: String
     public var publicKey: String
@@ -195,12 +197,13 @@ public struct Device: Codable, Equatable, Sendable {
     public var remoteOnly: Bool?
     public var status: String
 
-    public init(createdAt: String, fingerprint: String, id: String, lastSeenAt: String? = nil, locked: Bool? = nil, name: String, pairingCode: String, publicKey: String, remoteOnly: Bool? = nil, status: String) {
+    public init(createdAt: String, fingerprint: String, id: String, lastSeenAt: String? = nil, locked: Bool? = nil, meta: String? = nil, name: String, pairingCode: String, publicKey: String, remoteOnly: Bool? = nil, status: String) {
         self.createdAt = createdAt
         self.fingerprint = fingerprint
         self.id = id
         self.lastSeenAt = lastSeenAt
         self.locked = locked
+        self.meta = meta
         self.name = name
         self.pairingCode = pairingCode
         self.publicKey = publicKey
@@ -209,7 +212,7 @@ public struct Device: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case createdAt, fingerprint, id, lastSeenAt, locked, name, pairingCode, publicKey, remoteOnly, status
+        case createdAt, fingerprint, id, lastSeenAt, locked, meta, name, pairingCode, publicKey, remoteOnly, status
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -219,6 +222,7 @@ public struct Device: Codable, Equatable, Sendable {
         try c.encode(id, forKey: .id)
         try c.encode(lastSeenAt, forKey: .lastSeenAt)
         try c.encodeIfPresent(locked, forKey: .locked)
+        try c.encodeIfPresent(meta, forKey: .meta)
         try c.encode(name, forKey: .name)
         try c.encode(pairingCode, forKey: .pairingCode)
         try c.encode(publicKey, forKey: .publicKey)
@@ -419,6 +423,24 @@ public struct Locks: Codable, Equatable, Sendable {
     }
 }
 
+public struct MetaUpload: Codable, Equatable, Sendable {
+    /// Base64url, at most 64 KiB decoded, or null to clear it.
+    public var meta: String?
+
+    public init(meta: String? = nil) {
+        self.meta = meta
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case meta
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(meta, forKey: .meta)
+    }
+}
+
 public struct MissingRequest: Codable, Equatable, Sendable {
     public var ids: [String]
 
@@ -561,6 +583,8 @@ public struct SelfDevice: Codable, Equatable, Sendable {
     public var lastSeenAt: String?
     /// A remote-only device locked by another device of the vault.
     public var locked: Bool?
+    /// The device's metadata, base64url, encrypted by the device (crypto.md 8.5). Null if it set none; cleared when the device is removed.
+    public var meta: String?
     public var name: String
     public var pairingCode: String
     public var publicKey: String
@@ -571,12 +595,13 @@ public struct SelfDevice: Codable, Equatable, Sendable {
     public var vaultId: String?
     public var vaultName: String
 
-    public init(createdAt: String, fingerprint: String, id: String, lastSeenAt: String? = nil, locked: Bool? = nil, name: String, pairingCode: String, publicKey: String, remoteOnly: Bool? = nil, status: String, username: String, vaultId: String? = nil, vaultName: String) {
+    public init(createdAt: String, fingerprint: String, id: String, lastSeenAt: String? = nil, locked: Bool? = nil, meta: String? = nil, name: String, pairingCode: String, publicKey: String, remoteOnly: Bool? = nil, status: String, username: String, vaultId: String? = nil, vaultName: String) {
         self.createdAt = createdAt
         self.fingerprint = fingerprint
         self.id = id
         self.lastSeenAt = lastSeenAt
         self.locked = locked
+        self.meta = meta
         self.name = name
         self.pairingCode = pairingCode
         self.publicKey = publicKey
@@ -588,7 +613,7 @@ public struct SelfDevice: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case createdAt, fingerprint, id, lastSeenAt, locked, name, pairingCode, publicKey, remoteOnly, status, username, vaultId, vaultName
+        case createdAt, fingerprint, id, lastSeenAt, locked, meta, name, pairingCode, publicKey, remoteOnly, status, username, vaultId, vaultName
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -598,6 +623,7 @@ public struct SelfDevice: Codable, Equatable, Sendable {
         try c.encode(id, forKey: .id)
         try c.encode(lastSeenAt, forKey: .lastSeenAt)
         try c.encodeIfPresent(locked, forKey: .locked)
+        try c.encodeIfPresent(meta, forKey: .meta)
         try c.encode(name, forKey: .name)
         try c.encode(pairingCode, forKey: .pairingCode)
         try c.encode(publicKey, forKey: .publicKey)

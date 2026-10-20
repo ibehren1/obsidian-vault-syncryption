@@ -44,6 +44,22 @@ import Testing
         #expect(meta == expected)
     }
 
+    @Test func sealsAndOpensDeviceMetadata() throws {
+        let m = v.dict("deviceMeta")
+        let vdk = Bytes(hex: v.dict("vdk").str("2"))!
+        let device = m.str("deviceId")
+        #expect(KDF.deviceKey(vdk: vdk, deviceId: device) == m.hex("key"))
+        let object = Objects.seal(fileKey: m.hex("key"), epoch: 2, domain: Objects.deviceDomain(device), m.hex("plaintext"),
+                                  nonce: m.hex("nonce"))
+        #expect(object == m.hex("object"))
+        let meta = try Objects.openDeviceMeta(vdk: vdk, deviceId: device, object)
+        #expect(meta == DeviceMeta(folders: [.init(name: "Notes", path: "/Users/me/Notes")]))
+        // Bound to the device: the same object read as another device's fails.
+        #expect(throws: Objects.Failure.self) { _ = try Objects.openDeviceMeta(vdk: vdk, deviceId: m.str("otherDeviceId"), object) }
+        let again = try Objects.sealDeviceMeta(vdk: vdk, epoch: 2, deviceId: device, meta)
+        #expect(try Objects.openDeviceMeta(vdk: vdk, deviceId: device, again) == meta)
+    }
+
     @Test func opensTheReferenceFile() throws {
         let meta = try Objects.openMeta(fileKey: key(2), indexKey: indexKey, fileId: fileId, v.dict("meta").hex("object"))
         let data = try Objects.openChunks(fileKey: key(2), fileId: fileId, meta: meta, [v.dict("chunk").hex("object")])

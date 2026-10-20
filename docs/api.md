@@ -164,6 +164,23 @@ Path parameters:
 | `200` | [Device](#device) (`application/json`) |  |
 | `400` | [Error](#error) (`application/json`) | A body or parameter that fails validation: `bad_request`. |
 
+#### `PUT /api/v1/vaults/{vault_id}/devices/self/meta`
+
+Store the calling device's metadata, an object it encrypts under the vault key (crypto.md 8.5). The server keeps it opaque and returns it in every device list, so the other devices of the vault can read it. A remote-only device can't set it.
+
+Path parameters:
+
+| Name | Type | Notes |
+|---|---|---|
+| `vault_id` | `string` |  |
+
+Request body: [MetaUpload](#metaupload) (`application/json`)
+
+| Status | Body | Notes |
+|---|---|---|
+| `200` | [Device](#device) (`application/json`) |  |
+| `400` | [Error](#error) (`application/json`) | A body or parameter that fails validation: `bad_request`. |
+
 ### Vaults
 
 Opening or creating a vault, its keyring and recovery.
@@ -593,6 +610,7 @@ Query parameters:
 | `lastSeenAt` | `string` \| `null` | yes |  |
 | `remoteOnly` | `boolean` | no | Approved as remote-only. Default `false`. |
 | `locked` | `boolean` | no | A remote-only device locked by another device of the vault. Default `false`. |
+| `meta` | `string` \| `null` | no | The device's metadata, base64url, encrypted by the device (crypto.md 8.5). Null if it set none; cleared when the device is removed. |
 
 ### DeviceList
 
@@ -662,6 +680,12 @@ Every error response. `error` is a stable machine code, and `message` never cont
 | `locks` | [Lock](#lock)[] | yes |  |
 | `locksSeq` | `integer` | yes |  |
 
+### MetaUpload
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `meta` | `string` \| `null` | yes | Base64url, at most 64 KiB decoded, or null to clear it. |
+
 ### MissingRequest
 
 | Field | Type | Required | Notes |
@@ -722,6 +746,7 @@ Every error response. `error` is a stable machine code, and `message` never cont
 | `lastSeenAt` | `string` \| `null` | yes |  |
 | `remoteOnly` | `boolean` | no | Approved as remote-only. Default `false`. |
 | `locked` | `boolean` | no | A remote-only device locked by another device of the vault. Default `false`. |
+| `meta` | `string` \| `null` | no | The device's metadata, base64url, encrypted by the device (crypto.md 8.5). Null if it set none; cleared when the device is removed. |
 | `vaultId` | `string` \| `null` | yes |  |
 | `vaultName` | `string` | yes |  |
 | `username` | `string` | yes |  |

@@ -265,6 +265,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/vaults/{vault_id}/devices/self/meta": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Device Meta
+         * @description Store the calling device's metadata, an object it encrypts under the vault key
+         *     (crypto.md 8.5). The server keeps it opaque and returns it in every device list, so the
+         *     other devices of the vault can read it. A remote-only device can't set it.
+         */
+        put: operations["set_device_meta_api_v1_vaults__vault_id__devices_self_meta_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/vaults/{vault_id}/files/{file_id}": {
         parameters: {
             query?: never;
@@ -636,6 +658,11 @@ export interface components {
              * @default false
              */
             locked: boolean;
+            /**
+             * Meta
+             * @description The device's metadata, base64url, encrypted by the device (crypto.md 8.5). Null if it set none; cleared when the device is removed.
+             */
+            meta?: string | null;
             /** Name */
             name: string;
             /** Pairingcode */
@@ -733,6 +760,14 @@ export interface components {
             /** Locksseq */
             locksSeq: number;
         };
+        /** MetaUpload */
+        MetaUpload: {
+            /**
+             * Meta
+             * @description Base64url, at most 64 KiB decoded, or null to clear it.
+             */
+            meta: string | null;
+        };
         /** MissingRequest */
         MissingRequest: {
             /** Ids */
@@ -809,6 +844,11 @@ export interface components {
              * @default false
              */
             locked: boolean;
+            /**
+             * Meta
+             * @description The device's metadata, base64url, encrypted by the device (crypto.md 8.5). Null if it set none; cleared when the device is removed.
+             */
+            meta?: string | null;
             /** Name */
             name: string;
             /** Pairingcode */
@@ -1358,6 +1398,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["PolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Device"];
+                };
+            };
+            /** @description A body or parameter that fails validation: `bad_request`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    set_device_meta_api_v1_vaults__vault_id__devices_self_meta_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                vault_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetaUpload"];
             };
         };
         responses: {
