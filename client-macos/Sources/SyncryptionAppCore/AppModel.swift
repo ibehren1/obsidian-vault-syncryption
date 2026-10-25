@@ -48,6 +48,9 @@ public final class AppModel {
     public func startAll() { for v in vaults { v.start() } }
     public func stopAll() { for v in vaults { v.stop() } }
 
+    /// Stop every vault, and return once their syncs have stopped (before an update).
+    public func stopAllAndWait() async { for v in vaults { await v.stopAndWait() } }
+
     /// A summary for the menu bar icon.
     public var hasProblem: Bool {
         vaults.contains {

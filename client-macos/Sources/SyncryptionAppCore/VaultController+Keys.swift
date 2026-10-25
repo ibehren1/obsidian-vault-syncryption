@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SyncryptionAPI
 import SyncryptionCrypto
@@ -133,14 +134,44 @@ extension VaultController {
 
     public struct QueuedChange: Identifiable, Sendable {
         public var id: String { path }
+        /// The file, or the package its changes are in.
         public let path: String
         public let queuedAt: Date
+        /// How many changed files: more than one only for a package.
+        public let files: Int
+        /// Why a package waits, for display.
+        public let note: String?
     }
 
-    /// The local changes waiting to upload, oldest first.
+    /// The local changes waiting to upload, oldest first. The changes in one package are one.
     public func queuedChanges() async -> [QueuedChange] {
         guard let engine else { return [] }
-        return ((try? await engine.pending()) ?? []).map { QueuedChange(path: $0.path, queuedAt: Date(timeIntervalSince1970: $0.queuedAt / 1000)) }
+        var order: [PathKey] = []
+        var groups: [PathKey: (queuedAt: Double, files: Int)] = [:]
+        for e in (try? await engine.pending()) ?? [] {
+            let key = PathKey(engine.packageRoot(e.path) ?? e.path)
+            if let g = groups[key] {
+                groups[key] = (min(g.queuedAt, e.queuedAt), g.files + 1)
+            } else {
+                order.append(key)
+                groups[key] = (e.queuedAt, 1)
+            }
+        }
+        return order.map { key in
+            let g = groups[key]!
+            return QueuedChange(path: key.path, queuedAt: Date(timeIntervalSince1970: g.queuedAt / 1000), files: g.files,
+                                note: heldPackages.first { PathKey($0.key) == key }.map { Self.holdText($0.value) })
+        }
+    }
+
+    static func holdText(_ reason: HoldReason) -> String {
+        switch reason {
+        case .settling: return "Waiting until it stops changing"
+        case .inUse(let pid):
+            let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? OpenFiles.processName(pid) ?? "another app"
+            return "In use by \(app)"
+        case .uploading(let device): return "Being uploaded by \(device)"
+        }
     }
 
     /// This Mac's id in the vault, once connected.

@@ -22,6 +22,11 @@ Vault Syncryption Client for macOS
 3. Open Vault Syncryption Client. It runs in the menu bar (the lock icon).
    Opening it again while it runs shows the Sync Status window.
 
+The app updates itself: it checks for new versions, installs a signed one
+once nothing is syncing, and opens again. Turn this off in the menu with
+Install Updates Automatically. The Terminal steps above are needed only for
+the first install.
+
 After an update, macOS asks once to allow the app to use its keys in the
 Keychain: choose Always Allow.
 

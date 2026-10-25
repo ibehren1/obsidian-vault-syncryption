@@ -1,7 +1,9 @@
 # Runs on the public and the beta GitHub repo. Tests and builds the macOS client, and when
 # client-macos/project.yml carries a client version with no release yet, publishes an
 # ad-hoc-signed DMG as a release tagged client-macos-v<version>. It is never marked Latest,
-# which stays the plugin's release.
+# which stays the plugin's release. With the UPDATE_SIGNING_KEY secret (an OpenSSH Ed25519
+# private key), the DMG gets an sshsig (<dmg>.sig, namespace syncryption-update@v1): the
+# app installs only releases signed by that key.
 name: macOS client
 
 on:
@@ -54,6 +56,23 @@ jobs:
         id: dmg
         if: steps.version.outputs.new == 'true'
         run: echo "path=client-macos/$(client-macos/package.sh)" >> "$GITHUB_OUTPUT"
+      - name: Sign the DMG for updates
+        id: sig
+        if: steps.version.outputs.new == 'true'
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "No UPDATE_SIGNING_KEY: the release isn't signed, and apps don't install it."
+            exit 0
+          fi
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key"
+          chmod 600 "$key"
+          ssh-keygen -Y sign -f "$key" -n syncryption-update@v1 "$DMG"
+          echo "path=$DMG.sig" >> "$GITHUB_OUTPUT"
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          DMG: ${{ steps.dmg.outputs.path }}
       - name: Attest the build provenance
         if: steps.version.outputs.new == 'true'
         uses: actions/attest-build-provenance@v2
@@ -62,9 +81,9 @@ jobs:
       - name: Publish the release
         if: steps.version.outputs.new == 'true'
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" "${{ steps.dmg.outputs.path }}" \
+          gh release create "${{ steps.version.outputs.tag }}" "${{ steps.dmg.outputs.path }}" ${{ steps.sig.outputs.path }} \
             --title "${{ steps.version.outputs.tag }}" \
             --target "$GITHUB_SHA" --latest=false \
-            --notes "The macOS client. It is signed ad hoc, not with a Developer ID, so macOS blocks it: after copying it to Applications, run \`xattr -dr com.apple.quarantine /Applications/VaultSyncryptionClient.app\` (see Read Me.txt in the DMG)."
+            --notes "The macOS client. It is signed ad hoc, not with a Developer ID, so macOS blocks it: after copying it to Applications, run \`xattr -dr com.apple.quarantine /Applications/VaultSyncryptionClient.app\` (see Read Me.txt in the DMG). Once installed, the app updates itself."
         env:
           GH_TOKEN: ${{ github.token }}

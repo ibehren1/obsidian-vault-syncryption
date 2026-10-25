@@ -238,6 +238,18 @@ public actor ApiClient {
         try await call("GET", "\(vaultPath(vaultId))/changes?since=\(since)&limit=\(limit)")
     }
 
+    // MARK: Locks (protocol.md 11)
+
+    /// Take or renew a soft lease lock. Throws `423 locked` with the holder in `details.lock`.
+    @discardableResult
+    public func acquireLock(_ vaultId: String, _ fileId: String, clientId: String, ttl: Int = 120) async throws -> Lock {
+        try await call("POST", "\(vaultPath(vaultId))/locks/\(enc(fileId))", json: AcquireRequest(clientId: clientId, ttl: ttl))
+    }
+
+    public func releaseLock(_ vaultId: String, _ fileId: String, clientId: String) async throws {
+        _ = try await raw("DELETE", "\(vaultPath(vaultId))/locks/\(enc(fileId))?clientId=\(enc(clientId))")
+    }
+
     /// Also returns when the keyring version passes `keyringSince`, if given.
     public func wait(_ vaultId: String, since: Int, locksSince: Int, timeout: Int = 25, keyringSince: Int? = nil) async throws -> WaitResponse {
         let keyring = keyringSince.map { "&keyringSince=\($0)" } ?? ""

@@ -175,8 +175,14 @@ struct FolderStatus: View {
                 VStack(spacing: 0) {
                     ForEach(queue.prefix(12)) { c in
                         HStack {
-                            Image(systemName: "doc").foregroundStyle(.secondary)
-                            Text(c.path).lineLimit(1).truncationMode(.middle)
+                            Image(systemName: c.files > 1 || c.note != nil ? "shippingbox" : "doc").foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(c.path).lineLimit(1).truncationMode(.middle)
+                                if c.files > 1 || c.note != nil {
+                                    Text([c.files > 1 ? "\(c.files) files" : nil, c.note].compactMap { $0 }.joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
                             Spacer()
                             Text(c.queuedAt.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary).monospacedDigit()
                         }
@@ -187,7 +193,7 @@ struct FolderStatus: View {
                     if queue.count > 12 { note("and \(queue.count - 12) more").padding(.top, 6) }
                 }
             }
-            note("Changes made while the app wasn't running are found at the next sync.")
+            note("Changes made while the app wasn't running are found at the next sync. A package (a document Finder shows as one file, like a Quicken file) uploads whole, once nothing in it has changed for 30 seconds and no app has it open.")
         }
     }
 

@@ -1,9 +1,11 @@
 import AppKit
 import SwiftUI
+import SyncryptionAPI
 import SyncryptionAppCore
 
 struct MenuView: View {
     let model: AppModel
+    let updater: Updater
     @Environment(\.openWindow) private var openWindow
     @State private var opensAtLogin = false
     @State private var loginError: String?
@@ -52,6 +54,7 @@ struct MenuView: View {
                     Text("Show in Dock").padding(.leading, 4)
                 }
                 .toggleStyle(.checkbox).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 5)
+                if updater.isEnabled { updates }
             }
             .padding(6)
             Divider()
@@ -59,6 +62,40 @@ struct MenuView: View {
         }
         .frame(width: 380)
         .onAppear { opensAtLogin = model.opensAtLogin }
+    }
+
+    @ViewBuilder private var updates: some View {
+        Toggle(isOn: Binding(get: { updater.installsAutomatically }, set: { updater.installsAutomatically = $0 })) {
+            Text("Install Updates Automatically").padding(.leading, 4)
+        }
+        .toggleStyle(.checkbox).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 5)
+        switch updater.state {
+        case .available(let v):
+            item("Install Version \(v)", "arrow.down.circle") { Task { await updater.install() } }
+        case .cantInstall(let reason, let dmg):
+            updateNote(reason)
+            item("Open the Download", "arrow.down.circle") { NSWorkspace.shared.open(dmg) }
+        default:
+            item("Check for Updates", "arrow.down.circle") { Task { await updater.checkNow() } }
+                .disabled(updater.state == .checking)
+            if let note = updateText { updateNote(note) }
+        }
+    }
+
+    private var updateText: String? {
+        switch updater.state {
+        case .checking: "Checking for updates…"
+        case .downloading(let v): "Downloading version \(v)…"
+        case .waiting(let v): "Version \(v) installs once nothing is syncing."
+        case .installing(let v): "Installing version \(v)…"
+        case .failed(let e): e
+        default: updater.lastCheck.map { "Version \(clientVersion), checked \($0.formatted(date: .omitted, time: .shortened))" }
+        }
+    }
+
+    private func updateNote(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.bottom, 4)
     }
 
     private var header: some View {

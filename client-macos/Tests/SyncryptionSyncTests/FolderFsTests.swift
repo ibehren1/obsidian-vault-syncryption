@@ -111,4 +111,44 @@ struct TwoFoldersTests {
         #expect(!FileManager.default.fileExists(atPath: ra.appending(path: "big.bin").path))
         #expect(a.warnings.all.isEmpty && b.warnings.all.isEmpty)
     }
+
+    @Test func findsTheOutermostPackageAndWhenItLastChanged() async throws {
+        let root = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fs = PlainFolderFs(root: root)
+        // `.rtfd` is a package on every Mac (TextEdit's rich text with attachments).
+        try fs.write("Docs/Report.rtfd/TXT.rtf", Bytes(utf8: "{}"), mtime: 1_790_000_000_000, ctime: nil)
+        try fs.write("Docs/Report.rtfd/Inner.rtfd/pic.png", [1], mtime: 1_790_000_005_000, ctime: nil)
+        try fs.write("Docs/plain/a.md", [1], mtime: 1_790_000_000_000, ctime: nil)
+        #expect(fs.packageRoot("Docs/Report.rtfd/TXT.rtf") == "Docs/Report.rtfd")
+        #expect(fs.packageRoot("Docs/Report.rtfd/Inner.rtfd/pic.png") == "Docs/Report.rtfd")
+        #expect(fs.packageRoot("Docs/plain/a.md") == nil)
+        #expect(fs.packageRoot("Docs/Missing.rtfd/x") == nil)
+        // The folders count: they were made just now.
+        #expect(try #require(fs.lastChange(in: "Docs/Report.rtfd")) > 1_790_000_005_000)
+        let mapped = MappedFs(folders: ["Vault": fs])
+        #expect(mapped.packageRoot("Vault/Docs/Report.rtfd/TXT.rtf") == "Vault/Docs/Report.rtfd")
+    }
+
+    @Test func seesWhichProcessHasAFileOpen() async throws {
+        let root = try tempFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fs = PlainFolderFs(root: root)
+        try fs.write("Book.rtfd/TXT.rtf", Bytes(utf8: "{}"), mtime: 1_790_000_000_000, ctime: nil)
+        try fs.write("Other.rtfd/TXT.rtf", Bytes(utf8: "{}"), mtime: 1_790_000_000_000, ctime: nil)
+        // This process's own open files don't count.
+        let mine = try #require(FileHandle(forReadingAtPath: root.appending(path: "Other.rtfd/TXT.rtf").path))
+        defer { try? mine.close() }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "exec 3<\"$0\"; echo ready; exec sleep 30", root.appending(path: "Book.rtfd/TXT.rtf").path]
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        _ = out.fileHandleForReading.availableData
+        #expect(fs.holders(["Book.rtfd", "Other.rtfd"]) == ["Book.rtfd": p.processIdentifier])
+        p.terminate()
+        p.waitUntilExit()
+        #expect(fs.holders(["Book.rtfd", "Other.rtfd"]).isEmpty)
+    }
 }

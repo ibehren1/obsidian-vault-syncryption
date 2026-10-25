@@ -90,6 +90,9 @@ public enum MetaKey {
     public static let keptDevices = "keptDevices"
     /// The top-level folders synced at the end of the last adopt.
     public static let syncedFolders = "syncedFolders"
+    /// Packages changed here and on another device, until the local one is moved to a
+    /// conflict copy and the package is reset to the vault's version.
+    public static let packageConflicts = "packageConflicts"
 }
 
 extension SyncStore {

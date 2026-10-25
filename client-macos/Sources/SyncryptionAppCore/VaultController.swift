@@ -41,7 +41,10 @@ public final class VaultController: Identifiable {
     public private(set) var fileCount = 0
     /// The plaintext size of those files, in bytes.
     public private(set) var totalSize = 0
+    /// Changes waiting to upload, a package counting as one.
     public private(set) var pendingCount = 0
+    /// Packages whose changes wait, after the last sync.
+    public private(set) var heldPackages: [String: HoldReason] = [:]
     public private(set) var lastSync: Date?
     public private(set) var lastReport: SyncReport?
     /// Recent problems that skipped a file (never plaintext).
@@ -99,6 +102,10 @@ public final class VaultController: Identifiable {
     private var live: LiveLoop?
     private var connectTask: Task<Void, Never>?
     private var debounce: Task<Void, Never>?
+    /// When the scheduled sync runs, while one is scheduled.
+    private var debounceDue: ContinuousClock.Instant?
+    /// The next sync was asked for by the user: packages don't wait for their quiet period.
+    private var forceNext = false
     private var fallback: Task<Void, Never>?
     private var retry: Task<Void, Never>?
     private var secret: CheckedContinuation<String?, Never>?
@@ -108,6 +115,8 @@ public final class VaultController: Identifiable {
 
     /// Push this long after the last local change.
     static let debounceDelay: Duration = .seconds(2)
+    /// A package is pushed once nothing in it changed for this long.
+    static let packageQuiet: Duration = .seconds(30)
     /// Sync this often even without events (the scan catches what they missed).
     static let fallbackInterval: Duration = .seconds(120)
 
@@ -171,6 +180,13 @@ public final class VaultController: Identifiable {
         api = nil
         secret?.resume(returning: nil)
         secret = nil
+    }
+
+    /// Stop, and return once the running sync (if any) has stopped.
+    public func stopAndWait() async {
+        let running = engine
+        stop()
+        await running?.close()
     }
 
     public func setPaused(_ paused: Bool) {
@@ -278,6 +294,7 @@ public final class VaultController: Identifiable {
             retry?.cancel()
             start()
         } else {
+            forceNext = true
             scheduleSync(after: .zero)
         }
     }
@@ -400,6 +417,7 @@ public final class VaultController: Identifiable {
                               filter: filter, keyring: session)
         o.onWarning = { [weak self] w in Task { @MainActor in self?.warn(w) } }
         o.onProgress = { [weak self] p in Task { @MainActor in self?.progress(p) } }
+        o.quietPeriod = Self.packageQuiet
         guard self.session === session else { return }
         engine = SyncEngine(o)
         engineFolders = active.map(\.name)
@@ -442,18 +460,38 @@ public final class VaultController: Identifiable {
     private func noteChanges(_ paths: [String]) {
         guard let engine else { return }
         Task {
-            for p in paths { try? await engine.noteChange(p) }
-            self.scheduleSync(after: Self.debounceDelay)
+            var plain = false
+            for p in paths where (try? await engine.noteChange(p)) != true { plain = true }
+            // A change inside a package waits for the package to be quiet anyway.
+            if plain { self.scheduleSync(after: Self.debounceDelay) } else { self.scheduleSync(noLaterThan: Self.packageQuiet) }
         }
     }
 
     private func scheduleSync(after delay: Duration) {
         debounce?.cancel()
+        debounceDue = .now + delay
         debounce = Task { [weak self] in
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled else { return }
+            self?.debounceDue = nil
             await self?.runSync()
         }
+    }
+
+    /// Sync in `delay`, unless a sync is scheduled sooner already.
+    private func scheduleSync(noLaterThan delay: Duration) {
+        if let due = debounceDue, due <= .now + delay { return }
+        scheduleSync(after: delay)
+    }
+
+    /// When to look at held packages again.
+    private func scheduleHeld(_ held: [String: HoldReason]) {
+        guard !held.isEmpty else { return }
+        var delay = Self.packageQuiet
+        for reason in held.values {
+            if case .settling(let until) = reason { delay = min(delay, .seconds(max(1, until.timeIntervalSinceNow + 1))) }
+        }
+        scheduleSync(noLaterThan: delay)
     }
 
     private func runSync() async {
@@ -467,9 +505,13 @@ public final class VaultController: Identifiable {
                 currentFile = nil
             }
         }
+        let force = forceNext
+        forceNext = false
         do {
-            let report = try await engine.sync()
+            let report = try await engine.sync(force: force)
             guard self.engine === engine else { return }
+            heldPackages = report.held
+            scheduleHeld(report.held)
             syncedFolders = Set(folders)
             lastReport = report
             lastSync = Date()
@@ -518,7 +560,9 @@ public final class VaultController: Identifiable {
         guard let engine else { return }
         fileCount = (try? await engine.fileCount()) ?? fileCount
         totalSize = (try? await engine.totalSize()) ?? totalSize
-        pendingCount = (try? await engine.pending().count) ?? pendingCount
+        if let entries = try? await engine.pending() {
+            pendingCount = Set(entries.map { PathKey(engine.packageRoot($0.path) ?? $0.path) }).count
+        }
     }
 
     private func progress(_ p: SyncProgress) {

@@ -11,7 +11,7 @@ struct SyncryptionApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuView(model: delegate.model)
+            MenuView(model: delegate.model, updater: delegate.updater)
         } label: {
             MenuBarLabel(model: delegate.model)
         }
@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     #else
     let model = AppModel()
     #endif
+    lazy var updater = Updater(isSyncing: { [model] in model.isSyncing }, stop: { [model] in await model.stopAllAndWait() })
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         FolderIcon.logo = NSImage(named: "Logo")
@@ -63,6 +64,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
         model.startAll()
+        if let version = updater.updatedVersion() {
+            let content = UNMutableNotificationContent()
+            content.title = "Updated to \(version)"
+            content.body = "Vault Syncryption Client updated itself. If macOS asks to allow access to the Keychain, choose Always Allow."
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        }
+        #if !DEBUG
+        updater.start()
+        #endif
         // A menu bar app isn't active at launch: bring the welcome window forward.
         if model.vaults.isEmpty { activate() }
         #if DEBUG

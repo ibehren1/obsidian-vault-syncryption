@@ -82,7 +82,7 @@ enum Snapshot {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(args.contains("--demo") ? 25 : 6))
-            await render(MenuView(model: model), size: nil, to: dir.appending(path: "menu.png"))
+            await render(MenuView(model: model, updater: Updater(isSyncing: { false }, stop: {})), size: nil, to: dir.appending(path: "menu.png"))
             await render(StatusWindow(model: model), size: CGSize(width: 920, height: 900), to: dir.appending(path: "status.png"))
             for (tab, name) in [(SettingsTab.folders, "settings-folders"), (.general, "settings"), (.key, "settings-key"), (.devices, "settings-devices"),
                                 (.recovery, "settings-recovery"), (.history, "settings-history")]
