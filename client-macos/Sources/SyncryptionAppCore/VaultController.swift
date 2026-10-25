@@ -47,8 +47,8 @@ public final class VaultController: Identifiable {
     public private(set) var heldPackages: [String: HoldReason] = [:]
     public private(set) var lastSync: Date?
     public private(set) var lastReport: SyncReport?
-    /// Recent problems that skipped a file (never plaintext).
-    public private(set) var warnings: [String] = []
+    /// Problems that skipped a file and conflict copies, of the last 6 hours.
+    public private(set) var problems = RecentProblems()
     /// The connected session, for the vault-management views.
     public private(set) var session: VaultSession?
     public private(set) var engine: SyncEngine?
@@ -515,6 +515,7 @@ public final class VaultController: Identifiable {
             syncedFolders = Set(folders)
             lastReport = report
             lastSync = Date()
+            for c in report.conflicts { problems.add("Conflict copy: \(c)", conflict: true) }
             status = .synced(Date())
             await publishFolders()
             await refreshCounts()
@@ -590,8 +591,7 @@ public final class VaultController: Identifiable {
     }
 
     func warn(_ w: String) {
-        warnings.append(w)
-        if warnings.count > 50 { warnings.removeFirst(warnings.count - 50) }
+        problems.add(w)
     }
 
     // MARK: Errors

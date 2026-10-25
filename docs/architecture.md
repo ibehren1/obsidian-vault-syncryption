@@ -192,6 +192,29 @@ erDiagram
 - A commit is one `BEGIN IMMEDIATE` transaction: check the head, check the blobs, bump
   `vaults.seq`, insert the revision, move `files.head_rev`. SQLite serialises writers,
   which gives a total order per vault without extra locking.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as FastAPI
+    participant D as SQLite (writer thread)
+    participant N as Long-poll notifier
+    C->>A: PUT /files/{fileId} {parentRev, meta, blobs}
+    A->>D: BEGIN IMMEDIATE
+    D->>D: head == parentRev?
+    alt head has moved
+        D-->>A: rollback
+        A-->>C: 409 stale_parent {head}
+    else blobs missing
+        D-->>A: rollback
+        A-->>C: 422 missing_blobs {missing}
+    else
+        D->>D: seq += 1, insert revision (rev = seq), move head_rev
+        D-->>A: COMMIT
+        A->>N: notify vault
+        A-->>C: 201 revision
+    end
+```
 - Ids are text: UUIDv4 for users and vaults, `d_...` for devices. Times are integer Unix
   seconds.
 - The schema version is `PRAGMA user_version`, currently 8. An empty database is created
@@ -248,6 +271,24 @@ in-process mechanism is enough. Turning maintenance on notifies every vault's co
 and `/wait` then answers with the maintenance `503`. Locking a device or removing its key
 wakes its `/wait`, which then finds the session gone.
 
+```mermaid
+sequenceDiagram
+    participant W as Device A (/wait)
+    participant S as Server (vault Condition)
+    participant P as Device B (commit)
+    W->>S: GET /wait?since=N&locksSince=M
+    S->>S: seq > N or locksSeq > M?
+    alt already newer
+        S-->>W: 200 {seq, locksSeq, changed: true}
+    else
+        S->>S: wait on the Condition (at most 25 s)
+        P->>S: PUT /files/... (commits)
+        S->>S: notify after the transaction commits
+        S-->>W: 200 {seq, locksSeq, changed: true}
+    end
+    Note over W,S: A timeout answers changed: false. Maintenance answers 503.
+```
+
 ## 3. Container (`backend/Dockerfile`, `backend/entrypoint.sh`)
 The image is built in three stages: a `ghcr.io/astral-sh/uv` stage that installs the
 locked dependencies into `/app/.venv`, the Litestream 0.5.17 release binary (checked
@@ -255,6 +296,28 @@ against a pinned SHA-256) and the Caddy 2.11 binary from the official image (pin
 is `python:3.12-slim-bookworm`. The entrypoint uses small commands from
 `python -m syncryption_server` (`check`, `check-data`, `render`, `migrate`, `health`), so
 the environment rules live in one place (`config.py`).
+
+```mermaid
+flowchart TD
+    check["check: validate the environment"] -->|error| exit1["exit with a message"]
+    check --> render["render: Caddyfile and litestream.yml into /run/syncryption"]
+    render --> s3q{"S3_* set?"}
+    s3q -- yes --> restore["litestream restore<br/>-if-db-not-exists -if-replica-exists"]
+    s3q -- no --> checkdata
+    restore --> checkdata["check-data: refuse old or stale data"]
+    checkdata -->|error| exit1
+    checkdata --> migq{"MIGRATE_TO_S3 or<br/>MIGRATE_FROM_S3?"}
+    migq -- yes --> migrate["migrate: copy and verify every blob"]
+    migrate -->|failure| exit1
+    migq -- no --> proxyq
+    migrate --> proxyq{"BEHIND_PROXY?"}
+    proxyq -- FALSE --> caddy["uvicorn on 127.0.0.1:8000<br/>+ Caddy on 80/443"]
+    proxyq -- TRUE --> plain["uvicorn on 0.0.0.0:8080"]
+    caddy & plain --> lsq{"blobs in S3?"}
+    lsq -- yes --> ls["run under litestream replicate -exec"]
+    lsq -- no --> run["run directly"]
+    ls & run --> sup["supervise with wait -n"]
+```
 
 1. `check` validates the environment (the rules are in [self-hosting.md](self-hosting.md)
    section 2), prints a one-line summary without secrets, and exits with a clear message
@@ -345,6 +408,41 @@ flowchart TD
     push0 --> wait["wait (long-poll)"]
     wait --> pull["pull"] --> push["push"] --> wait
 ```
+```mermaid
+flowchart TD
+    subgraph pull["Pull: each change since the cursor"]
+        direction TB
+        dec["decrypt and check the metadata"] -->|fails| skip["skip with a warning"]
+        dec --> hash["hash the local file"]
+        hash --> same{"same content<br/>as remote?"}
+        same -- yes --> adopt["adopt without a write"]
+        same -- no --> local{"local unchanged<br/>since last sync?"}
+        local -- yes --> write["write the remote version"]
+        local -- no --> merge1["merge"]
+        write -->|write fails| failed["keep in meta.failed,<br/>retry on every pull"]
+    end
+    subgraph push["Push: each outbox entry"]
+        direction TB
+        stat{"size and mtime match<br/>the synced state?"} -- yes --> drop["nothing to upload"]
+        stat -- no --> enc["read, encrypt chunks,<br/>upload missing blobs"]
+        enc --> commit["commit with parentRev"]
+        commit -->|201| done["update files"]
+        commit -->|409| merge2["apply or merge the head<br/>(at most 5 rounds)"]
+        merge2 --> commit
+        commit -->|400, 413, 422| keep["keep queued, go on"]
+        commit -->|other error| stop["stop the sync, keep the outbox"]
+    end
+    subgraph merge["Merge"]
+        direction TB
+        text{"text file?"} -- yes --> diff3["diff3 with the base revision"]
+        diff3 -->|clean, still parses| commitm["commit the result"]
+        diff3 -->|conflict| copy["remote wins the path,<br/>local saved as a conflict copy"]
+        text -- no --> copy
+    end
+    merge1 -.-> merge
+    merge2 -.-> merge
+```
+
 - **Pull:** for each change, decrypt the metadata, check it (crypto.md 8.3), and compare
   with `files`. The local file is always hashed first, so a stat that looks unchanged
   can't let a remote write replace an edit. If the local file is unchanged since the last
@@ -416,6 +514,27 @@ flowchart TD
   keys with codes computed locally from their public keys. Approving adds the key to the
   keyring, uploads the next version (retrying on `409 keyring_version`), then approves the
   key on the server.
+
+```mermaid
+sequenceDiagram
+    participant N as New device (pending)
+    participant S as Server
+    participant A as Active device
+    N->>S: login with a new key (pending)
+    Note over N: shows its pairing code
+    loop every 5 s until active
+        N->>S: POST /vaults/open
+        S-->>N: membership pending
+    end
+    A->>S: list the vault's pending keys
+    Note over A: computes each code from the public key
+    Note over N,A: the user compares the codes
+    A->>S: GET keyring, add the key, PUT next version (retry on 409)
+    A->>S: approve the key
+    N->>S: POST /vaults/open
+    S-->>N: membership active
+    N->>S: GET keyring, verify, sync
+```
 - **Recovery key:** offered once after this device creates a vault, and in the settings
   (create, replace, remove). A new key is shown once and set only after the user confirms
   they stored it. The pairing dialog has "Use a recovery key": the device opens the

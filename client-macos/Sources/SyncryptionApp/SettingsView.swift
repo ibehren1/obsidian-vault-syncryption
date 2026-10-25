@@ -117,9 +117,12 @@ struct GeneralTab: View {
                 LabeledContent("Vault", value: vault.config.vaultName)
                 LabeledContent("Device name", value: vault.config.deviceName)
             }
-            if !vault.warnings.isEmpty {
+            let problems = vault.problems.current()
+            if !problems.isEmpty {
                 Section("Recent problems") {
-                    ForEach(Array(vault.warnings.suffix(10).enumerated()), id: \.offset) { Text($0.element).font(.caption) }
+                    ForEach(Array(problems.suffix(10).reversed().enumerated()), id: \.offset) { _, p in
+                        Text("\(p.at.formatted(date: .abbreviated, time: .shortened))  \(p.text)").font(.caption)
+                    }
                 }
             }
             Section {

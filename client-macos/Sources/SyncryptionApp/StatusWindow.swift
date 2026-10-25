@@ -76,7 +76,10 @@ struct FolderStatus: View {
             }
             queueCard
             keysCard
-            if !vault.warnings.isEmpty || !(vault.lastReport?.conflicts.isEmpty ?? true) { problemsCard }
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                let problems = vault.problems.current(now: context.date)
+                if !problems.isEmpty { problemsCard(problems) }
+            }
             HStack {
                 Text("Approve, remove and change devices, set the recovery key and restore old versions in Settings.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -312,14 +315,21 @@ struct FolderStatus: View {
         }
     }
 
-    private var problemsCard: some View {
+    private func problemsCard(_ problems: [Problem]) -> some View {
         Card(title: "Recent problems", count: nil) {
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(vault.lastReport?.conflicts ?? [], id: \.self) { c in
-                    Label("Conflict copy: \(c)", systemImage: "doc.on.doc").font(.callout)
-                }
-                ForEach(Array(vault.warnings.suffix(8).enumerated()), id: \.offset) {
-                    Label($0.element, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.secondary)
+                ForEach(Array(problems.suffix(8).reversed().enumerated()), id: \.offset) { _, p in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(p.at.formatted(date: .abbreviated, time: .shortened))
+                            .foregroundStyle(.secondary).monospacedDigit()
+                            .frame(minWidth: 130, alignment: .leading)
+                        if p.isConflict {
+                            Label(p.text, systemImage: "doc.on.doc")
+                        } else {
+                            Label(p.text, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.callout)
                 }
             }
         }
