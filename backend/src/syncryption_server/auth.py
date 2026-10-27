@@ -29,6 +29,7 @@ from syncryption_server.errors import (
     user_disabled,
     vault_disabled,
 )
+from syncryption_server.metrics import ACTOR
 from syncryption_server.sshkeys import (
     NAMESPACE_AUTH,
     KeyFormatError,
@@ -551,8 +552,16 @@ def _caller(request: Request, state: AppState) -> tuple[Caller, bool]:
     ), seen
 
 
+def _note_actor(request: Request, caller: Caller) -> None:
+    """Tell the request metrics which device this is (the admin page's activity)."""
+    actor = request.scope.get(ACTOR)
+    if actor is not None:
+        actor["device"] = caller.device_id
+
+
 async def _authenticate(request: Request, state: AppState) -> Caller:
     caller, seen = await state.db.read(lambda: _caller(request, state))
+    _note_actor(request, caller)
     if seen:
 
         def touch() -> None:

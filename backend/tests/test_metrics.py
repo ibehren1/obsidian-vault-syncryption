@@ -11,7 +11,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from syncryption_server import PROTOCOL_VERSION, __version__
 from syncryption_server.app import create_app
 from syncryption_server.config import parse_networks
-from syncryption_server.metrics import S3_RESULTS, S3Metrics
+from syncryption_server.metrics import ACTIVITY_TTL, S3_RESULTS, DeviceActivity, S3Metrics
 from syncryption_server.storage import BlobNotFound, S3BlobStore, blob_key, s3_result
 from tests.helpers import ADMIN_TOKEN, SECRET, Device, blob
 
@@ -379,3 +379,60 @@ def test_snapshot_reports_s3_calls(settings, s3_settings):
     assert len(d["buckets"]) == len(s3["buckets"]) + 1 and d["buckets"][-1] == 1
     assert s3["uploadedBytes"] == len(data) and s3["downloadedBytes"] == 0
     assert s3["retries"]["put"] == 0 and s3["inFlight"] == 0
+
+
+def activity_of(client: TestClient, device_id: str | None) -> dict:
+    snap = client.get("/admin/api/activity", headers=BEARER).json()
+    (a,) = [a for a in snap["devices"] if a["deviceId"] == device_id]
+    return a
+
+
+def test_activity_is_counted_per_device(client, alice):
+    bob = Device(client, "bob", name="Pixel")
+    bob.login(SECRET)
+    bob.create_vault()
+    before = activity_of(client, alice.device_id)
+    alice.get(f"/api/v1/vaults/{alice.vault_id}/changes")
+    alice.get(f"/api/v1/vaults/{alice.vault_id}/wait", params={"timeout": 0})
+    # Another vault's: 403 or 404, an error of Alice's either way.
+    assert alice.get(f"/api/v1/vaults/{bob.vault_id}/changes").status_code >= 400
+    bob.get(f"/api/v1/vaults/{bob.vault_id}/changes")
+
+    a = activity_of(client, alice.device_id)
+    assert a["requests"] - before["requests"] == 2
+    assert a["waits"] - before["waits"] == 1
+    assert a["errors4xx"] - before["errors4xx"] == 1
+    assert a["routes"]["GET /api/v1/vaults/{vault_id}/wait"] == 1
+    assert a["responseBytes"] > before["responseBytes"]
+    b = activity_of(client, bob.device_id)
+    assert (b["username"], b["vaultName"], b["deviceName"]) == ("bob", "Personal", "Pixel")
+    assert b["routes"]["GET /api/v1/vaults/{vault_id}/changes"] == 1
+    # Logins and health checks have no session.
+    client.get("/health")
+    assert activity_of(client, None)["routes"]["GET /health"] == 1
+    # Never on /metrics.
+    text = client.get("/metrics").text
+    for secret in ("alice", "bob", "Pixel", alice.device_id, bob.device_id):
+        assert secret not in text
+
+
+def test_activity_drops_devices_unseen_for_an_hour():
+    now = [0.0]
+    activity = DeviceActivity(clock=lambda: now[0])
+    activity.record("old", "GET", "/health", 200, 0, 10)
+    now[0] = ACTIVITY_TTL / 2
+    activity.record("new", "GET", "/health", 200, 0, 10)
+    now[0] = ACTIVITY_TTL + 1
+    activity.prune()
+    assert list(activity.devices) == ["new"]
+
+
+def test_activity_keeps_the_most_recent_devices(monkeypatch):
+    monkeypatch.setattr("syncryption_server.metrics.ACTIVITY_MAX", 2)
+    now = [0.0]
+    activity = DeviceActivity(clock=lambda: now[0])
+    for i in range(3):
+        now[0] = i
+        activity.record(f"d{i}", "GET", "/health", 200, 0, 0)
+    activity.prune()
+    assert sorted(activity.devices) == ["d1", "d2"]

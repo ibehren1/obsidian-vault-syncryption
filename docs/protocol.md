@@ -688,7 +688,7 @@ API. Every route needs `ADMIN_TOKEN`.
   the login form (`401` after a wrong token).
 - **Pages:** `GET /admin` shows the login form or the dashboard's Vaults tab (each user,
   and under each vault its devices), `GET /admin?tab=performance` the Performance tab
-  (section 14.2);
+  (section 14.2), `GET /admin?tab=activity` the Activity tab (section 14.3);
   `POST /admin/{users|vaults}/{id}/{disable|enable|purge}` and
   `POST /admin/maintenance/{on|off}` (form field `message` for `on`) and
   `POST /admin/vaults/{id}/grace` (form field `hours`, a whole number from 1 to 8760, empty
@@ -697,6 +697,7 @@ API. Every route needs `ADMIN_TOKEN`.
   `/admin?done=<code>`.
 - **JSON:**
   - `GET /admin/api/performance` returns the snapshot of section 14.2.
+  - `GET /admin/api/activity` returns the totals per device of section 14.3.
   - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
     with the same values as `/health`.
   - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
@@ -797,8 +798,9 @@ browser's `localStorage`).
   `DISABLE_METRICS=TRUE`, which removes only `/metrics`.
 - **Page:** the admin pages and `/` have one inline stylesheet, which their CSP allows by
   its SHA-256 hash (`style-src 'sha256-…'`), so no other inline style applies.
-  `GET /admin/performance.js` (no login needed, static) is the only script on
-  the admin pages; only the Performance tab loads it, and its CSP adds
+  `GET /admin/performance.js` (no login needed, static) is the Performance tab's script,
+  and `GET /admin/activity.js` the Activity tab's (section 14.3); they are the only
+  scripts on the admin pages, each loaded by its own tab only, whose CSP adds
   `script-src 'self'; connect-src 'self'`. It turns two snapshots into rates: requests per
   second (also by kind: file commits, `409` conflicts, blob uploads and downloads, logins,
   `401`, `429`), bytes per second, the S3 calls (per second, failures, latency, bytes,
@@ -807,3 +809,28 @@ browser's `localStorage`).
   the histogram buckets (the overall ones leave out `/wait`). It keeps the last 60 readings
   of the main numbers and draws each as a small SVG line. A changed `startedAt` (a
   restart) starts the rates over.
+
+### 14.3 Activity
+The Activity tab lists every key that isn't revoked, and every device that made requests,
+busiest first, so the administrator sees which devices, vaults and users cause load. It
+refreshes on the same interval as the Performance tab (same dropdown and `localStorage`
+value).
+
+- **Data:** `GET /admin/activity.json` (session cookie or Bearer, no CSRF token) and
+  `GET /admin/api/activity` (Bearer only) return, with `Cache-Control: no-store`, `{"time",
+  "startedAt", "devices"}`. `devices` is `[{"deviceId", "username", "vaultName",
+  "deviceName", "fingerprint", "status", "requests", "waits", "errors4xx", "errors5xx",
+  "requestBytes", "responseBytes", "routes"}]`: totals since the server started, or since
+  the device was first seen again after an hour without requests (the server keeps at
+  most 5,000 devices). `requests` leaves out the `/wait` long-polls, counted in `waits`;
+  `routes` maps `"METHOD template"` to a count. The item with `deviceId` `null` holds the
+  requests without a session (login, health, the admin pages); its names are `null`, as
+  they are for a device deleted since. Neither endpoint is counted. The totals are kept
+  outside the metrics registry: `/metrics` names no user, vault or device.
+- **Page:** `admin-activity.js` adds up the change between two answers into a tally that
+  starts when the tab opens and lasts until it is closed or reloaded; a device the server
+  dropped keeps its tally, and after a restart the new totals count as the change. Rows
+  can be grouped by device, vault or user (kept in `localStorage`) and are sorted by
+  requests, then bytes, then waits. Columns: user, vault, device (name, short fingerprint,
+  pending), requests, requests per second over the last interval, waits, errors (4xx and
+  5xx), bytes received and sent, and the top route.

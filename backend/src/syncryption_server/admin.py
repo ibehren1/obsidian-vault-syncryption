@@ -52,6 +52,7 @@ Action = Literal["disable", "enable", "purge"]
 router = APIRouter(prefix="/admin", include_in_schema=False)
 
 PERFORMANCE_JS = (Path(__file__).parent / "static" / "admin-performance.js").read_bytes()
+ACTIVITY_JS = (Path(__file__).parent / "static" / "admin-activity.js").read_bytes()
 # The Performance tab's choices, in seconds; 0 pauses.
 INTERVALS = (1, 2, 5, 10, 30, 60, 0)
 DEFAULT_INTERVAL = 5
@@ -478,6 +479,11 @@ async def api_performance(admin: ApiAdmin, state: State) -> dict:
     return await metrics.snapshot(state)
 
 
+@router.get("/api/activity")
+async def api_activity(admin: ApiAdmin, state: State) -> dict:
+    return await metrics.activity(state)
+
+
 @router.get("/api/status")
 async def api_status(admin: ApiAdmin, state: State) -> dict:
     return status(state)
@@ -808,6 +814,7 @@ def _header(admin: Admin, tab: str) -> str:
         for name, label, href in (
             ("vaults", "Vaults", "/admin"),
             ("performance", "Performance", "/admin?tab=performance"),
+            ("activity", "Activity", "/admin?tab=activity"),
         )
     )
     return (
@@ -937,13 +944,22 @@ def _card(title: str, rows: str, card_id: str | None = None) -> str:
     return f'<section class="stripe"{attrs}><h2>{title}</h2><table>{rows}</table></section>'
 
 
-def _performance(admin: Admin) -> HTMLResponse:
-    """The Performance tab. The numbers are filled in by admin-performance.js."""
+def _interval() -> str:
+    """The refresh dropdown of the Performance and Activity tabs."""
     options = "".join(
         f'<option value="{s}"{" selected" if s == DEFAULT_INTERVAL else ""}>'
         f"{f'{s} s' if s else 'Paused'}</option>"
         for s in INTERVALS
     )
+    return (
+        '<div class="toolbar"><label>Refresh every '
+        f'<select id="interval">{options}</select></label>'
+        '<span class="muted" id="updated">Loading…</span></div>'
+    )
+
+
+def _performance(admin: Admin) -> HTMLResponse:
+    """The Performance tab. The numbers are filled in by admin-performance.js."""
     requests = (
         '<section class="stripe"><h2>Requests <span class="muted">(last interval)</span></h2>'
         '<div class="stats">'
@@ -1033,10 +1049,9 @@ def _performance(admin: Admin) -> HTMLResponse:
         + _line("Stored", "stored", spark=True),
     )
     body = (
-        _header(admin, "performance") + '<div class="toolbar"><label>Refresh every '
-        f'<select id="interval">{options}</select></label>'
-        '<span class="muted" id="updated">Loading…</span></div>'
-        '<noscript><p class="notice error">The Performance tab needs JavaScript. The same '
+        _header(admin, "performance")
+        + _interval()
+        + '<noscript><p class="notice error">The Performance tab needs JavaScript. The same '
         "numbers are in GET /admin/api/performance.</p></noscript>"
         + requests
         + f'<div class="cols">{sync}{load}</div>'
@@ -1045,6 +1060,30 @@ def _performance(admin: Admin) -> HTMLResponse:
         + storage
     )
     return html_page(body, script="/admin/performance.js")
+
+
+def _activity(admin: Admin) -> HTMLResponse:
+    """The Activity tab. The rows are filled in by admin-activity.js."""
+    section = (
+        '<section class="stripe"><h2>Activity <span class="muted" id="since">'
+        "(since this tab opened)</span></h2>"
+        '<div class="stats"><label>Group by <select id="groupby">'
+        '<option value="device" selected>Device</option><option value="vault">Vault</option>'
+        '<option value="user">User</option></select></label>'
+        '<span class="muted">Totals since this tab opened, busiest first. Requests leave out '
+        "the /wait long-polls, counted in Waits.</span></div>"
+        "<table><thead><tr><th>User</th><th>Vault</th><th>Device</th>"
+        '<th class="num">Requests</th><th class="num">Req/s</th><th class="num">Waits</th>'
+        '<th class="num">Errors</th><th class="num">Received</th><th class="num">Sent</th>'
+        '<th>Top route</th></tr></thead><tbody id="activity"></tbody></table></section>'
+    )
+    body = (
+        _header(admin, "activity")
+        + _interval()
+        + '<noscript><p class="notice error">The Activity tab needs JavaScript. The same '
+        "totals are in GET /admin/api/activity.</p></noscript>" + section
+    )
+    return html_page(body, script="/admin/activity.js")
 
 
 async def _form(request: Request) -> dict[str, str]:
@@ -1065,6 +1104,8 @@ async def page(request: Request, state: State, done: str = "", tab: str = "") ->
         return _login_page(status=401 if _bearer(request) else 200)
     if tab == "performance":
         return _performance(admin)
+    if tab == "activity":
+        return _activity(admin)
     message = MESSAGES.get(done)
     error = done not in SUCCESS
     users = await state.db.read(lambda: overview(state))
@@ -1077,6 +1118,24 @@ async def performance_json(request: Request, state: State) -> Response:
     if await _admin(request, state) is None:
         raise ApiError(401, "unauthenticated", "Log in first.")
     return JSONResponse(await metrics.snapshot(state), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/activity.json")
+async def activity_json(request: Request, state: State) -> Response:
+    """The Activity tab's data, with the session cookie (a GET changes nothing, so no CSRF)."""
+    if await _admin(request, state) is None:
+        raise ApiError(401, "unauthenticated", "Log in first.")
+    return JSONResponse(await metrics.activity(state), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/activity.js")
+async def activity_js() -> Response:
+    """The Activity tab's script. Static, so it needs no login."""
+    return Response(
+        ACTIVITY_JS,
+        media_type="text/javascript",
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/performance.js")

@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import re
 
 import pytest
@@ -202,6 +203,52 @@ def test_performance_snapshot(client, alice, vault):
     assert (snap["prunedRevisions"], snap["deletedBlobs"]) == (0, 0)
     for secret in ("alice", "Personal", alice.vault_id, alice.device_id):
         assert secret not in r.text
+
+
+def test_activity_tab(client, alice):
+    cookie, _ = login(client)
+    assert 'href="/admin?tab=activity"' in client.get("/admin", headers=cookie).text
+    page = client.get("/admin?tab=activity", headers=cookie)
+    assert page.status_code == 200
+    csp = page.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "connect-src 'self'" in csp
+    assert '<script src="/admin/activity.js"></script>' in page.text
+    for value_id in ("interval", "groupby", "activity", "since", "updated"):
+        assert f'id="{value_id}"' in page.text
+    js = client.get("/admin/activity.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    assert "innerHTML" not in js.text
+    assert 'name="token"' in client.get("/admin?tab=activity").text
+    assert client.get("/admin/activity.json").status_code == 401
+    assert client.get("/admin/api/activity").status_code == 401
+
+
+def test_activity_snapshot(client, alice):
+    phone = Device(client, "alice", name="Pixel")
+    phone.join(alice)
+    alice.get(f"/api/v1/vaults/{alice.vault_id}/changes")
+    cookie, _ = login(client)
+    r = client.get("/admin/activity.json", headers=cookie)
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    snap = r.json()
+    assert client.get("/admin/api/activity", headers=BEARER).json().keys() == snap.keys()
+    assert snap["startedAt"] <= snap["time"]
+    by_id = {d["deviceId"]: d for d in snap["devices"]}
+    mine = by_id[alice.device_id]
+    names = (mine["username"], mine["vaultName"], mine["deviceName"], mine["status"])
+    assert names == ("alice", "Personal", "MacBook", "active")
+    assert mine["fingerprint"].startswith("SHA256:")
+    assert mine["routes"]["GET /api/v1/vaults/{vault_id}/changes"] == 1
+    # Every key is listed, also one without requests yet.
+    assert phone.device_id in by_id
+    # The logins came before the sessions: counted without a device.
+    assert by_id[None]["routes"]["POST /api/v1/auth/verify"] >= 1
+    assert by_id[None]["username"] is None
+    # The tab's own polling isn't counted.
+    assert not any(k.startswith("GET /admin/") for k in by_id[None]["routes"])
+    # The Performance snapshot names nobody.
+    perf = client.get("/admin/api/performance", headers=BEARER).text
+    assert "activity" not in json.loads(perf) and alice.device_id not in perf
 
 
 def test_performance_counts_requests_without_metrics(settings):

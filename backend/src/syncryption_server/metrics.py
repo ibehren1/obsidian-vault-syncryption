@@ -2,17 +2,22 @@
 numbers as JSON for the admin page's Performance tab (`snapshot`), which works either way.
 
 Only counts: no label carries a username, vault name, id, path or key. Request metrics are
-labelled with the route template, never the raw path.
+labelled with the route template, never the raw path. The activity per device
+(`DeviceActivity`) is kept outside the Prometheus registry, so it appears only on the admin
+page's Activity tab (`activity`), never on `/metrics`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import time
 import urllib.request
+from collections import Counter as Tally
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,6 +37,7 @@ from prometheus_client.registry import Collector
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from syncryption_server import PROTOCOL_VERSION, __version__
+from syncryption_server.sshkeys import fingerprint, parse_public_key
 
 if TYPE_CHECKING:
     from syncryption_server.state import AppState
@@ -55,7 +61,20 @@ S3_RESULTS = ("ok", "not_found", "throttled", "client_error", "server_error", "c
 LITESTREAM_TIMEOUT = 2.0
 LITESTREAM_MAX_BYTES = 1024**2
 # Not counted: the scrapes and the admin page's own polling.
-SKIP = ("/metrics", "/admin/performance.json", "/admin/api/performance")
+SKIP = (
+    "/metrics",
+    "/admin/performance.json",
+    "/admin/api/performance",
+    "/admin/activity.json",
+    "/admin/api/activity",
+)
+# The scope key under which a request's authenticated device is recorded (`auth.py`).
+ACTOR = "syncryption.actor"
+# Long-polls are counted apart from the other requests of a device.
+WAIT_ROUTE = "/api/v1/vaults/{vault_id}/wait"
+# Activity of a device unseen this long (seconds) is dropped, and at most this many are kept.
+ACTIVITY_TTL = 3600
+ACTIVITY_MAX = 5000
 
 
 class ContainerCollector(Collector):
@@ -244,6 +263,63 @@ class S3Metrics:
             self.requests.labels(op, "ok")
 
 
+@dataclass
+class Activity:
+    """The request totals of one device since the server started (or since it was dropped)."""
+
+    requests: int = 0
+    waits: int = 0
+    errors4xx: int = 0
+    errors5xx: int = 0
+    request_bytes: int = 0
+    response_bytes: int = 0
+    routes: Tally[str] = field(default_factory=Tally)
+    last: float = 0.0
+
+
+class DeviceActivity:
+    """Requests per device, for the admin page: `None` holds the requests without a session
+    (logins, health, the admin pages). Bounded by ACTIVITY_TTL and ACTIVITY_MAX."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self.devices: dict[str | None, Activity] = {}
+
+    def record(
+        self,
+        device_id: str | None,
+        method: str,
+        route: str,
+        status: int,
+        request_bytes: int,
+        response_bytes: int,
+    ) -> None:
+        a = self.devices.get(device_id)
+        if a is None:
+            a = self.devices[device_id] = Activity()
+        if route == WAIT_ROUTE:
+            a.waits += 1
+        else:
+            a.requests += 1
+        if 400 <= status < 500:
+            a.errors4xx += 1
+        elif status >= 500:
+            a.errors5xx += 1
+        a.request_bytes += request_bytes
+        a.response_bytes += response_bytes
+        a.routes[f"{method} {route}"] += 1
+        a.last = self.clock()
+
+    def prune(self) -> None:
+        before = self.clock() - ACTIVITY_TTL
+        for key in [k for k, a in self.devices.items() if a.last < before]:
+            del self.devices[key]
+        if len(self.devices) > ACTIVITY_MAX:
+            oldest = sorted(self.devices, key=lambda k: self.devices[k].last)
+            for key in oldest[: len(self.devices) - ACTIVITY_MAX]:
+                del self.devices[key]
+
+
 class Metrics:
     """The collectors of one app. Each app has its own registry, so several apps can run in
     one process (the tests build many)."""
@@ -339,6 +415,7 @@ class Metrics:
         self.admin_token_failures = Counter(
             PREFIX + "admin_token_failures", "Wrong admin tokens.", registry=r
         )
+        self.activity = DeviceActivity()
         self.s3 = S3Metrics(r) if s3 else None
         self.litestream = LitestreamCollector(litestream) if litestream else None
         if self.litestream is not None:
@@ -385,6 +462,67 @@ async def render(state: AppState) -> bytes:
     if litestream is not None:
         body += litestream.text.encode()
     return body
+
+
+def _activity(state: AppState) -> list[dict]:
+    """Every key that isn't revoked, and every device with requests, with their totals (0 for
+    a device without requests since the server started, or for an hour). Runs on the
+    database thread. A device deleted meanwhile keeps its id, with null names."""
+    activity = state.metrics.activity
+    activity.prune()
+    seen = [k for k in activity.devices if k is not None]
+    rows = state.db.all(
+        "SELECT d.id, d.name, d.vault_name, d.public_key, d.status, u.username FROM devices d "
+        "JOIN users u ON u.id = d.user_id WHERE d.status != 'revoked' "
+        "OR d.id IN (SELECT value FROM json_each(?))",
+        json.dumps(seen),
+    )
+    names: dict[str | None, dict] = {
+        row["id"]: {
+            "username": row["username"],
+            "vaultName": row["vault_name"],
+            "deviceName": row["name"],
+            "fingerprint": fingerprint(parse_public_key(row["public_key"])),
+            "status": row["status"],
+        }
+        for row in rows
+    }
+    unknown = {
+        "username": None,
+        "vaultName": None,
+        "deviceName": None,
+        "fingerprint": None,
+        "status": None,
+    }
+    totals = dict(activity.devices)
+    out = []
+    for device_id in [*names, *(k for k in totals if k not in names)]:
+        a = totals.get(device_id) or Activity()
+        out.append(
+            {
+                "deviceId": device_id,
+                **names.get(device_id, unknown),
+                "requests": a.requests,
+                "waits": a.waits,
+                "errors4xx": a.errors4xx,
+                "errors5xx": a.errors5xx,
+                "requestBytes": a.request_bytes,
+                "responseBytes": a.response_bytes,
+                "routes": dict(a.routes),
+            }
+        )
+    return out
+
+
+async def activity(state: AppState) -> dict:
+    """The admin page's Activity tab: request totals per device since the server started.
+    The page adds up the changes between two answers, so its tally outlives a dropped
+    device's totals."""
+    return {
+        "time": time.time(),
+        "startedAt": state.metrics.started,
+        "devices": await state.db.read(lambda: _activity(state)),
+    }
 
 
 async def snapshot(state: AppState) -> dict:
@@ -527,20 +665,29 @@ class RequestMetrics:
             return
         start = time.perf_counter()
         status = 500
+        received = sent = 0
         m = self.metrics
+        # Filled in by authentication: shared, so copies of the scope see it too.
+        actor: dict[str, str] = {}
+        scope[ACTOR] = actor
 
         async def count_body() -> Message:
+            nonlocal received
             message = await receive()
             if message["type"] == "http.request":
-                m.request_bytes.inc(len(message.get("body", b"")))
+                n = len(message.get("body", b""))
+                received += n
+                m.request_bytes.inc(n)
             return message
 
         async def send_status(message: Message) -> None:
-            nonlocal status
+            nonlocal status, sent
             if message["type"] == "http.response.start":
                 status = message["status"]
             elif message["type"] == "http.response.body":
-                m.response_bytes.inc(len(message.get("body", b"")))
+                n = len(message.get("body", b""))
+                sent += n
+                m.response_bytes.inc(n)
             await send(message)
 
         m.in_flight.inc()
@@ -551,8 +698,9 @@ class RequestMetrics:
             route = scope.get("route")
             template = getattr(route, "path", None) or "unmatched"
             method = scope["method"]
-            self.metrics.requests.labels(method, template, str(status)).inc()
-            self.metrics.duration.labels(method, template).observe(time.perf_counter() - start)
+            m.requests.labels(method, template, str(status)).inc()
+            m.duration.labels(method, template).observe(time.perf_counter() - start)
+            m.activity.record(actor.get("device"), method, template, status, received, sent)
 
 
 async def watch_loop_lag(metrics: Metrics) -> None:

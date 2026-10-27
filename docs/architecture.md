@@ -51,7 +51,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `encoding` | `b64u`, RFC 3339 times, id formats |
 | `sshkeys` | devices' encryption keys (Ed25519 public keys in OpenSSH format): parsing, fingerprints, pairing codes, sshsig verification |
 | `state` | per-app state: settings, database, blob store, clock, rate limiter, long-poll notifier, blob locks, the in-memory copy of the maintenance flag, metrics |
-| `metrics` | Prometheus collectors in a per-app registry, the request middleware (labels by route template), the `/metrics` rendering, which counts users, vaults, keys, files, revisions, blobs and locks in SQLite at each scrape, the container's memory and CPU read from its own cgroup v2 files, and, with S3, the bucket calls by operation and result, their duration, retries and bytes, plus Litestream's own metrics, read from its listener on `127.0.0.1:9091` (the entrypoint passes the address in `SYNCRYPTION_LITESTREAM_METRICS` while Litestream replicates) and passed on unchanged |
+| `metrics` | Prometheus collectors in a per-app registry, the request middleware (labels by route template), the `/metrics` rendering, which counts users, vaults, keys, files, revisions, blobs and locks in SQLite at each scrape, the container's memory and CPU read from its own cgroup v2 files, and, with S3, the bucket calls by operation and result, their duration, retries and bytes, plus Litestream's own metrics, read from its listener on `127.0.0.1:9091` (the entrypoint passes the address in `SYNCRYPTION_LITESTREAM_METRICS` while Litestream replicates) and passed on unchanged; also the request totals per device for the admin Activity tab, kept outside the registry (the device comes from authentication through the request scope) |
 | `auth` | challenges, sshsig verification, joining with `SHARED_SECRET`, session tokens (5 minutes for a remote-only device, so each login renews its lease), the grace period sent at login, refusing locked devices and keeping remote-only devices out of the vault's management calls |
 | `devices` | the vault's keys (devices): list, approval (with the remote-only flag), removal, policy changes, locking and unlocking remote-only devices, `/devices/self` |
 | `vaults` | open/create the key's vault by name, keyring versions, recovery |
@@ -60,7 +60,7 @@ Python 3.12, managed with uv. Package `syncryption_server` under `backend/src/`.
 | `retention` | hourly pruning of old revisions (protocol.md 9.3) |
 | `sync` | revision commits with the `parentRev` check, history, change feed, long-poll |
 | `locks` | lease locks and `locksSeq` |
-| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode, each vault's remote-only grace period and storage quota, the Performance tab with its snapshot JSON and `static/admin-performance.js`) |
+| `admin` | `/admin` page and `/admin/api` (token, session cookie and CSRF, user and vault listing, disable, enable, purge, maintenance mode, each vault's remote-only grace period and storage quota, the Performance tab with its snapshot JSON and `static/admin-performance.js`, the Activity tab with its totals per device and `static/admin-activity.js`) |
 | `migrate` | `MIGRATE_TO_S3` and `MIGRATE_FROM_S3` one-shot copies, run by the entrypoint before serving |
 | `__main__` | the entrypoint's commands: `check`, `check-data`, `render`, `migrate`, `health`, `openapi` (the schema `npm run api-types` reads) and `apidocs` (generates `docs/api.md`) |
 

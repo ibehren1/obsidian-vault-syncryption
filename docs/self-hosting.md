@@ -236,7 +236,11 @@ and Litestream's replication of the database (status, syncs and sync errors, tim
 syncing, WAL written, uploads to S3 and their throughput). Rates cover the time since the previous refresh. A small line next to the
 main numbers shows their last 60 readings; it is kept in the browser and starts over when
 the page reloads. The process and container lines need Linux and
-show "–" elsewhere. This tab works also with `DISABLE_METRICS: "TRUE"`.
+show "–" elsewhere. This tab works also with `DISABLE_METRICS: "TRUE"`. **Activity** lists every
+device, busiest first, with the user and vault it belongs to: requests, requests per second
+over the last refresh, `/wait` long-polls, errors, bytes received and sent, and the top
+route. It refreshes on the same interval, and its totals are added up from when the tab
+opened until it is closed or reloaded. Group by Vault or User adds up their devices.
 
 - **Logging in:** the page asks for `ADMIN_TOKEN` and keeps you logged in for 12 hours
   (an HttpOnly, SameSite=Strict cookie). Five wrong tokens from one address block that
@@ -294,7 +298,8 @@ The message is optional: `maintenance/on` also works without a body. `graceSecon
 3600 to 31536000, or `null` for the default. `quotaBytes` is 1 to 2^50 bytes, or `null`
 for no quota. `GET /admin/api/status` returns the version,
 maintenance state and `adminContact`, and `GET /admin/api/performance` the numbers of the
-Performance tab (counters as totals since the server started). The API is
+Performance tab (counters as totals since the server started), and
+`GET /admin/api/activity` the totals per device behind the Activity tab. The API is
 described in [protocol.md](protocol.md), sections 2 and 14.
 
 ### 5.1 Metrics
