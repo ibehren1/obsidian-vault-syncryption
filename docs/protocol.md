@@ -563,9 +563,11 @@ deletes the blobs no revision references any more. The values are fixed:
 ```json
 { "seq": 1042, "locksSeq": 88, "keyringVersion": 4, "changed": true }
 ```
-- Returns as soon as vault `seq > since`, `locksSeq > locksSince` or, if `keyringSince` is
-  given, the keyring version `> keyringSince`, or after `timeout` seconds (0 to 25,
-  default 25) with `changed: false`. `since` and `locksSince` default to 0.
+- Returns as soon as vault `seq > since`, or, if `locksSince` is given, `locksSeq >
+  locksSince`, or, if `keyringSince` is given, the keyring version `> keyringSince`, or
+  after `timeout` seconds (0 to 25, default 25) with `changed: false`. `since` defaults
+  to 0. A client that doesn't use locks (the macOS client) leaves `locksSince` out, so lock
+  changes don't end its waits.
 - `seq`, `locksSeq` and `keyringVersion` are the vault's current values.
 - The wait wakes on commits, keyring uploads, lock changes, device removal, policy changes
   and locking, and the admin's disable, enable and maintenance switches. The session is
@@ -574,7 +576,8 @@ deletes the blobs no revision references any more. The values are fixed:
   its `403`.
 - The client then calls `/changes` or `/locks` as needed and loops.
 - On network errors it backs off exponentially, from 1 s up to 60 s. It also backs off
-  when a sync after a wake-up didn't reach `seq`, so a failing sync doesn't spin.
+  when a sync after a wake-up didn't reach `seq`, so a failing sync doesn't spin, and when
+  a wait ends early with `changed: true` but nothing the client follows has moved.
 - Implemented with an in-process `asyncio.Condition` per vault. There is only one
   container, so no cross-process notification is needed.
 

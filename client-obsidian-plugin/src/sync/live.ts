@@ -57,7 +57,8 @@ export class LiveLoop {
 				const keyring = this.opts.keyringVersion?.();
 				const r = await api.wait(vaultId, since, this.locksSince, this.opts.timeout ?? 25, keyring);
 				if (this.stopped) break;
-				if (r.locksSeq > this.locksSince) {
+				const locksMoved = r.locksSeq > this.locksSince;
+				if (locksMoved) {
 					this.locksSince = r.locksSeq;
 					await this.opts.onLocks();
 				}
@@ -67,6 +68,9 @@ export class LiveLoop {
 					const behind = keyring !== undefined && this.opts.keyringVersion!() < r.keyringVersion;
 					if ((await this.opts.cursor()) < r.seq || behind) await this.pause();
 					else this.backoff = MIN_BACKOFF_MS;
+				} else if (r.changed && !locksMoved) {
+					// The wait ended early with nothing this client follows: don't spin on it.
+					await this.pause();
 				} else {
 					this.backoff = MIN_BACKOFF_MS;
 				}

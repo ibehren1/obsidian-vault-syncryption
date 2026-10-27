@@ -40,6 +40,10 @@ public actor LiveLoop {
     private var backoff: Duration
     private var sleeper: Task<Void, any Error>?
     private var woken = false
+    /// This client doesn't use locks, so it leaves `locksSince` out and lock changes don't end
+    /// its waits. A server that counts locks anyway answers at once while its `locksSeq` is past
+    /// 0; then the loop sends back the last `locksSeq` it got.
+    private var locksSince: Int?
 
     public init(_ options: Options) {
         o = options
@@ -70,7 +74,7 @@ public actor LiveLoop {
             do {
                 let since = await o.cursor()
                 let keyring = await o.keyringVersion()
-                let r = try await o.api.wait(o.vaultId, since: since, locksSince: 0, timeout: o.timeout, keyringSince: keyring)
+                let r = try await o.api.wait(o.vaultId, since: since, locksSince: locksSince, timeout: o.timeout, keyringSince: keyring)
                 if Task.isCancelled { break }
                 if r.seq > since || r.keyringVersion > keyring {
                     await o.onChanges()
@@ -78,6 +82,10 @@ public actor LiveLoop {
                     let cursor = await o.cursor()
                     let version = await o.keyringVersion()
                     if cursor < r.seq || version < r.keyringVersion { await pause() } else { backoff = o.minBackoff }
+                } else if r.changed {
+                    // The wait ended early with nothing this client follows. Follow the locks if
+                    // they moved, and back off on the same answer again, so the loop never spins.
+                    if r.locksSeq != locksSince { locksSince = r.locksSeq } else { await pause() }
                 } else {
                     backoff = o.minBackoff
                 }

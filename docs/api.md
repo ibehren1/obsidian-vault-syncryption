@@ -451,7 +451,7 @@ Query parameters:
 
 #### `GET /api/v1/vaults/{vault_id}/wait`
 
-Long-poll for live updates: answers as soon as the vault's `seq`, `locksSeq` or keyring version has passed what the client knows, or after `timeout` seconds with `changed: false`. The client then calls `/changes` or `/locks` and waits again.
+Long-poll for live updates: answers as soon as the vault's `seq`, `locksSeq` or keyring version has passed what the client knows, or after `timeout` seconds with `changed: false`. Lock changes count only when `locksSince` is given, and the keyring only when `keyringSince` is, so a client that doesn't use locks isn't woken by them. The client then calls `/changes` or `/locks` and waits again.
 
 Path parameters:
 
@@ -464,7 +464,7 @@ Query parameters:
 | Name | Type | Required | Notes |
 |---|---|---|---|
 | `since` | `integer` | no | Default `0`, at least 0. |
-| `locksSince` | `integer` | no | Default `0`, at least 0. |
+| `locksSince` | `integer` \| `null` | no |  |
 | `keyringSince` | `integer` \| `null` | no |  |
 | `timeout` | `number` | no | Default `25`, 0 to 25. |
 

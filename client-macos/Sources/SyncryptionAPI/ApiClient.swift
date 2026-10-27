@@ -250,10 +250,11 @@ public actor ApiClient {
         _ = try await raw("DELETE", "\(vaultPath(vaultId))/locks/\(enc(fileId))?clientId=\(enc(clientId))")
     }
 
-    /// Also returns when the keyring version passes `keyringSince`, if given.
-    public func wait(_ vaultId: String, since: Int, locksSince: Int, timeout: Int = 25, keyringSince: Int? = nil) async throws -> WaitResponse {
+    /// Also returns when the locks pass `locksSince` or the keyring version passes `keyringSince`, if given.
+    public func wait(_ vaultId: String, since: Int, locksSince: Int? = nil, timeout: Int = 25, keyringSince: Int? = nil) async throws -> WaitResponse {
+        let locks = locksSince.map { "&locksSince=\($0)" } ?? ""
         let keyring = keyringSince.map { "&keyringSince=\($0)" } ?? ""
-        return try await call("GET", "\(vaultPath(vaultId))/wait?since=\(since)&locksSince=\(locksSince)&timeout=\(timeout)\(keyring)")
+        return try await call("GET", "\(vaultPath(vaultId))/wait?since=\(since)\(locks)&timeout=\(timeout)\(keyring)")
     }
 
     // MARK: Plumbing

@@ -1,9 +1,10 @@
 {
 	"id": "vault-syncryption",
 	"name": "Vault Syncryption",
-	"version": "0.1.40",
+	"version": "0.1.41",
 	"minAppVersion": "1.13.0",
 	"description": "Self-hosted, end-to-end encrypted sync for your whole vault.",
 	"author": "Isaac Behrens",
+	"authorUrl": "https://github.com/ibehren1",
 	"isDesktopOnly": false
 }

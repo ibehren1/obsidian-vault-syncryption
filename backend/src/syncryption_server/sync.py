@@ -324,13 +324,15 @@ async def wait(
     state: State,
     request: Request,
     since: Annotated[int, Query(ge=0)] = 0,
-    locksSince: Annotated[int, Query(ge=0)] = 0,
+    locksSince: Annotated[int | None, Query(ge=0)] = None,
     keyringSince: Annotated[int | None, Query(ge=0)] = None,
     timeout: Annotated[float, Query(ge=0, le=MAX_WAIT)] = MAX_WAIT,  # noqa: ASYNC109
 ) -> WaitResponse:
     """Long-poll for live updates: answers as soon as the vault's `seq`, `locksSeq` or
     keyring version has passed what the client knows, or after `timeout` seconds with
-    `changed: false`. The client then calls `/changes` or `/locks` and waits again."""
+    `changed: false`. Lock changes count only when `locksSince` is given, and the keyring
+    only when `keyringSince` is, so a client that doesn't use locks isn't woken by them.
+    The client then calls `/changes` or `/locks` and waits again."""
     await state.db.read(lambda: require_member(state, caller, vault_id))
 
     def current() -> sqlite3.Row:
@@ -346,7 +348,7 @@ async def wait(
         row = await state.db.read(current)
         return (
             row["seq"] > since
-            or row["locks_seq"] > locksSince
+            or (locksSince is not None and row["locks_seq"] > locksSince)
             or (keyringSince is not None and row["keyring_version"] > keyringSince)
         )
 

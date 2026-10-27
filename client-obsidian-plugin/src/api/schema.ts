@@ -480,7 +480,9 @@ export interface paths {
          * Wait
          * @description Long-poll for live updates: answers as soon as the vault's `seq`, `locksSeq` or
          *     keyring version has passed what the client knows, or after `timeout` seconds with
-         *     `changed: false`. The client then calls `/changes` or `/locks` and waits again.
+         *     `changed: false`. Lock changes count only when `locksSince` is given, and the keyring
+         *     only when `keyringSince` is, so a client that doesn't use locks isn't woken by them.
+         *     The client then calls `/changes` or `/locks` and waits again.
          */
         get: operations["wait_api_v1_vaults__vault_id__wait_get"];
         put?: never;
@@ -1829,7 +1831,7 @@ export interface operations {
         parameters: {
             query?: {
                 keyringSince?: number | null;
-                locksSince?: number;
+                locksSince?: number | null;
                 since?: number;
                 timeout?: number;
             };

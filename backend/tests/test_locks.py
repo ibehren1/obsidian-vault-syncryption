@@ -122,6 +122,22 @@ def test_wait_wakes_on_lock_changes(alice, phone, vault):
     assert out["body"]["locksSeq"] == seq + 1
 
 
+def test_wait_without_locks_since_ignores_locks(alice, phone, vault):
+    lock(alice, vault)
+    seq = phone.get(f"/api/v1/vaults/{vault}/wait?timeout=0").json()["seq"]
+    out = {}
+
+    def waiter():
+        out["body"] = phone.get(f"/api/v1/vaults/{vault}/wait?since={seq}&timeout=0.5").json()
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    lock(alice, vault)
+    t.join(5)
+    assert not t.is_alive()
+    assert out["body"]["changed"] is False
+
+
 def test_removing_a_device_releases_its_locks(alice, phone, vault):
     lock(phone, vault)
     seq = locks(alice, vault)["locksSeq"]

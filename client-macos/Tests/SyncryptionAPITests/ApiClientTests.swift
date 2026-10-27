@@ -334,7 +334,7 @@ struct ApiClientBackendTests {
         for id in got.blobs { objects.append(Bytes(try await b.getBlob(vaultId, id))) }
         #expect(try Objects.openChunks(fileKey: fileKey, fileId: fileId, meta: opened, objects) == content)
 
-        let waited = try await b.wait(vaultId, since: feed.cursor, locksSince: 0, timeout: 1)
+        let waited = try await b.wait(vaultId, since: feed.cursor, timeout: 1)
         #expect(waited.seq == feed.cursor)
     }
 

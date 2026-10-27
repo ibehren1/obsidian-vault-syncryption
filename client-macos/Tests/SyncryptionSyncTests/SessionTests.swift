@@ -259,4 +259,70 @@ struct LiveLoopTests {
         await live.stop()
         #expect(b.fs.text("live.md") == "hi")
     }
+
+    @Test func lockChangesDoNotEndAWait() async throws {
+        let (a, b) = try await twoDevices()
+        try await lockSomething(a)
+        let waits = try await countWaits(b, for: .seconds(1)) { try await lockSomething(a) }
+        #expect(waits == 1)
+    }
+
+    @Test func followsTheLocksOfAServerThatCountsThemAnyway() async throws {
+        let (a, b) = try await twoDevices()
+        try await lockSomething(a)
+        let answer = try await waitAnswer(b, locksSeq: 3)
+        // An older server: without `locksSince` it answers at once while its locksSeq is past 0.
+        b.transport.before = { r in
+            r.url.path.hasSuffix("/wait") && !(r.url.query ?? "").contains("locksSince") ? answer : nil
+        }
+        let waits = try await countWaits(b, for: .seconds(1))
+        #expect(waits == 2)
+    }
+
+    @Test func backsOffOnTheSameEarlyAnswer() async throws {
+        let (_, b) = try await twoDevices()
+        let answer = try await waitAnswer(b, locksSeq: 3)
+        b.transport.before = { r in r.url.path.hasSuffix("/wait") ? answer : nil }
+        // At once, the same answer again, then 1 s of backoff.
+        let waits = try await countWaits(b, for: .milliseconds(1500))
+        #expect(waits <= 3)
+    }
+
+    private func lockSomething(_ d: TestDevice) async throws {
+        _ = try await d.session.api.acquireLock(d.session.vault.id, Primitives.random(32).b64u, clientId: Primitives.random(16).b64u)
+    }
+
+    /// A `changed: true` answer with the device's own cursor and keyring version.
+    private func waitAnswer(_ d: TestDevice, locksSeq: Int) async throws -> HttpResponse {
+        try await d.engine.sync()
+        let seq = (try? d.store.meta(MetaKey.cursor, as: Int.self)) ?? 0
+        let body = WaitResponse(changed: true, keyringVersion: await d.session.version(), locksSeq: locksSeq, seq: seq)
+        return HttpResponse(status: 200, headers: ["content-type": "application/json", versionHeader: "0.1.36", protocolHeader: "\(protocolVersion)"], body: try JSONEncoder().encode(body))
+    }
+
+    /// Run the live loop for `duration`, with `during` once it has started, and count its waits.
+    private func countWaits(_ d: TestDevice, for duration: Duration, during: () async throws -> Void = {}) async throws -> Int {
+        let engine = d.engine
+        let store = d.store
+        let session = d.session
+        try await engine.sync()
+        let waits = Counter()
+        var o = LiveLoop.Options(api: session.api, vaultId: session.vault.id,
+                                 cursor: { await waits.add(); return (try? store.meta(MetaKey.cursor, as: Int.self)) ?? 0 },
+                                 keyringVersion: { await session.version() },
+                                 onChanges: { _ = try? await engine.sync() })
+        o.timeout = 5
+        let live = LiveLoop(o)
+        await live.start()
+        try await Task.sleep(for: .milliseconds(200))
+        try await during()
+        try await Task.sleep(for: duration)
+        await live.stop()
+        return await waits.value
+    }
+}
+
+private actor Counter {
+    var value = 0
+    func add() { value += 1 }
 }

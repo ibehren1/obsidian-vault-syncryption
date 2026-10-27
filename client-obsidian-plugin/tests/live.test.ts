@@ -66,3 +66,32 @@ describe("LiveLoop backoff", () => {
 		expect(errors[0]).toBe(maintenance);
 	});
 });
+
+describe("LiveLoop early answers", () => {
+	it("backs off when a wait ends early with nothing it follows", async () => {
+		const api = {
+			wait: async () => ({ seq: 0, locksSeq: 0, keyringVersion: 1, changed: true }),
+		} as unknown as ApiClient;
+		const sleeps: number[] = [];
+		let done = (): void => {};
+		const twice = new Promise<void>((r) => (done = r));
+		const loop: LiveLoop = new LiveLoop({
+			api,
+			vaultId: "v",
+			cursor: async () => 0,
+			onChanges: async () => {},
+			onLocks: async () => {},
+			sleep: async (ms) => {
+				sleeps.push(ms);
+				if (sleeps.length === 2) {
+					void loop.stop();
+					done();
+				}
+			},
+		});
+		loop.start();
+		await twice;
+		await loop.stop();
+		expect(sleeps).toEqual([1000, 2000]);
+	});
+});
