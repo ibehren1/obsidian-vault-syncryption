@@ -83,10 +83,11 @@ public enum TestBackend {
         return paths.map { URL(filePath: $0).appending(path: tool) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    /// A transport that looks like its own address (the server trusts the last
-    /// X-Forwarded-For entry), so the per-IP auth rate limit doesn't slow the tests down.
+    /// A transport whose every request looks like it comes from a new address (the server
+    /// trusts the last X-Forwarded-For entry), so the per-IP auth rate limit never stops a
+    /// test: a device that pairs, replaces its key and is removed logs in often in a minute.
     public static func transport() -> HookTransport {
-        HookTransport(inner: ForwardedTransport(ip: "10.\(Int.random(in: 1...254)).\(Int.random(in: 1...254)).\(Int.random(in: 1...254))"))
+        HookTransport(inner: ForwardedTransport())
     }
 
     /// A name no other test uses.
@@ -108,12 +109,11 @@ final class Mutex<T>: @unchecked Sendable {
 }
 
 struct ForwardedTransport: Transport {
-    let ip: String
     let inner = URLSessionTransport()
 
     func send(_ request: HttpRequest, timeout: TimeInterval) async throws -> HttpResponse {
         var r = request
-        r.headers["X-Forwarded-For"] = ip
+        r.headers["X-Forwarded-For"] = "10.\((1...3).map { _ in String(Int.random(in: 1...254)) }.joined(separator: "."))"
         return try await inner.send(r, timeout: timeout)
     }
 }
