@@ -8,7 +8,7 @@ import asyncio
 import os
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol
@@ -149,11 +149,14 @@ def s3_result(error: Exception) -> str:
 
 
 class _Call:
-    """One measured S3 call: `seen` notes the retries botocore made for its response."""
+    """One measured S3 call: `seen` notes the retries botocore made for its response.
+    `sent` and `received` are its body bytes, for network monitoring."""
 
     def __init__(self, metrics: S3Metrics | None, operation: str):
         self.metrics = metrics
         self.operation = operation
+        self.sent = 0
+        self.received = 0
 
     def seen(self, response: dict[str, Any]) -> dict[str, Any]:
         retries = response.get("ResponseMetadata", {}).get("RetryAttempts") or 0
@@ -170,9 +173,16 @@ class S3BlobStore:
     most others accept.
     """
 
-    def __init__(self, settings: S3Settings, metrics: S3Metrics | None = None):
+    def __init__(
+        self,
+        settings: S3Settings,
+        metrics: S3Metrics | None = None,
+        traffic: Callable[[int, int], None] | None = None,
+    ):
         self.settings = settings
         self.metrics = metrics
+        # Told each call's bytes sent and received (netmon.NetMonitor.s3).
+        self.traffic = traffic
         self._stack: AsyncExitStack | None = None
         self._client: Any = None
 
@@ -207,17 +217,27 @@ class S3BlobStore:
 
     @asynccontextmanager
     async def _measure(self, operation: str) -> AsyncIterator[_Call]:
-        """Count and time the S3 call made inside, by its result. A cancelled call is left
-        out of the counts."""
+        """Count and time the S3 call made inside, by its result, and report its bytes to
+        `traffic`, failed and cancelled calls included."""
+        call = _Call(self.metrics, operation)
+        try:
+            async with self._timed(call):
+                yield call
+        finally:
+            if self.traffic is not None:
+                self.traffic(call.sent, call.received)
+
+    @asynccontextmanager
+    async def _timed(self, call: _Call) -> AsyncIterator[None]:
+        """A cancelled call is left out of the counts."""
         m = self.metrics
-        call = _Call(m, operation)
         if m is None:
-            yield call
+            yield
             return
         start = time.perf_counter()
         m.in_flight.inc()
         try:
-            yield call
+            yield
             result = "ok"
         except Exception as e:
             result = s3_result(e)
@@ -230,8 +250,8 @@ class S3BlobStore:
         finally:
             m.in_flight.dec()
             if result is not None:
-                m.requests.labels(operation, result).inc()
-                m.duration.labels(operation).observe(time.perf_counter() - start)
+                m.requests.labels(call.operation, result).inc()
+                m.duration.labels(call.operation).observe(time.perf_counter() - start)
 
     async def ping(self) -> None:
         async with self._measure("ping") as call:
@@ -245,6 +265,7 @@ class S3BlobStore:
     async def put(self, key: str, data: bytes) -> None:
         _check_key(key)
         async with self._measure("put") as call:
+            call.sent = len(data)
             call.seen(
                 await self._client.put_object(Bucket=self.settings.bucket, Key=key, Body=data)
             )
@@ -260,6 +281,7 @@ class S3BlobStore:
                 )
                 async with response["Body"] as body:
                     data = await body.read()
+                call.received = len(data)
         except Exception as e:
             if self._not_found(e):
                 raise BlobNotFound(key) from e

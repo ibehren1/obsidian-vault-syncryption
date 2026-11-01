@@ -20,10 +20,12 @@ from syncryption_server import (
     __version__,
     admin,
     auth,
+    billing,
     blobs,
     devices,
     locks,
     metrics,
+    netmon,
     retention,
     sync,
     vaults,
@@ -182,9 +184,13 @@ def home_page(state: AppState, origin: str, health: dict[str, object]) -> HTMLRe
     return admin.html_page(body, title="Vault Syncryption")
 
 
-def make_blob_store(settings: Settings, s3_metrics: metrics.S3Metrics | None = None) -> BlobStore:
+def make_blob_store(
+    settings: Settings,
+    s3_metrics: metrics.S3Metrics | None = None,
+    traffic: Callable[[int, int], None] | None = None,
+) -> BlobStore:
     if settings.blob_s3 is not None:
-        return S3BlobStore(settings.blob_s3, s3_metrics)
+        return S3BlobStore(settings.blob_s3, s3_metrics, traffic)
     return LocalBlobStore(settings.data_dir)
 
 
@@ -252,6 +258,7 @@ def create_app(
         s3=settings.blob_s3 is not None,
         litestream=settings.litestream_metrics,
     )
+    monitor = netmon.NetMonitor()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -263,16 +270,21 @@ def create_app(
             await asyncio.to_thread(db.close)
             log.error("%s", e)
             raise
-        blob_store = store or make_blob_store(settings, app_metrics.s3)
+        blob_store = store or make_blob_store(settings, app_metrics.s3, monitor.s3)
         await blob_store.start()
-        state = AppState(settings=settings, db=db, store=blob_store, metrics=app_metrics)
+        state = AppState(
+            settings=settings, db=db, store=blob_store, metrics=app_metrics, netmon=monitor
+        )
         state.maintenance = await db.run(lambda: load_maintenance(db))
         if clock is not None:
             state.clock = clock
+        await monitor.start(settings.data_dir, lambda: state.clock())
         app.state.ctx = state
         tasks = [
             asyncio.create_task(_gc_loop(state)),
             asyncio.create_task(metrics.watch_loop_lag(app_metrics)),
+            asyncio.create_task(monitor.run(state)),
+            asyncio.create_task(billing.run(state)),
         ]
         try:
             yield
@@ -282,6 +294,7 @@ def create_app(
             for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            await monitor.stop(state)
             await blob_store.close()
             await asyncio.to_thread(db.close)
 
@@ -309,6 +322,8 @@ def create_app(
     # Added last, so it is outermost and counts the maintenance 503 and the 413 too. Also with
     # DISABLE_METRICS, which removes only `/metrics`: the admin page shows the same numbers.
     app.add_middleware(metrics.RequestMetrics, metrics=app_metrics)
+    # Outside even that, so network monitoring counts `/metrics` and the admin's polling.
+    app.add_middleware(netmon.TrafficMonitor, monitor=monitor)
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:

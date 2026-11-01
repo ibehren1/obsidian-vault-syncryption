@@ -11,6 +11,9 @@ On a demo server (`DEMO_MODE`), the page and the GET API are public and every ac
 refused, and users are purged a day after they join.
 Maintenance mode pauses the whole sync API until it is turned off (protocol.md 14.1). The
 Performance tab polls the server's metrics and shows them as rates (protocol.md 14.2).
+The Network tab graphs the traffic network monitoring records and deletes old data
+(protocol.md 14.4). The Billing tab estimates each month's AWS cost per user and vault
+(protocol.md 14.5).
 """
 
 import base64
@@ -21,6 +24,7 @@ import logging
 import secrets
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import parse_qs, urlsplit
@@ -29,7 +33,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from syncryption_server import PROTOCOL_VERSION, __version__, metrics
+from syncryption_server import PROTOCOL_VERSION, __version__, billing, metrics, netmon
 from syncryption_server.auth import REMOTE_ONLY_GRACE, client_ip, limit_key, request_origin
 from syncryption_server.config import DEMO_QUOTA, DEMO_TTL, MAX_NOTE, note_problem
 from syncryption_server.encoding import rfc3339
@@ -53,6 +57,7 @@ router = APIRouter(prefix="/admin", include_in_schema=False)
 
 PERFORMANCE_JS = (Path(__file__).parent / "static" / "admin-performance.js").read_bytes()
 ACTIVITY_JS = (Path(__file__).parent / "static" / "admin-activity.js").read_bytes()
+NETWORK_JS = (Path(__file__).parent / "static" / "admin-network.js").read_bytes()
 # The Performance tab's choices, in seconds; 0 pauses.
 INTERVALS = (1, 2, 5, 10, 30, 60, 0)
 DEFAULT_INTERVAL = 5
@@ -94,6 +99,15 @@ MESSAGES = {
     "bad_quota": f"The quota is a whole number of GB from 1 to {MAX_QUOTA // GB}, "
     "or empty for no quota.",
     "demo": "This is a demo server: the admin page is read-only.",
+    "netmon_pruned": "Old monitoring data deleted. The hourly totals for billing are kept.",
+    "netmon_auto": "Automatic deletion saved. It runs every hour.",
+    "bad_days": f"Days is a whole number from 0 to {netmon.MAX_DAYS} (from 1 for automatic "
+    "deletion, or empty to turn it off).",
+    "bad_filter": "Unknown filter.",
+    "bad_tz": "Unknown time zone.",
+    "rates_set": "Rates saved. They apply to the current month and later ones.",
+    "bad_rate": f"Each rate is a number of dollars from 0 to {billing.MAX_RATE:g}.",
+    "bad_month": "Unknown month: use YYYY-MM, not in the future.",
 }
 # Codes that aren't errors, shown in green.
 SUCCESS = (
@@ -105,6 +119,9 @@ SUCCESS = (
     "maintenance_off",
     "grace_set",
     "quota_set",
+    "netmon_pruned",
+    "netmon_auto",
+    "rates_set",
 )
 
 
@@ -503,6 +520,160 @@ async def api_maintenance(
     return Response(status_code=204)
 
 
+class NetworkRequest(BaseModel):
+    autoPruneDays: int | None = Field(
+        None, description=f"Delete data older than this many days (1 to {netmon.MAX_DAYS})."
+    )
+    clearAutoPrune: bool = Field(False, description="Turn automatic deletion off.")
+
+
+class PruneRequest(BaseModel):
+    olderThanDays: int = Field(description=f"0 (everything) to {netmon.MAX_DAYS}.")
+
+
+def _netmon_error(e: netmon.NetmonError) -> ApiError:
+    return bad_request(MESSAGES[e.code])
+
+
+async def set_network(state: AppState, days: int | None, clear: bool):
+    """Set or clear the automatic deletion; read-only on a demo server."""
+    if state.settings.demo_mode:
+        raise AdminError("demo", 403)
+    if days is not None or clear:
+        await state.netmon.set_auto_prune(None if clear else days)
+
+
+async def prune_network(state: AppState, days: int) -> int:
+    if state.settings.demo_mode:
+        raise AdminError("demo", 403)
+    return await state.netmon.prune(days)
+
+
+async def network_traffic(
+    state: AppState, group: str, filter_key: str | None, start: int | None, end: int | None
+) -> dict:
+    if group not in netmon.GROUPS:
+        raise netmon.NetmonError("bad_filter")
+    data = await state.netmon.traffic(group, filter_key or None, start, end)  # type: ignore[arg-type]
+    return {"status": await state.netmon.status(), **data}
+
+
+async def network_totals(
+    state: AppState, group: str, filter_key: str | None, period: str, tz: str, before: int | None
+) -> dict:
+    if group not in netmon.GROUPS or period not in ("hour", "day", "week", "month"):
+        raise netmon.NetmonError("bad_filter")
+    return await state.netmon.period_totals(group, filter_key or None, period, tz, before)  # type: ignore[arg-type]
+
+
+@router.get("/api/network")
+async def api_network(admin: ApiAdmin, state: State) -> dict:
+    """Network monitoring: its settings, and the size and span of its data."""
+    return await state.netmon.status()
+
+
+@router.post("/api/network", status_code=204)
+async def api_network_set(body: NetworkRequest, admin: ApiAdmin, state: State) -> Response:
+    """Set or clear the automatic deletion of network monitoring data."""
+    try:
+        await set_network(state, body.autoPruneDays, body.clearAutoPrune)
+    except AdminError as e:
+        raise _api_error(e) from e
+    except netmon.NetmonError as e:
+        raise _netmon_error(e) from e
+    return Response(status_code=204)
+
+
+@router.post("/api/network/prune")
+async def api_network_prune(body: PruneRequest, admin: ApiAdmin, state: State) -> dict:
+    """Delete the monitoring data older than `olderThanDays` days."""
+    try:
+        return {"deletedRows": await prune_network(state, body.olderThanDays)}
+    except AdminError as e:
+        raise _api_error(e) from e
+    except netmon.NetmonError as e:
+        raise _netmon_error(e) from e
+
+
+@router.get("/api/network/traffic")
+async def api_network_traffic(
+    admin: ApiAdmin,
+    state: State,
+    group: str = "device",
+    filter: str = "",
+    start: int | None = None,
+    end: int | None = None,
+) -> dict:
+    """The Network tab's graphs, range totals and summary (protocol.md 14.4)."""
+    try:
+        return await network_traffic(state, group, filter, start, end)
+    except netmon.NetmonError as e:
+        raise _netmon_error(e) from e
+
+
+@router.get("/api/network/totals")
+async def api_network_totals(
+    admin: ApiAdmin,
+    state: State,
+    group: str = "device",
+    filter: str = "",
+    period: str = "day",
+    tz: str = "UTC",
+    before: int | None = None,
+) -> dict:
+    """The Network tab's totals per hour, day, week or month (protocol.md 14.4)."""
+    try:
+        return await network_totals(state, group, filter, period, tz, before)
+    except netmon.NetmonError as e:
+        raise _netmon_error(e) from e
+
+
+class RatesRequest(BaseModel):
+    transferPerGb: float = Field(description="Dollars per GB (2^30 bytes) sent to clients.")
+    localPerGbMonth: float = Field(description="Dollars per GB-month on the server's disk.")
+    s3PerGbMonth: float = Field(description="Dollars per GB-month in S3.")
+
+
+def _billing_error(e: billing.BillingError) -> ApiError:
+    return bad_request(MESSAGES[e.code])
+
+
+async def set_rates(state: AppState, rates: billing.Rates) -> None:
+    if state.settings.demo_mode:
+        raise AdminError("demo", 403)
+    await billing.set_rates(state, rates)
+
+
+@router.get("/api/billing")
+async def api_billing(admin: ApiAdmin, state: State, month: str = "") -> dict:
+    """One month's estimated costs per user and vault (protocol.md 14.5)."""
+    try:
+        return await billing.month_report(state, month or billing.month_of(state.now()))
+    except billing.BillingError as e:
+        raise _billing_error(e) from e
+
+
+@router.get("/api/billing/months")
+async def api_billing_months(admin: ApiAdmin, state: State) -> dict:
+    """Every month with data, newest first, with its totals, and the current rates."""
+    rates = await state.db.read(lambda: billing.rates_at(state.db, state.now()))
+    return {"months": await billing.months(state), "rates": rates.json()}
+
+
+@router.post("/api/billing/rates", status_code=204)
+async def api_billing_rates(body: RatesRequest, admin: ApiAdmin, state: State) -> Response:
+    """Set the rates, from now on: the current month is billed at them, past months aren't."""
+    try:
+        await set_rates(
+            state, billing.Rates(body.transferPerGb, body.localPerGbMonth, body.s3PerGbMonth)
+        )
+    except AdminError as e:
+        raise _api_error(e) from e
+    except billing.BillingError as e:
+        raise _billing_error(e) from e
+    return Response(status_code=204)
+
+
 class GraceRequest(BaseModel):
     graceSeconds: int | None = Field(
         description=f"{MIN_GRACE} to {MAX_GRACE}, or null for the default ({REMOTE_ONLY_GRACE})."
@@ -637,6 +808,41 @@ section.stripe td:first-child { width: 100%; }
 section.stripe td.num { white-space: nowrap; }
 td.trend { padding-top: .35rem; }
 td.trend .spark { margin: 0; }
+/* The Network tab. */
+.tag.on { background: #2b8a3e; }
+.forms { display: flex; flex-direction: column; gap: .5rem; }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.5rem; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart .axis { font-size: 11px; fill: #777; }
+.chart .grid { stroke: #eceeef; }
+.chart .base { stroke: #b9bcbf; }
+.chart .gap { fill: #e6e7e3; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr)); gap: 0 1rem; }
+.chart .cross { stroke: #2d2f31; stroke-width: 1; }
+.chart .empty { font-size: 13px; fill: #777; }
+.legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin: .5rem 0; }
+.key { display: inline-flex; align-items: center; gap: .35rem; }
+.swatch { display: inline-block; width: .75rem; height: .75rem; border-radius: 3px; }
+.legend .gapkey { background: #e6e7e3; border: 1px solid #d5d7d9; }
+table.pick tbody tr { cursor: pointer; }
+table.pick tbody tr:hover { background: #f5f8f3; }
+tr.sub td { color: #555; font-size: .9rem; }
+tr.sub td:first-child { padding-left: 1.5rem; }
+.tooltip {
+  position: fixed;
+  z-index: 10;
+  pointer-events: none;
+  background: #fff;
+  border: 1px solid #d5d7d9;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
+  padding: .4rem .6rem;
+  font-size: .85rem;
+  max-width: 24rem;
+}
+.tooltip .row { display: flex; align-items: center; gap: .4rem; }
+.tooltip .row .v { margin-left: auto; padding-left: 1rem; font-variant-numeric: tabular-nums; }
 """
 # The CSP allows this one stylesheet by its hash, so no other inline style can apply.
 STYLE_HASH = "sha256-" + base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
@@ -815,6 +1021,8 @@ def _header(admin: Admin, tab: str) -> str:
             ("vaults", "Vaults", "/admin"),
             ("performance", "Performance", "/admin?tab=performance"),
             ("activity", "Activity", "/admin?tab=activity"),
+            ("network", "Network", "/admin?tab=network"),
+            ("billing", "Billing", "/admin?tab=billing"),
         )
     )
     return (
@@ -1086,13 +1294,274 @@ def _activity(admin: Admin) -> HTMLResponse:
     return html_page(body, script="/admin/activity.js")
 
 
+def _when_unix(t: int | None) -> str:
+    return _when(rfc3339(t)) if t is not None else "never"
+
+
+def _network_controls(admin: Admin, status: dict) -> str:
+    """Since when it records, the space its data takes, and the deletion forms."""
+    state_line = (
+        f"Recording since {_when_unix(status['since'])}, when the server started: every "
+        "request's bytes on the web port and every S3 call's bytes, per device, per minute. "
+    )
+    if status["rows"]:
+        data = (
+            f"Data from {_when_unix(status['oldest'])} to {_when_unix(status['newest'])}: "
+            f"{status['rows']:,} rows, {_size(status['bytes'])} in netmon.db on the data disk."
+        )
+    elif status["bytes"]:
+        data = f"No data yet; netmon.db takes {_size(status['bytes'])}."
+    else:
+        data = "No data."
+    auto = status["autoPruneDays"]
+    auto_line = (
+        f"Data older than {auto} days is deleted automatically every hour."
+        if auto
+        else "Data is kept until you delete it."
+    )
+    parts = [
+        '<section class="stripe"><h2>Network monitoring</h2>',
+        f'<p>{state_line}<span class="muted">{data} {auto_line}</span></p>',
+    ]
+    if not admin.read_only:
+        csrf = f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf or "")}">'
+        parts.append('<div class="forms">')
+        if status["rows"] or status["bytes"]:
+            parts.append(
+                f'<form method="post" action="/admin/network/prune">{csrf}'
+                '<label>Delete data older than <input name="days" size="4" '
+                'inputmode="numeric" required aria-label="Days"> days</label> '
+                '<button class="danger">Delete</button> '
+                '<span class="muted">(0 deletes everything; the hourly totals for billing '
+                "stay)</span></form>"
+                f'<form method="post" action="/admin/network/auto-prune">{csrf}'
+                '<label>Delete data older than <input name="days" size="4" '
+                f'inputmode="numeric" value="{auto or ""}" placeholder="never" '
+                'aria-label="Days"> days automatically</label> <button>Save</button></form>'
+            )
+        parts.append("</div>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _network(admin: Admin, status: dict, message: str | None, error: bool) -> HTMLResponse:
+    """The Network tab. The graphs and tables are filled in by admin-network.js."""
+    notice = (
+        f'<p class="notice{" error" if error else ""}">{html.escape(message)}</p>'
+        if message
+        else ""
+    )
+    ranges = "".join(
+        f'<option value="{v}"{" selected" if v == "86400" else ""}>{label}</option>'
+        for v, label in (
+            ("3600", "Last hour"),
+            ("21600", "Last 6 hours"),
+            ("86400", "Last 24 hours"),
+            ("604800", "Last 7 days"),
+            ("2592000", "Last 30 days"),
+            ("all", "All monitored time"),
+        )
+    )
+    groups = (
+        '<option value="device" selected>Device</option><option value="vault">Vault</option>'
+        '<option value="user">User</option><option value="client">Client</option>'
+    )
+    toolbar = (
+        '<div class="toolbar"><div class="filters">'
+        f'<label>Range <select id="range">{ranges}</select></label>'
+        f'<label>Group by <select id="groupby">{groups}</select></label>'
+        '<span id="filter" hidden>Only <b id="filter-label"></b> '
+        '<button id="filter-clear" type="button">Show all</button></span></div>'
+        '<span class="muted" id="updated">Loading…</span></div>'
+    )
+    fields = (
+        '<th class="num">Web in</th><th class="num">Web out</th><th class="num">Requests</th>'
+        '<th class="num">S3 in</th><th class="num">S3 out</th><th class="num">S3 calls</th>'
+    )
+    summary = (
+        '<section class="stripe"><h2>Totals <span class="muted" id="summary-scope"></span>'
+        f"</h2><table><thead><tr><th>Period</th>{fields}</tr></thead>"
+        '<tbody id="summary"></tbody></table></section>'
+    )
+    charts = "".join(
+        f'<section class="stripe chart-card"><h2>{title} <span class="muted">{note}</span></h2>'
+        f'<div class="chart" id="chart-{key}"></div></section>'
+        for key, title, note in (
+            ("web_in", "Web in", "(received from clients, per second)"),
+            ("web_out", "Web out", "(sent to clients, per second)"),
+            ("s3_in", "S3 in", "(downloaded from the bucket, per second)"),
+            ("s3_out", "S3 out", "(uploaded to the bucket, per second)"),
+        )
+    )
+    legend = '<div class="legend" id="legend"></div>'
+    table = (
+        '<section class="stripe"><h2>By <span id="group-name">device</span> '
+        '<span class="muted">(selected range, busiest first; click a row to show only it)</span>'
+        f'</h2><table class="pick"><thead><tr><th>Name</th><th>Client</th>{fields}</tr>'
+        '</thead><tbody id="groups"></tbody></table></section>'
+    )
+    periods = (
+        '<section class="stripe"><h2>Totals by period</h2><div class="toolbar">'
+        '<label>Period <select id="period"><option value="hour">Hour</option>'
+        '<option value="day" selected>Day</option><option value="week">Week</option>'
+        '<option value="month">Month</option></select></label>'
+        '<span class="muted" id="tz"></span></div>'
+        f'<table class="pick"><thead><tr><th>Period</th>{fields}<th>Busiest</th></tr></thead>'
+        '<tbody id="periods"></tbody></table>'
+        '<p><button id="older" type="button" hidden>Older</button></p></section>'
+    )
+    body = (
+        _header(admin, "network")
+        + notice
+        + _network_controls(admin, status)
+        + '<noscript><p class="notice error">The graphs need JavaScript. The same data is in '
+        "GET /admin/api/network/traffic and /admin/api/network/totals.</p></noscript>"
+        + toolbar
+        + summary
+        + legend
+        + f'<div class="charts">{charts}</div>'
+        + table
+        + periods
+        + '<div class="tooltip" id="tooltip" hidden></div>'
+    )
+    return html_page(body, script="/admin/network.js")
+
+
+def _usd(x: float) -> str:
+    if x == 0:
+        return "$0.00"
+    if x < 0.01:
+        return "&lt;$0.01"
+    return f"${x:,.2f}"
+
+
+def _gb_months(x: float) -> str:
+    return f"{x:,.3f}" if x else "0"
+
+
+def _cost_cells(line: dict) -> str:
+    return (
+        f'<td class="num">{_size(line["transferBytes"])}</td>'
+        f'<td class="num">{_usd(line["transferCost"])}</td>'
+        f'<td class="num">{_gb_months(line["localGbMonths"])}</td>'
+        f'<td class="num">{_gb_months(line["s3GbMonths"])}</td>'
+        f'<td class="num">{_usd(line["storageCost"])}</td>'
+        f'<td class="num"><b>{_usd(line["total"])}</b></td>'
+    )
+
+
+COST_HEADERS = (
+    '<th class="num">Outbound</th><th class="num">Transfer</th>'
+    '<th class="num">Disk GB-months</th><th class="num">S3 GB-months</th>'
+    '<th class="num">Storage</th><th class="num">Total</th>'
+)
+
+
+def _month_name(month: str) -> str:
+    return datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+
+
+def _billing(
+    admin: Admin,
+    rates: dict,
+    months: list[dict],
+    report: dict | None,
+    message: str | None,
+    error: bool,
+) -> HTMLResponse:
+    """The Billing tab: the rates, every month's total, and one month per user and vault."""
+    parts = [_header(admin, "billing")]
+    if message:
+        parts.append(f'<p class="notice{" error" if error else ""}">{html.escape(message)}</p>')
+    explain = (
+        "Estimated AWS cost per calendar month (UTC): outbound transfer to clients per GB, "
+        "and each vault's stored blobs per GB-month, on the server's disk (EBS) or in S3, "
+        "sampled every hour. Traffic to and from S3 isn't charged. A GB is 2^30 bytes. "
+        "Traffic without a vault (logins, /health, the admin page, /metrics) and the "
+        "server's own files (meta.db, netmon.db, certificates) are the server's line. A "
+        "month is billed at the rates in force at its end."
+    )
+    fields = (
+        ("transferPerGb", "Transfer out", "per GB"),
+        ("localPerGbMonth", "Disk (EBS)", "per GB-month"),
+        ("s3PerGbMonth", "S3", "per GB-month"),
+    )
+    if admin.read_only:
+        form = " · ".join(f"{label} ${rates[k]:g} {unit}" for k, label, unit in fields)
+    else:
+        csrf = f'<input type="hidden" name="csrf" value="{html.escape(admin.csrf or "")}">'
+        inputs = " ".join(
+            f'<label>{label} $<input name="{k}" size="7" inputmode="decimal" '
+            f'value="{rates[k]:g}" required> {unit}</label>'
+            for k, label, unit in fields
+        )
+        form = (
+            f'<form method="post" action="/admin/billing/rates">{csrf}{inputs} '
+            "<button>Save</button></form>"
+        )
+    parts.append(
+        f'<section class="stripe"><h2>Rates</h2><p class="muted">{explain}</p>{form}</section>'
+    )
+    rows = []
+    for m in months:
+        selected = report is not None and m["month"] == report["month"]
+        name = html.escape(_month_name(m["month"])) + (" (so far)" if m["current"] else "")
+        link = f'<a href="/admin?tab=billing&amp;month={m["month"]}">{name}</a>'
+        rows.append(f"<tr><td>{f'<b>{link}</b>' if selected else link}</td>{_cost_cells(m)}</tr>")
+    if not rows:
+        rows.append('<tr><td colspan="7" class="muted">No data yet.</td></tr>')
+    parts.append(
+        '<section class="stripe"><h2>Months</h2>'
+        f"<table><thead><tr><th>Month</th>{COST_HEADERS}</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></section>"
+    )
+    if report is not None:
+        parts.append(_billing_month(report))
+    return html_page("".join(parts))
+
+
+def _billing_month(r: dict) -> str:
+    title = html.escape(_month_name(r["month"])) + (" (so far)" if r["current"] else "")
+    elapsed = r["elapsedSeconds"]
+    share = r["monitoredSeconds"] / elapsed if elapsed else 0
+    coverage = (
+        f"Transfer was recorded for {share:.0%} of the month"
+        + (" so far" if r["current"] else "")
+        + " (while the server ran)."
+        if share < 0.995
+        else "Transfer was recorded for the whole month" + (" so far." if r["current"] else ".")
+    )
+    rates = r["rates"]
+    rows = []
+    for u in r["users"]:
+        rows.append(f"<tr><td><b>{html.escape(u['username'])}</b></td>{_cost_cells(u)}</tr>")
+        rows.extend(
+            f'<tr class="sub"><td>{html.escape(v["vaultName"])}</td>{_cost_cells(v)}</tr>'
+            for v in u["vaults"]
+        )
+    rows.append(
+        '<tr><td><b>Server</b> <span class="muted">(no vault)</span></td>'
+        f"{_cost_cells(r['server'])}</tr>"
+    )
+    rows.append(f"<tr><td><b>Total</b></td>{_cost_cells(r['total'])}</tr>")
+    return (
+        f'<section class="stripe"><h2>{title}</h2>'
+        f'<p class="muted">{coverage} Rates: ${rates["transferPerGb"]:g} per GB out, '
+        f"${rates['localPerGbMonth']:g} per GB-month on disk, ${rates['s3PerGbMonth']:g} per "
+        "GB-month in S3. Each user's line adds up their vaults.</p>"
+        f"<table><thead><tr><th>User / vault</th>{COST_HEADERS}</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></section>"
+    )
+
+
 async def _form(request: Request) -> dict[str, str]:
     fields = parse_qs((await request.body()).decode("utf-8", "replace"), keep_blank_values=True)
     return {k: v[0] for k, v in fields.items()}
 
 
-def _back(code: str) -> RedirectResponse:
-    return RedirectResponse(f"/admin?done={code}", status_code=303)
+def _back(code: str, tab: str | None = None) -> RedirectResponse:
+    to = f"/admin?tab={tab}&done={code}" if tab else f"/admin?done={code}"
+    return RedirectResponse(to, status_code=303)
 
 
 @router.get("")
@@ -1108,6 +1577,10 @@ async def page(request: Request, state: State, done: str = "", tab: str = "") ->
         return _activity(admin)
     message = MESSAGES.get(done)
     error = done not in SUCCESS
+    if tab == "network":
+        return _network(admin, await state.netmon.status(), message, error)
+    if tab == "billing":
+        return await _billing_tab(request, admin, state, message, error)
     users = await state.db.read(lambda: overview(state))
     return _dashboard(admin, state, users, message, error)
 
@@ -1126,6 +1599,76 @@ async def activity_json(request: Request, state: State) -> Response:
     if await _admin(request, state) is None:
         raise ApiError(401, "unauthenticated", "Log in first.")
     return JSONResponse(await metrics.activity(state), headers={"Cache-Control": "no-store"})
+
+
+async def _billing_tab(
+    request: Request, admin: Admin, state: AppState, message: str | None, error: bool
+) -> HTMLResponse:
+    month = request.query_params.get("month") or billing.month_of(state.now())
+    rates = await state.db.read(lambda: billing.rates_at(state.db, state.now()))
+    months = await billing.months(state)
+    try:
+        report = await billing.month_report(state, month)
+    except billing.BillingError as e:
+        report, message, error = None, MESSAGES[e.code], True
+    return _billing(admin, rates.json(), months, report, message, error)
+
+
+def _query_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    if not value.lstrip("-").isdigit() or len(value) > 12:
+        raise netmon.NetmonError("bad_filter")
+    return int(value)
+
+
+@router.get("/network.json")
+async def network_json(request: Request, state: State) -> Response:
+    """The Network tab's graphs and totals, with the session cookie (no CSRF: a GET)."""
+    if await _admin(request, state) is None:
+        raise ApiError(401, "unauthenticated", "Log in first.")
+    q = request.query_params
+    try:
+        data = await network_traffic(
+            state,
+            q.get("group", "device"),
+            q.get("filter"),
+            _query_int(q.get("start")),
+            _query_int(q.get("end")),
+        )
+    except netmon.NetmonError as e:
+        raise _netmon_error(e) from e
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/network-totals.json")
+async def network_totals_json(request: Request, state: State) -> Response:
+    """The Network tab's totals by period, with the session cookie (no CSRF: a GET)."""
+    if await _admin(request, state) is None:
+        raise ApiError(401, "unauthenticated", "Log in first.")
+    q = request.query_params
+    try:
+        data = await network_totals(
+            state,
+            q.get("group", "device"),
+            q.get("filter"),
+            q.get("period", "day"),
+            q.get("tz", "UTC"),
+            _query_int(q.get("before")),
+        )
+    except netmon.NetmonError as e:
+        raise _netmon_error(e) from e
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/network.js")
+async def network_js() -> Response:
+    """The Network tab's script. Static, so it needs no login."""
+    return Response(
+        NETWORK_JS,
+        media_type="text/javascript",
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/activity.js")
@@ -1235,6 +1778,56 @@ async def form_maintenance(
     except AdminError as e:
         code = e.code
     return _back(code)
+
+
+@router.post("/network/{action}")
+async def form_network(
+    action: Literal["prune", "auto-prune"], request: Request, state: State
+) -> Response:
+    form = await _form(request)
+    try:
+        if await _form_admin(request, state, form) is None:
+            return _login_page("Log in first.", status=401)
+        days = form.get("days", "").strip()
+        if days and (not days.isdigit() or len(days) > 5):
+            raise netmon.NetmonError("bad_days")
+        if action == "prune":
+            if not days:
+                raise netmon.NetmonError("bad_days")
+            await prune_network(state, int(days))
+            code = "netmon_pruned"
+        else:
+            await set_network(state, int(days) if days else None, not days)
+            code = "netmon_auto"
+    except AdminError as e:
+        code = e.code
+    except netmon.NetmonError as e:
+        code = e.code
+    return _back(code, "network")
+
+
+@router.post("/billing/rates")
+async def form_billing_rates(request: Request, state: State) -> Response:
+    form = await _form(request)
+    try:
+        if await _form_admin(request, state, form) is None:
+            return _login_page("Log in first.", status=401)
+        try:
+            rates = billing.Rates(
+                *(
+                    float(form.get(k, "").strip())
+                    for k in ("transferPerGb", "localPerGbMonth", "s3PerGbMonth")
+                )
+            )
+        except ValueError as e:
+            raise billing.BillingError("bad_rate") from e
+        await set_rates(state, rates)
+        code = "rates_set"
+    except AdminError as e:
+        code = e.code
+    except billing.BillingError as e:
+        code = e.code
+    return _back(code, "billing")
 
 
 @router.post("/vaults/{vault_id}/grace")

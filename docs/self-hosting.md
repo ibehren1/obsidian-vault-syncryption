@@ -241,6 +241,27 @@ device, busiest first, with the user and vault it belongs to: requests, requests
 over the last refresh, `/wait` long-polls, errors, bytes received and sent, and the top
 route. It refreshes on the same interval, and its totals are added up from when the tab
 opened until it is closed or reloaded. Group by Vault or User adds up their devices.
+**Network** records traffic over time, to find which device drives the server's network
+use. It is always on: the server adds up, per minute, each device's bytes on the web port (bodies plus the HTTP headers, without TLS)
+and the bytes of the S3 calls its requests make, and writes them to `./data/netmon.db`.
+Traffic without a device is counted apart: requests without a session (logins, `/health`,
+anything unknown), the admin page, `/metrics` scrapes, the server's own cleanup, and
+Litestream's replication of `meta.db`. The tab graphs web in, web out, S3 in and S3 out
+as stacked areas for a range (the last hour up to all monitored time; stretches while
+the server was down are shaded), grouped by device, vault, user or client (Obsidian or the
+macOS client, from the User-Agent); clicking a row shows only that one. Below the graphs
+are totals for the last hour, day, 7 and 30 days and all monitored time, and a table of
+totals per hour, day, week or month in the browser's time zone, each with its busiest
+group. The tab shows how much space it takes, deletes data older than a number of days (0
+deletes everything), and can do that by itself every hour; each vault's hourly outbound
+total stays, for billing. **Billing** estimates the AWS cost of each calendar month (UTC),
+by user and by vault, with each user's total adding up their vaults: outbound transfer to
+clients (default $0.09 per GB), and each vault's stored data per GB-month on the server's
+disk (EBS, default $0.08) or in S3 (default $0.023), sampled every hour. Traffic to and
+from S3 isn't charged, and a GB is 2^30 bytes. Traffic without a vault and the server's
+own files (databases, certificates) are a separate Server line. The rates can be changed
+on the tab; each month keeps the rates in force at its end. Past months stay listed, back
+to when this server version first ran: there is no history from before.
 
 - **Logging in:** the page asks for `ADMIN_TOKEN` and keeps you logged in for 12 hours
   (an HttpOnly, SameSite=Strict cookie). Five wrong tokens from one address block that
@@ -299,7 +320,15 @@ The message is optional: `maintenance/on` also works without a body. `graceSecon
 for no quota. `GET /admin/api/status` returns the version,
 maintenance state and `adminContact`, and `GET /admin/api/performance` the numbers of the
 Performance tab (counters as totals since the server started), and
-`GET /admin/api/activity` the totals per device behind the Activity tab. The API is
+`GET /admin/api/activity` the totals per device behind the Activity tab.
+`POST /admin/api/network` with `{"autoPruneDays": 30}` or `{"clearAutoPrune": true}` sets
+or clears the automatic deletion of network monitoring data, `POST /admin/api/network/prune` with `{"olderThanDays": 7}` deletes old
+data, and `GET /admin/api/network`, `/admin/api/network/traffic` and
+`/admin/api/network/totals` return its status and the Network tab's data.
+`GET /admin/api/billing?month=2026-10` returns a month's costs per user and vault,
+`GET /admin/api/billing/months` every month's total, and `POST /admin/api/billing/rates`
+with `{"transferPerGb": 0.09, "localPerGbMonth": 0.08, "s3PerGbMonth": 0.023}` sets the
+rates. The API is
 described in [protocol.md](protocol.md), sections 2 and 14.
 
 ### 5.1 Metrics
@@ -377,6 +406,7 @@ more than one.
 |---|---|
 | `./data/meta.db` (+ `-wal`, `-shm`) | SQLite: users, devices, vaults, revisions (encrypted metadata) |
 | `./data/blobs/` | encrypted file chunks, when S3 is not used |
+| `./data/netmon.db` (+ `-wal`, `-shm`) | SQLite: network monitoring per minute and outbound bytes per vault per hour (billing); not replicated by Litestream, can be deleted while the server is stopped (the Network and Billing history goes with it) |
 | `./data/caddy/` | TLS certificates |
 
 **Space:** the server keeps every version of a file for 30 days and at least the last 10,

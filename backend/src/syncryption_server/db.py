@@ -26,13 +26,39 @@ from pathlib import Path
 BASE_VERSION = 5
 # Read-only connections for `Database.read`, each on its own thread.
 READERS = 5
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 OLD_DATA_MESSAGE = (
     "This server's data predates server 0.1.4 (one key per device per vault). "
     "Delete ./data (or the S3 data) and start again."
 )
 
-SCHEMA = """
+BILLING = """
+-- protocol.md 14.5: each vault's stored bytes every hour ('' for the server's own files),
+-- with their names, and the billing rates from `since` on. No foreign keys: the history
+-- outlives a purged vault.
+CREATE TABLE storage_samples (
+    hour INTEGER NOT NULL,
+    vault_id TEXT NOT NULL,
+    store TEXT NOT NULL CHECK (store IN ('local', 's3')),
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (hour, vault_id)
+);
+CREATE TABLE billing_vaults (
+    vault_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    vault_name TEXT NOT NULL
+);
+CREATE TABLE billing_rates (
+    since INTEGER PRIMARY KEY,
+    transfer_gb REAL NOT NULL,
+    local_gb_month REAL NOT NULL,
+    s3_gb_month REAL NOT NULL
+);
+"""
+
+SCHEMA = (
+    """
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -168,6 +194,8 @@ CREATE TABLE maintenance (
     message TEXT
 );
 """
+    + BILLING
+)
 
 
 def _revision_epochs(conn: sqlite3.Connection) -> None:
@@ -199,6 +227,8 @@ MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [
     "(SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.vault_id = vaults.id)",
     # Schema 10: per-device metadata, encrypted by the client (protocol.md 6).
     "ALTER TABLE devices ADD COLUMN meta BLOB",
+    # Schema 11: storage samples and rates for the admin Billing tab (protocol.md 14.5).
+    BILLING,
 ]
 
 

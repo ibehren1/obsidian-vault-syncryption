@@ -67,6 +67,10 @@ SKIP = (
     "/admin/api/performance",
     "/admin/activity.json",
     "/admin/api/activity",
+    "/admin/network.json",
+    "/admin/network-totals.json",
+    "/admin/api/network/traffic",
+    "/admin/api/network/totals",
 )
 # The scope key under which a request's authenticated device is recorded (`auth.py`).
 ACTOR = "syncryption.actor"
@@ -668,8 +672,7 @@ class RequestMetrics:
         received = sent = 0
         m = self.metrics
         # Filled in by authentication: shared, so copies of the scope see it too.
-        actor: dict[str, str] = {}
-        scope[ACTOR] = actor
+        actor: dict[str, str] = scope.setdefault(ACTOR, {})
 
         async def count_body() -> Message:
             nonlocal received

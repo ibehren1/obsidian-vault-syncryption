@@ -688,16 +688,26 @@ API. Every route needs `ADMIN_TOKEN`.
   the login form (`401` after a wrong token).
 - **Pages:** `GET /admin` shows the login form or the dashboard's Vaults tab (each user,
   and under each vault its devices), `GET /admin?tab=performance` the Performance tab
-  (section 14.2), `GET /admin?tab=activity` the Activity tab (section 14.3);
+  (section 14.2), `GET /admin?tab=activity` the Activity tab (section 14.3),
+  `GET /admin?tab=network` the Network tab (section 14.4), `GET /admin?tab=billing&month=
+  YYYY-MM` the Billing tab (section 14.5);
   `POST /admin/{users|vaults}/{id}/{disable|enable|purge}` and
   `POST /admin/maintenance/{on|off}` (form field `message` for `on`) and
   `POST /admin/vaults/{id}/grace` (form field `hours`, a whole number from 1 to 8760, empty
   for the default) and `POST /admin/vaults/{id}/quota` (form field `gb`, a whole number of
   GB of 2^30 bytes from 1 to 1048576, empty for no quota) act and redirect to
-  `/admin?done=<code>`.
+  `/admin?done=<code>`; `POST /admin/network/{prune|auto-prune}` (form field `days`) and
+  `POST /admin/billing/rates` (form fields `transferPerGb`, `localPerGbMonth`,
+  `s3PerGbMonth`) redirect to `/admin?tab=network&done=<code>` and
+  `/admin?tab=billing&done=<code>`.
 - **JSON:**
   - `GET /admin/api/performance` returns the snapshot of section 14.2.
   - `GET /admin/api/activity` returns the totals per device of section 14.3.
+  - `GET /admin/api/network`, `POST /admin/api/network`, `POST /admin/api/network/prune`,
+    `GET /admin/api/network/traffic` and `GET /admin/api/network/totals`: network
+    monitoring, section 14.4.
+  - `GET /admin/api/billing`, `GET /admin/api/billing/months` and
+    `POST /admin/api/billing/rates`: billing, section 14.5.
   - `GET /admin/api/status` returns `{"version", "protocol", "maintenance", "adminContact"}`,
     with the same values as `/health`.
   - `GET /admin/api/users` returns `{"users": [...]}`. Each user has `id`, `username`,
@@ -834,3 +844,110 @@ value).
   requests, then bytes, then waits. Columns: user, vault, device (name, short fingerprint,
   pending), requests, requests per second over the last interval, waits, errors (4xx and
   5xx), bytes received and sent, and the top route.
+
+### 14.4 Network
+Network monitoring records the server's traffic over time, so the administrator can find
+which device, vault or user drives it, and the Billing tab (section 14.5) bills the
+outbound bytes. It is always on.
+
+- **What is counted:** per minute and per source: `web_in` and `web_out` (each request's
+  body plus its request or status line and headers, as the app sees them: no TLS),
+  `requests`, and `s3_in`, `s3_out` (object bytes downloaded from and uploaded to the S3
+  bucket) and `s3_ops` (S3 calls). A source is a device, from its session, or one of
+  `anonymous` (requests without a session: logins, `/health`, anything else), `admin`
+  (`/admin` pages and API), `metrics` (`/metrics`), `server` (S3 calls outside requests:
+  the hourly cleanup) and `litestream` (its replica operations and bytes, from its metrics,
+  sampled every 15 seconds). An S3 call counts for the request that made it. Every request
+  is counted, also the admin page's own polling and `/metrics`.
+- **Storage:** `netmon.db`, an SQLite file beside `meta.db`, created at the first start.
+  Litestream doesn't replicate it. The counters are written every 15 seconds, with each
+  device's user, vault and device names, its user and vault ids, the client (`macOS
+  client`, `Obsidian` or `Other`, from its `User-Agent`) and that header, so the history
+  outlives a removed device. The same writes add each vault's `web_out` to an hourly total
+  per vault (`''` for traffic without a vault), for billing. Each run of the server is a
+  period (`start`, `end` in Unix seconds, `end` `null` for the current one); a period a
+  crash left open ends at its last minute with data.
+- **Deleting:** the minutes older than a number of days (0 deletes everything) are deleted
+  on request, or every hour once the administrator sets a number of days (1 to 3650). The
+  hourly totals per vault are kept. The file's free pages are given back after each
+  deletion.
+- **Settings:** `POST /admin/api/network` with `{"autoPruneDays": <1 to 3650>}` or
+  `{"clearAutoPrune": true}` returns `204`. `POST /admin/api/network/prune` with
+  `{"olderThanDays": <0 to 3650>}` returns `{"deletedRows"}`. A value out of range returns
+  `400 bad_request`. On a demo server both return `403 demo`.
+- **Status:** `GET /admin/api/network` returns `{"since", "autoPruneDays",
+  "bytes", "rows", "oldest", "newest", "periods"}`: `bytes` is the size of `netmon.db`
+  with its `-wal` and `-shm` files, `oldest` and `newest` bound the recorded minutes.
+- **Data:** `GET /admin/network.json` (session cookie or Bearer, no CSRF token) and
+  `GET /admin/api/network/traffic` (Bearer only) take `group` (`device`, `vault`, `user`
+  or `client`), `filter` (a group key from an earlier answer, or a source name), `start`
+  and `end` (Unix seconds; default: all recorded time up to now) and return, with
+  `Cache-Control: no-store`, `{"status", "time", "group", "filter", "filterLabel",
+  "start", "end", "step", "times", "series", "totals", "summary", "periods"}`. `step` is
+  the bucket length in seconds (60 up to a week, so that there are at most 360 buckets),
+  `times` the bucket starts, and `series` the 8 busiest groups plus `other`, each with
+  `key`, `label` and the bytes per bucket in `web_in`, `web_out`, `s3_in` and `s3_out`.
+  `totals` holds every group's sums over the range, busiest (most bytes) first, with
+  `key`, `label`, `source`, the names that apply to the group (`username`, `vaultName`,
+  `deviceName`, `client`) and every counter. `summary` holds the sums for the windows
+  `hour`, `day`, `week` (7 days), `month` (30 days) and `all`. Group keys are
+  `device:<deviceId>`, `vault:<vaultId>`, `user:<userId>`, `client:<client>`, or the
+  source name for traffic without a device. An unknown group or filter returns
+  `400 bad_request`.
+- **Totals by period:** `GET /admin/network-totals.json` and `GET /admin/api/network/totals`
+  take `group`, `filter`, `period` (`hour`, `day`, `week` from Monday, or `month`), `tz`
+  (an IANA time zone, default `UTC`; else `400 bad_request`) and `before` (Unix seconds,
+  default now), and return `{"period", "tz", "periods", "more"}`: up to 24 periods ending
+  before `before`, newest first, back to the oldest recorded minute, each with `start`,
+  `end`, every counter and `groups` (its 20 busiest groups, as in `totals`). `more` is true
+  when older data exists; the next page takes the last period's `start` as `before`.
+- **Page:** `GET /admin/network.js` (no login needed, static) is the tab's script. The tab
+  shows the status and the deletion forms (none on a demo server), then a
+  range (last hour, 6 hours, 24 hours, 7 days, 30 days or all) and grouping (kept in
+  `localStorage`), the summary, a stacked area graph per counter in bytes per second with
+  stretches outside every period shaded and a tooltip per bucket, the range totals (a
+  click shows only that group), and the totals by period in the browser's time zone (a
+  click lists the period's groups). It refreshes every 30 seconds.
+
+### 14.5 Billing
+The Billing tab estimates what the server would cost on AWS per calendar month (UTC, from
+the 1st to the last day), by user and vault, so the administrator can see who drives the
+cost.
+
+- **Charges:** outbound transfer to clients per GB (`web_out` of section 14.4, from the
+  hourly totals per vault), and stored blobs per GB-month, on the server's disk (EBS) or
+  in S3, depending on where blobs were stored. Traffic to and from S3 isn't charged. A GB
+  is 2^30 bytes. Defaults: $0.09 per GB out, $0.08 per GB-month on disk, $0.023 per
+  GB-month in S3.
+- **Storage samples:** at the start of every hour (and a minute after the server starts)
+  the server writes each vault's stored blob bytes (`blob_bytes`, section 12) and the
+  size of its own files on the disk (`meta.db`, `netmon.db`, the TLS certificates) to
+  `storage_samples` in `meta.db`, with the vault's user and names in `billing_vaults`.
+  A sample holds until the next one, also across a restart; a vault missing from a sample
+  (purged) holds nothing from then on. GB-months are the bytes times the seconds they
+  were held, divided by 2^30 and by the seconds of the month, as AWS prorates. The
+  current month counts up to now.
+- **Server line:** outbound traffic without a vault (no session, the admin page,
+  `/metrics`, devices of a vault no longer known) and the server's own files. It is
+  charged to no user.
+- **Rates:** `POST /admin/api/billing/rates` with `{"transferPerGb", "localPerGbMonth",
+  "s3PerGbMonth"}` (dollars, 0 to 1000; else `400 bad_request`; `403 demo` on a demo
+  server) returns `204`. Rates apply from the moment they are set; each month is billed
+  at the rates in force at its end (now, for the current month), so a change doesn't
+  change past months.
+- **A month:** `GET /admin/api/billing?month=YYYY-MM` (default: the current month; a
+  future or malformed month returns `400 bad_request`) returns `{"month", "start", "end",
+  "current", "rates", "monitoredSeconds", "elapsedSeconds", "users", "server", "total"}`.
+  `monitoredSeconds` is how much of the month's `elapsedSeconds` network monitoring
+  recorded (while the server ran). `users` is `[{"userId", "username", "vaults", ...}]`
+  sorted by name, each vault `{"vaultId", "vaultName", ...}`, and every line (vault, user,
+  `server`, `total`) has `transferBytes`, `transferCost`, `localGbMonths`, `s3GbMonths`,
+  `storageCost` and `total`, in dollars. A user's line adds up its vaults; `total` adds
+  up the users and the server.
+- **Months:** `GET /admin/api/billing/months` returns `{"months", "rates"}`: the months
+  from the first sample or outbound hour to now, newest first (at most 24), each with
+  `month`, `current`, `monitoredSeconds`, `elapsedSeconds` and its total line, and the
+  current rates.
+- **Page:** the rates form (read-only on a demo server), the months table (each links to
+  its month) and the selected month: each user's line with its vaults below, the server
+  line and the total.
