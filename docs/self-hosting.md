@@ -247,9 +247,12 @@ and the bytes of the S3 calls its requests make, and writes them to `./data/netm
 Traffic without a device is counted apart: requests without a session (logins, `/health`,
 anything unknown), the admin page, `/metrics` scrapes, the server's own cleanup, and
 Litestream's replication of `meta.db`. The tab graphs web in, web out, S3 in and S3 out
-as stacked areas for a range (the last hour up to all monitored time; stretches while
+as stacked areas for a range (the last hour up to all monitored time, or month to date; stretches while
 the server was down are shaded), grouped by device, vault, user or client (Obsidian or the
-macOS client, from the User-Agent); clicking a row shows only that one. Below the graphs
+macOS client, from the User-Agent); clicking a row shows only that one. Above the table, a
+diagram shows client, server and S3 with the range's totals on the arrows between them:
+web in and out, and the bytes uploaded to and downloaded from S3; with a row picked, only
+that one's. Below the graphs
 are totals for the last hour, day, 7 and 30 days and all monitored time, and a table of
 totals per hour, day, week or month in the browser's time zone, each with its busiest
 group. The tab shows how much space it takes, deletes data older than a number of days (0

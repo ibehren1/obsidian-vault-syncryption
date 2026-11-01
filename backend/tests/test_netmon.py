@@ -285,6 +285,7 @@ def test_the_network_tab_and_its_forms(client):
     page = client.get("/admin?tab=network", headers=cookie)
     assert page.status_code == 200
     assert "Recording since" in page.text and 'src="/admin/network.js"' in page.text
+    assert 'value="mtd"' in page.text and 'id="flow"' in page.text
     assert "script-src 'self'" in page.headers["content-security-policy"]
     r = client.post(
         "/admin/network/prune",

@@ -122,7 +122,12 @@
     clearTimeout(timer);
     try {
       const extra = {};
-      if (range.value !== "all") {
+      if (range.value === "mtd") {
+        // From the 1st of this month, in the browser's time zone.
+        const now = new Date();
+        const first = new Date(now.getFullYear(), now.getMonth(), 1);
+        extra.start = String(Math.floor(first.getTime() / 1000));
+      } else if (range.value !== "all") {
         extra.start = String(Math.floor(Date.now() / 1000) - Number(range.value));
       }
       data = await get(`${SOURCE}?${query(extra)}`);
@@ -169,6 +174,7 @@
     renderLegend();
     drawCharts();
     renderGroups();
+    renderFlow();
   }
 
   function cells(row, item) {
@@ -241,6 +247,87 @@
         refresh(true);
       });
     }
+  }
+
+  // The flow diagram: clients, the server and S3, with the range's totals on the arrows
+  // (only the shown group's while a filter is on).
+
+  function renderFlow() {
+    const sum = {};
+    for (const f of FIELDS) sum[f] = data.totals.reduce((a, t) => a + t[f], 0);
+    const W = 760;
+    const H = 190;
+    const BW = 150;
+    const BH = 80;
+    const y = (H - BH) / 2;
+    const xs = [10, (W - BW) / 2, W - BW - 10];
+    const svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("role", "img");
+    const defs = el("defs", {});
+    const marker = el("marker", {
+      id: "flow-head",
+      viewBox: "0 0 10 10",
+      refX: 9,
+      refY: 5,
+      markerWidth: 7,
+      markerHeight: 7,
+      orient: "auto-start-reverse",
+    });
+    marker.append(el("path", { class: "head", d: "M0,0L10,5L0,10Z" }));
+    defs.append(marker);
+    svg.append(defs);
+    const who = data.filter ? data.filterLabel : "All clients";
+    const boxes = [
+      ["Client", who],
+      ["Server", "this server"],
+      ["S3", s3Label()],
+    ];
+    boxes.forEach(([name, sub], i) => {
+      svg.append(el("rect", { class: "box", x: xs[i], y, width: BW, height: BH, rx: 8 }));
+      svg.append(text("name", xs[i] + BW / 2, y + 34, name));
+      svg.append(text("who", xs[i] + BW / 2, y + 54, clip(sub, 22)));
+    });
+    // Upper arrows point right, lower ones left.
+    const arrow = (x1, x2, yy, value, note, above) => {
+      svg.append(el("line", {
+        class: "arrow",
+        x1,
+        x2,
+        y1: yy,
+        y2: yy,
+        "marker-end": "url(#flow-head)",
+      }));
+      const mid = (x1 + x2) / 2;
+      const off = above ? -24 : 22;
+      svg.append(text("val", mid, yy + off, value));
+      svg.append(text("sub", mid, yy + off + (above ? 13 : 13), note));
+    };
+    const a1 = xs[0] + BW + 6;
+    const b1 = xs[1] - 6;
+    const a2 = xs[1] + BW + 6;
+    const b2 = xs[2] - 6;
+    const up = y + 24;
+    const down = y + BH - 24;
+    arrow(a1, b1, up, size(sum.web_in), `web in, ${count(sum.requests)} requests`, true);
+    arrow(b1, a1, down, size(sum.web_out), "web out", false);
+    arrow(a2, b2, up, size(sum.s3_out), `uploaded, ${count(sum.s3_ops)} S3 calls`, true);
+    arrow(b2, a2, down, size(sum.s3_in), "downloaded", false);
+    $("flow").replaceChildren(svg);
+  }
+
+  function s3Label() {
+    return data.totals.some((t) => t.s3_ops) ? "bucket" : "no S3 calls";
+  }
+
+  function text(cls, x, yy, content) {
+    const t = el("text", { class: cls, x, y: yy, "text-anchor": "middle" });
+    t.textContent = content;
+    return t;
+  }
+
+  function clip(s, n) {
+    return s.length > n ? `${s.slice(0, n - 1)}…` : s;
   }
 
   // Charts

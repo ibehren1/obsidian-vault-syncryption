@@ -903,10 +903,13 @@ outbound bytes. It is always on.
   when older data exists; the next page takes the last period's `start` as `before`.
 - **Page:** `GET /admin/network.js` (no login needed, static) is the tab's script. The tab
   shows the status and the deletion forms (none on a demo server), then a
-  range (last hour, 6 hours, 24 hours, 7 days, 30 days or all) and grouping (kept in
+  range (last hour, 6 hours, 24 hours, 7 days, 30 days, month to date from the 1st in the
+  browser's time zone, or all) and grouping (kept in
   `localStorage`), the summary, a stacked area graph per counter in bytes per second with
-  stretches outside every period shaded and a tooltip per bucket, the range totals (a
-  click shows only that group), and the totals by period in the browser's time zone (a
+  stretches outside every period shaded and a tooltip per bucket, a diagram of the range's
+  totals (client, server and S3 boxes with web in and out between the first two, and the
+  bytes uploaded to and downloaded from S3 with the S3 calls between the last two, all
+  traffic or only the filtered group's), the range totals (a click shows only that group), and the totals by period in the browser's time zone (a
   click lists the period's groups). It refreshes every 30 seconds.
 
 ### 14.5 Billing

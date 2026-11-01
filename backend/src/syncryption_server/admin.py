@@ -826,6 +826,14 @@ td.trend .spark { margin: 0; }
 .swatch { display: inline-block; width: .75rem; height: .75rem; border-radius: 3px; }
 .legend .gapkey { background: #e6e7e3; border: 1px solid #d5d7d9; }
 table.pick tbody tr { cursor: pointer; }
+.flow svg { display: block; width: 100%; max-width: 52rem; height: auto; margin: .5rem auto 1rem; }
+.flow .box { fill: #f5f8f3; stroke: #2d2f31; stroke-width: 1.5; }
+.flow .name { font-size: 15px; font-weight: 600; fill: #222; }
+.flow .who { font-size: 12px; fill: #555; }
+.flow .arrow { stroke: #2d2f31; stroke-width: 2; fill: none; }
+.flow .head { fill: #2d2f31; }
+.flow .val { font-size: 14px; font-weight: 600; fill: #222; }
+.flow .sub { font-size: 11px; fill: #777; }
 table.pick tbody tr:hover { background: #f5f8f3; }
 tr.sub td { color: #555; font-size: .9rem; }
 tr.sub td:first-child { padding-left: 1.5rem; }
@@ -1359,6 +1367,7 @@ def _network(admin: Admin, status: dict, message: str | None, error: bool) -> HT
             ("86400", "Last 24 hours"),
             ("604800", "Last 7 days"),
             ("2592000", "Last 30 days"),
+            ("mtd", "Month to date"),
             ("all", "All monitored time"),
         )
     )
@@ -1397,7 +1406,8 @@ def _network(admin: Admin, status: dict, message: str | None, error: bool) -> HT
     table = (
         '<section class="stripe"><h2>By <span id="group-name">device</span> '
         '<span class="muted">(selected range, busiest first; click a row to show only it)</span>'
-        f'</h2><table class="pick"><thead><tr><th>Name</th><th>Client</th>{fields}</tr>'
+        '</h2><div class="flow" id="flow"></div>'
+        f'<table class="pick"><thead><tr><th>Name</th><th>Client</th>{fields}</tr>'
         '</thead><tbody id="groups"></tbody></table></section>'
     )
     periods = (
