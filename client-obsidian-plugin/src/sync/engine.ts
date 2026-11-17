@@ -76,8 +76,17 @@ export interface SyncReport {
 	reencrypted: number;
 	/** Whether a remote change was written to the active config folder. */
 	configChanged: boolean;
+	/** The config folder files a remote change wrote or deleted, in the order written. */
+	configWrites: ConfigWrite[];
 	/** Other plugins whose code (`main.js`) a remote change wrote: it runs after a reload. */
 	pluginCode: PluginCodeChange[];
+}
+
+export interface ConfigWrite {
+	path: string;
+	/** The id of the device that wrote or deleted it, from the revision's encrypted metadata. */
+	device: string | null;
+	deleted: boolean;
 }
 
 export interface PluginCodeChange {
@@ -142,7 +151,7 @@ class SyncStopped extends Error {
 }
 
 function emptyReport(): SyncReport {
-	return { pulled: 0, pushed: 0, merged: 0, conflicts: [], rejected: 0, reencrypted: 0, configChanged: false, pluginCode: [] };
+	return { pulled: 0, pushed: 0, merged: 0, conflicts: [], rejected: 0, reencrypted: 0, configChanged: false, configWrites: [], pluginCode: [] };
 }
 
 export class SyncEngine {
@@ -566,7 +575,7 @@ export class SyncEngine {
 			if (unchanged || !local.exists) {
 				if (local.exists) {
 					await this.opts.fs.remove(path);
-					await this.noteWrite(path);
+					await this.noteWrite(path, undefined, meta.device);
 				}
 				await this.record(path, revision, meta, null);
 			} else {
@@ -755,10 +764,14 @@ export class SyncEngine {
 		return this.opts.configDir !== undefined && path.startsWith(`${this.opts.configDir}/`);
 	}
 
-	/** Called before `record`, so the store still has what this device had before. */
-	private async noteWrite(path: string, written?: FileMeta): Promise<void> {
+	/**
+	 * Called before `record`, so the store still has what this device had before. `written` is
+	 * the revision written, absent for a deletion by `deletedBy`.
+	 */
+	private async noteWrite(path: string, written?: FileMeta, deletedBy?: string): Promise<void> {
 		if (!this.inConfig(path)) return;
 		this.report.configChanged = true;
+		this.report.configWrites.push({ path, device: written?.device ?? deletedBy ?? null, deleted: !written });
 		const [, folder, plugin, name, ...rest] = path.split("/");
 		if (!written || folder !== "plugins" || name !== "main.js" || rest.length > 0 || plugin === undefined) return;
 		if (this.report.pluginCode.some((c) => c.plugin === plugin)) return;

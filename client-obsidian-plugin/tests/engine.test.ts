@@ -340,6 +340,7 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		await a.engine.sync();
 		const next = await b.engine.sync();
 		expect(next.configChanged).toBe(true);
+		expect(next.configWrites).toEqual([{ path: ".obsidian/app.json", device: a.session.deviceId, deleted: false }]);
 		expect(next.pluginCode).toEqual([]);
 		expect(b.fs.text(".obsidian/app.json")).toBe('{"vimMode":false}');
 		expect((await a.engine.sync()).configChanged).toBe(false);
@@ -350,6 +351,11 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		a.fs.set(".obsidian/plugins/dataview/styles.css", "p {}");
 		await a.engine.sync();
 		expect((await b.engine.sync()).pluginCode).toEqual([{ plugin: "dataview", device: a.session.deviceId, added: false }]);
+
+		// A deletion is listed too, by the device that deleted it.
+		a.fs.delete(".obsidian/hotkeys.json");
+		await a.engine.sync();
+		expect((await b.engine.sync()).configWrites).toEqual([{ path: ".obsidian/hotkeys.json", device: a.session.deviceId, deleted: true }]);
 	});
 
 	it("keeps a held-back revision it couldn't write", async () => {

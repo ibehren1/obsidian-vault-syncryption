@@ -25,6 +25,19 @@ export interface StatusDetails {
 	remoteOnly: boolean;
 	/** The remote-only files can be read: the device is connected and not locked. */
 	remoteUnlocked: boolean;
+	/** Config files other devices wrote here since Obsidian started, most recent first. */
+	configWrites: ReceivedConfig[];
+}
+
+/** A config folder file another device wrote or deleted on this one. */
+export interface ReceivedConfig {
+	path: string;
+	/** The name of the device whose revision was last received. */
+	device: string;
+	deleted: boolean;
+	/** How often it was received since Obsidian started. */
+	count: number;
+	at: Date;
 }
 
 /** Paths listed under "Waiting to upload"; the rest are counted. */
@@ -160,7 +173,30 @@ export class StatusModal extends Modal {
 			}
 		}
 		waiting.body.createEl("p", { cls: "syncryption-note", text: "Changes made while Obsidian was closed are found at the next sync." });
+		this.renderConfig(el, d);
 		await this.renderEditing(el);
+	}
+
+	/** The settings files other devices changed here: a file received again and again is what keeps asking for a reload. */
+	private renderConfig(el: HTMLElement, d: StatusDetails): void {
+		if (!d.configWrites.length) return;
+		const sec = section(el, "Settings received", count(d.configWrites.length, "file"));
+		const table = rows(sec.body.createDiv({ cls: "syncryption-scroll" }), ["Path", "From", "Times", "Last"]);
+		for (const w of d.configWrites.slice(0, MAX_LISTED)) {
+			const row = table.createEl("tr");
+			row.createEl("td", { cls: "syncryption-ellipsis", text: w.deleted ? `${w.path} (deleted)` : w.path });
+			row.createEl("td", { cls: "syncryption-muted", text: w.device });
+			row.createEl("td", { cls: "syncryption-right", text: String(w.count) });
+			row.createEl("td", { cls: "syncryption-right syncryption-muted", text: w.at.toLocaleTimeString() });
+		}
+		if (d.configWrites.length > MAX_LISTED) {
+			const row = table.createEl("tr");
+			row.createEl("td", { attr: { colspan: 4 }, cls: "syncryption-note", text: `and ${d.configWrites.length - MAX_LISTED} more` });
+		}
+		sec.body.createEl("p", {
+			cls: "syncryption-note",
+			text: "Since Obsidian started. A file received again and again is rewritten by the other device, often at its start: exclude it on both devices if it holds per-device state.",
+		});
 	}
 
 	private renderTiles(d: StatusDetails, entries: OutboxEntry[] | null): void {

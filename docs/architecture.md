@@ -516,7 +516,10 @@ flowchart TD
   (`plugins/<id>/main.js`), which runs on every device after the reload, so the dialog
   lists each plugin whose code arrived: added or changed, and by which device (the writer
   in the revision's encrypted metadata, named from the keyring). Plugin code not listed
-  yet asks again, even after "Later". On a device's first sync of a config file (no synced
+  yet asks again, even after "Later". The dialog also lists the config files the sync
+  wrote, and the status window lists every config file other devices wrote or deleted since
+  Obsidian started, with the device, how often and when last (in memory only, never logged):
+  a file received again and again is one another device keeps rewriting. On a device's first sync of a config file (no synced
   state, both sides have it), the vault's version replaces the local one without a
   conflict copy, so a new device takes the vault's settings instead of pushing its
   defaults as conflicts. After that, config files merge like notes (JSON must still parse).

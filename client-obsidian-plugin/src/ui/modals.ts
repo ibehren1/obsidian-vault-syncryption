@@ -333,12 +333,19 @@ class FirstSyncModal extends Modal {
 	}
 }
 
+/** The changed config files the reload prompt lists; the rest are counted. */
+const MAX_RELOAD_FILES = 20;
+
 /** Asks to reload Obsidian after another device changed the settings, plugins or themes. */
 export class ReloadModal extends Modal {
-	/** `pluginCode`: one line per plugin whose code arrived, which runs after the reload. */
+	/**
+	 * `pluginCode`: one line per plugin whose code arrived, which runs after the reload.
+	 * `files`: the config files the sync wrote.
+	 */
 	constructor(
 		app: App,
 		private readonly pluginCode: string[],
+		private readonly files: string[],
 		private readonly reload: () => void,
 	) {
 		super(app);
@@ -355,6 +362,17 @@ export class ReloadModal extends Modal {
 			});
 			const list = this.contentEl.createEl("ul");
 			for (const line of this.pluginCode) list.createEl("li", { text: line });
+		}
+		if (this.files.length) {
+			const details = this.contentEl.createEl("details");
+			details.createEl("summary", { text: `Changed files (${this.files.length})` });
+			const list = details.createEl("ul");
+			for (const path of this.files.slice(0, MAX_RELOAD_FILES)) list.createEl("li", { text: path });
+			if (this.files.length > MAX_RELOAD_FILES) list.createEl("li", { text: `and ${this.files.length - MAX_RELOAD_FILES} more` });
+			details.createEl("p", {
+				cls: "setting-item-description",
+				text: "If this keeps coming back, the sync status window lists every settings file received since Obsidian started.",
+			});
 		}
 		new Setting(this.contentEl)
 			.addButton((b) => b.setButtonText("Later").onClick(() => this.close()))

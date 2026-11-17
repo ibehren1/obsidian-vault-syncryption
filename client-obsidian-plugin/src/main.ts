@@ -46,7 +46,7 @@ import { ApproveModal, ConfirmModal, confirmFirstSync, PairingModal, prompt, Rel
 import { showRecoveryKey } from "./ui/recovery";
 import { ComplianceModal } from "./ui/compliance";
 import { ICON, registerIcon } from "./ui/icon";
-import { StatusModal, type StatusDetails } from "./ui/status";
+import { type ReceivedConfig, StatusModal, type StatusDetails } from "./ui/status";
 import { countFiles, type OutboxEntry, type SyncStore } from "./store/state";
 import type { VaultKey } from "./ui/keys";
 
@@ -67,6 +67,8 @@ const DEVICES_CACHE_MS = 10_000;
 const MAINTENANCE_RETRY_S = { default: 60, min: 5, max: 600 };
 /** Sync progress is shown at most this often. */
 const PROGRESS_MS = 250;
+/** The config files the status window remembers as received from other devices. */
+const MAX_CONFIG_WRITES = 100;
 /** How often a remote-only device checks its lease and File Recovery. */
 const REMOTE_CHECK_MS = 30_000;
 
@@ -103,6 +105,11 @@ export default class SyncryptionPlugin extends Plugin {
 	private reloadAsked = false;
 	/** Plugins whose new code the reload prompt has listed, so new ones ask again after "Later". */
 	private announcedCode = new Set<string>();
+	/**
+	 * Config files other devices wrote here since Obsidian started, by path, least recent first:
+	 * shown in the status window to find what keeps asking for a reload. Memory only, never logged.
+	 */
+	private configWrites = new Map<string, ReceivedConfig>();
 	private locks: LockManager | null = null;
 	private live: LiveLoop | null = null;
 	private lockBar: HTMLElement | null = null;
@@ -900,21 +907,34 @@ export default class SyncryptionPlugin extends Plugin {
 	}
 
 	private announce(report: SyncReport): void {
+		const devices = this.session?.keyring.devices ?? [];
+		const name = (id: string | null) => devices.find((d) => d.id === id)?.name ?? "a device that is no longer in the vault";
+		this.noteConfigWrites(report, name);
 		const code = report.pluginCode.filter((c) => !this.announcedCode.has(c.plugin));
 		if ((report.configChanged && !this.reloadAsked) || code.length) {
 			// Asked once: after "Later", the next start of Obsidian picks the changes up. New
 			// plugin code is always listed, as it runs on this device after the reload.
 			this.reloadAsked = true;
 			for (const c of code) this.announcedCode.add(c.plugin);
-			const devices = this.session?.keyring.devices ?? [];
-			const lines = code.map((c) => {
-				const by = devices.find((d) => d.id === c.device)?.name ?? "a device that is no longer in the vault";
-				return `${c.plugin}: ${c.added ? "added" : "code changed"} by ${by}`;
-			});
-			new ReloadModal(this.app, lines, () => (this.app as Commands).commands?.executeCommandById("app:reload")).open();
+			const lines = code.map((c) => `${c.plugin}: ${c.added ? "added" : "code changed"} by ${name(c.device)}`);
+			const files = [...new Set(report.configWrites.map((w) => w.path))];
+			new ReloadModal(this.app, lines, files, () => (this.app as Commands).commands?.executeCommandById("app:reload")).open();
 		}
 		for (const copy of report.conflicts) {
 			new Notice(`Conflicting edits. Your version was saved as “${copy}”.`, 10_000);
+		}
+	}
+
+	private noteConfigWrites(report: SyncReport, name: (id: string | null) => string): void {
+		const at = new Date();
+		for (const w of report.configWrites) {
+			const before = this.configWrites.get(w.path);
+			this.configWrites.delete(w.path);
+			this.configWrites.set(w.path, { path: w.path, device: name(w.device), deleted: w.deleted, count: (before?.count ?? 0) + 1, at });
+		}
+		for (const path of this.configWrites.keys()) {
+			if (this.configWrites.size <= MAX_CONFIG_WRITES) break;
+			this.configWrites.delete(path);
 		}
 	}
 
@@ -1402,6 +1422,7 @@ export default class SyncryptionPlugin extends Plugin {
 			fingerprint: isConfigured(s) ? fingerprint(parsePublicKeyText(s.publicKey)) : null,
 			remoteOnly: this.isRemoteOnly(),
 			remoteUnlocked: this.remote.unlocked,
+			configWrites: [...this.configWrites.values()].reverse(),
 		};
 	}
 
