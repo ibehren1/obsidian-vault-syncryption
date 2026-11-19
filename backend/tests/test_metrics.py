@@ -157,12 +157,15 @@ def test_metrics_answer_only_allowed_addresses(settings):
                 assert r.json()["error"] == "forbidden"
 
 
-def test_metrics_allowed_ips_can_be_narrowed(settings):
+def test_metrics_allowed_ips_can_be_narrowed(settings, caplog):
     settings = dataclasses.replace(settings, metrics_allowed=parse_networks("10.0.0.5"))
     with TestClient(create_app(settings), client=("10.0.0.5", 50000)) as c:
         assert c.get("/metrics").status_code == 200
+    assert "metrics: refused" not in caplog.text
     with TestClient(create_app(settings), client=("10.0.0.6", 50000)) as c:
         assert c.get("/metrics").status_code == 403
+    # A refused client is logged with its address.
+    assert "metrics: refused 10.0.0.6" in caplog.text
 
 
 def test_metrics_check_the_client_behind_a_trusted_proxy(settings):

@@ -343,13 +343,15 @@ def create_app(
         async def prometheus(request: Request) -> Response:
             """Prometheus metrics in the text exposition format. Needs no token, but answers
             only clients in `METRICS_ALLOWED_IPS` (empty: loopback and private ranges); others
-            get `403 forbidden`. Only counts: requests by route template and status, users,
-            vaults, keys by status, files, revisions, blobs and their bytes, active locks,
-            open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process
-            metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE`
-            removes the endpoint (`404`)."""
+            get `403 forbidden`, and the server logs their address. Only counts: requests by
+            route template and status, users, vaults, keys by status, files, revisions, blobs
+            and their bytes, active locks, open long-polls, cleanup runs, wrong shared secrets
+            and admin tokens, and process metrics. No label names a user, vault, device or
+            path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`)."""
             state: AppState = request.app.state.ctx
-            if not auth.ip_in(auth.client_ip(request, state), state.settings.metrics_allowed):
+            ip = auth.client_ip(request, state)
+            if not auth.ip_in(ip, state.settings.metrics_allowed):
+                log.warning("metrics: refused %s, not in METRICS_ALLOWED_IPS", ip)
                 return error_response(
                     forbidden("/metrics answers only the addresses in METRICS_ALLOWED_IPS.")
                 )

@@ -336,7 +336,8 @@ described in [protocol.md](protocol.md), sections 2 and 14.
 
 ### 5.1 Metrics
 `/metrics` serves Prometheus metrics. It needs no token, but it answers only clients in
-`METRICS_ALLOWED_IPS`; others get `403 forbidden`. Left empty, that is loopback and private
+`METRICS_ALLOWED_IPS`; others get `403 forbidden`, and the server logs a warning with their
+address (`metrics: refused <ip>, not in METRICS_ALLOWED_IPS`). Left empty, that is loopback and private
 ranges, so a Prometheus on the same host, Docker network or LAN can scrape it and the
 internet can't. Behind your own proxy (`BEHIND_PROXY=TRUE`) the client is the address in
 `X-Forwarded-For` from a `TRUSTED_PROXIES` peer, so a request the proxy forwards from the

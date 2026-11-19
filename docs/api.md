@@ -35,7 +35,7 @@ limits, and the admin API. Crypto details are in [crypto.md](crypto.md).
 
 #### `GET /metrics`
 
-Prometheus metrics in the text exposition format. Needs no token, but answers only clients in `METRICS_ALLOWED_IPS` (empty: loopback and private ranges); others get `403 forbidden`. Only counts: requests by route template and status, users, vaults, keys by status, files, revisions, blobs and their bytes, active locks, open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
+Prometheus metrics in the text exposition format. Needs no token, but answers only clients in `METRICS_ALLOWED_IPS` (empty: loopback and private ranges); others get `403 forbidden`, and the server logs their address. Only counts: requests by route template and status, users, vaults, keys by status, files, revisions, blobs and their bytes, active locks, open long-polls, cleanup runs, wrong shared secrets and admin tokens, and process metrics. No label names a user, vault, device or path. `DISABLE_METRICS=TRUE` removes the endpoint (`404`).
 
 | Status | Body | Notes |
 |---|---|---|
