@@ -84,4 +84,22 @@ describe("pathFilter", () => {
 		expect(include.skipsFolder("Private")).toBe(true);
 		expect(include.skipsFolder("a/.git")).toBe(true);
 	});
+
+	it("applies the vault's exclude list too", () => {
+		const include = pathFilter({ configDir: ".obsidian", exclude: ["Private"], sharedExclude: parseExcludes("Video\n**/*.tmp\n") });
+		expect(include("Private/a.md")).toBe(false);
+		expect(include("Video/a.mp4")).toBe(false);
+		expect(include("a/b.tmp")).toBe(false);
+		expect(include("Notes/a.md")).toBe(true);
+		expect(include.skipsFolder("Video")).toBe(true);
+	});
+
+	it("always syncs the vault's exclude list", () => {
+		const include = pathFilter({ configDir: ".obsidian", exclude: [".obsidian", "**/*.txt"], sharedExclude: [".obsidian"] });
+		expect(include(".obsidian/syncryption-excludes.txt")).toBe(true);
+		expect(include(".obsidian/app.json")).toBe(false);
+		expect(include("a/b.txt")).toBe(false);
+		expect(include.skipsFolder(".obsidian")).toBe(false);
+		expect(include.skipsFolder(".obsidian/plugins")).toBe(true);
+	});
 });

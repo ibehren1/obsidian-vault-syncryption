@@ -2,7 +2,7 @@
 import { MemoryStore } from "../src/store/state";
 import { VaultCipher } from "../src/sync/cipher";
 import { SyncEngine, type SyncProgress } from "../src/sync/engine";
-import { pathFilter } from "../src/sync/filter";
+import { parseExcludes, pathFilter, sharedExcludesPath } from "../src/sync/filter";
 import { MemoryFs, type VaultFs } from "../src/sync/fs";
 import { connect, type VaultSession } from "../src/sync/session";
 import { client, newSeed, SHARED_SECRET, uniqueName } from "./harness";
@@ -24,6 +24,9 @@ export function engineFor(
 	warnings: string[],
 	progress: SyncProgress[] = [],
 ): SyncEngine {
+	// Follows the vault's exclude list like the plugin does.
+	const excludesPath = sharedExcludesPath(".obsidian");
+	let include = pathFilter({ configDir: ".obsidian" });
 	return new SyncEngine({
 		api: session.api,
 		vaultId: session.vault.id,
@@ -32,8 +35,13 @@ export function engineFor(
 		store: session.store,
 		deviceId: session.deviceId,
 		deviceName: name,
-		include: pathFilter({ configDir: ".obsidian" }),
+		include: (path) => include(path),
 		configDir: ".obsidian",
+		excludesPath,
+		onExcludesChanged: async () => {
+			const text = (await fs.stat(excludesPath)) ? new TextDecoder().decode(await fs.read(excludesPath)) : "";
+			include = pathFilter({ configDir: ".obsidian", sharedExclude: parseExcludes(text) });
+		},
 		keyring: { version: () => session.keyring.version, refresh: () => session.refreshKeyring() },
 		onWarning: (m) => warnings.push(m),
 		onProgress: (p) => progress.push(p),

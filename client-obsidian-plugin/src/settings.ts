@@ -5,6 +5,7 @@ import { type Device, normalizeEndpoint } from "./api/client";
 import { cleanDeviceName, defaultDeviceName, desktopHostname, keyComment } from "./device";
 import { fingerprint, generateDeviceKey, parsePublicKeyText, publicKeyText, writeOpenSshPrivateKey } from "./crypto/openssh";
 import { normalizeVaultName, saveKeyText, secretId, storedPublicKey } from "./keys";
+import { sharedExcludesPath } from "./sync/filter";
 import type SyncryptionPlugin from "./main";
 import { keyDescription, keyServerStatus, type VaultKey } from "./ui/keys";
 import { ConfirmModal, prompt } from "./ui/modals";
@@ -111,6 +112,11 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 				control: { type: "textarea", key: "exclude", placeholder: "Private\n**/*.mp4", rows: 4 },
 			},
 			{
+				name: "Excluded paths on all devices",
+				desc: `Files and folders no device of this vault syncs, in the same form. Kept in ${sharedExcludesPath(this.app.vault.configDir)}, which syncs to every device.`,
+				control: { type: "textarea", key: "sharedExclude", placeholder: "Archive\n**/*.iso", rows: 4 },
+			},
+			{
 				name: "Connect",
 				render: (setting) => {
 					// Follows the connection and the progress of a sync while the tab is open.
@@ -163,15 +169,23 @@ export class SyncryptionSettingTab extends PluginSettingTab {
 	}
 
 	override hide(): void {
+		this.plugin.writeSharedExcludes.run();
 		this.unfollow?.();
 		this.unfollow = null;
 		super.hide();
+	}
+
+	/** The vault's exclude list is a synced file, not a setting. */
+	override getControlValue(key: string): unknown {
+		if (key === "sharedExclude") return this.plugin.sharedExclude;
+		return super.getControlValue(key);
 	}
 
 	/** Trim the text fields; a new exclude list rebuilds the path filter. */
 	override async setControlValue(key: string, value: unknown): Promise<void> {
 		const settings = this.plugin.settings;
 		const text = typeof value === "string" ? value : "";
+		if (key === "sharedExclude") return this.plugin.saveSharedExcludes(text);
 		if (key === "exclude") settings.exclude = text;
 		else if (key === "endpoint" || key === "username" || key === "vaultName") settings[key] = text.trim();
 		else if (key === "deviceName") settings.deviceName = cleanDeviceName(text) || initialDeviceName();

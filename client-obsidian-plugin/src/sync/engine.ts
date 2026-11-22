@@ -42,6 +42,13 @@ export interface EngineOptions {
 	 */
 	configDir?: string;
 	/**
+	 * The vault's exclude list (`sharedExcludesPath`). A first sync applies it before the change
+	 * feed, so nothing it excludes is downloaded, and `onExcludesChanged` runs after each
+	 * remote change to it, so `include` follows it from the next revision on.
+	 */
+	excludesPath?: string;
+	onExcludesChanged?: () => Promise<void>;
+	/**
 	 * The keyring this device has. The change feed carries the server's keyring version, and
 	 * a newer one is fetched and checked before any change is applied (crypto.md 8.4).
 	 */
@@ -303,6 +310,7 @@ export class SyncEngine {
 		const since = cursor;
 		let done = 0;
 		this.pulling = { done, since };
+		if (cursor === 0) await this.pullExcludes(failed, deferred);
 		for (;;) {
 			const page = await api.changes(vaultId, cursor);
 			const keyring = this.opts.keyring;
@@ -326,6 +334,20 @@ export class SyncEngine {
 		for (const revision of deferred) await this.applyOrKeep(revision, failed);
 		await store.setMeta(DEFERRED, []);
 		await store.setMeta(FAILED, failed);
+	}
+
+	/** The head of the vault's exclude list, if it has one. Later revisions in the feed are skipped as old. */
+	private async pullExcludes(failed: Revision[], deferred: Revision[]): Promise<void> {
+		const { api, vaultId, cipher, excludesPath } = this.opts;
+		if (excludesPath === undefined) return;
+		let head: Revision;
+		try {
+			head = await api.head(vaultId, cipher.fileId(excludesPath));
+		} catch (e) {
+			if (e instanceof ApiError && e.status === 404) return;
+			throw e;
+		}
+		await this.applyOrKeep(head, failed, deferred);
 	}
 
 	/**
@@ -769,6 +791,7 @@ export class SyncEngine {
 	 * the revision written, absent for a deletion by `deletedBy`.
 	 */
 	private async noteWrite(path: string, written?: FileMeta, deletedBy?: string): Promise<void> {
+		if (path === this.opts.excludesPath) await this.opts.onExcludesChanged?.();
 		if (!this.inConfig(path)) return;
 		this.report.configChanged = true;
 		this.report.configWrites.push({ path, device: written?.device ?? deletedBy ?? null, deleted: !written });

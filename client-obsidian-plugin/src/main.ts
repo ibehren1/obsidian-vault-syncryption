@@ -36,7 +36,7 @@ import { SealedHashStore } from "./store/sealed";
 import { AdapterFs, isHiddenPath, SplitFs } from "./sync/adapter-fs";
 import { VaultCipher } from "./sync/cipher";
 import { CURSOR, StorageFullError, SyncEngine, type SyncProgress, type SyncReport } from "./sync/engine";
-import { parseExcludes, pathFilter, type PathFilter } from "./sync/filter";
+import { parseExcludes, pathFilter, sharedExcludesPath, type PathFilter } from "./sync/filter";
 import { LiveLoop } from "./sync/live";
 import { LockManager, newClientId } from "./sync/locks";
 import { isMergeable } from "./sync/merge";
@@ -102,6 +102,10 @@ export default class SyncryptionPlugin extends Plugin {
 	private statusBar: HTMLElement | null = null;
 	private announced = new Set<string>();
 	private include: PathFilter | null = null;
+	/** The vault's exclude list as text, read from its file in the config folder (`sharedExcludesPath`). */
+	sharedExclude = "";
+	/** The text this device last wrote to that file. */
+	private writtenExclude: string | null = null;
 	private reloadAsked = false;
 	/** Plugins whose new code the reload prompt has listed, so new ones ask again after "Later". */
 	private announcedCode = new Set<string>();
@@ -163,6 +167,7 @@ export default class SyncryptionPlugin extends Plugin {
 		// Before anything else, so Obsidian's reads of remote-only files go through the wrapper.
 		await this.remote.load();
 		await this.loadSettings();
+		await this.loadSharedExcludes();
 		this.addSettingTab(new SyncryptionSettingTab(this.app, this));
 		this.userPaused = this.app.loadLocalStorage(PAUSED) === true;
 		registerIcon();
@@ -263,7 +268,11 @@ export default class SyncryptionPlugin extends Plugin {
 			// The Vault API doesn't see hidden folders: the raw event covers the config folders.
 			this.registerEvent(
 				(this.app.vault as Vault & RawEvents).on("raw", (path) => {
-					if (isHiddenPath(path)) this.noteChange(path.replace(/^\/+/, ""));
+					if (!isHiddenPath(path)) return;
+					const clean = path.replace(/^\/+/, "");
+					// Edited by hand, or by another app: follow it.
+					if (clean === this.excludesPath()) void this.loadSharedExcludes().catch(() => {});
+					this.noteChange(clean);
 				}),
 			);
 			this.registerInterval(window.setInterval(() => this.tick(), SYNC_INTERVAL_MS));
@@ -319,11 +328,50 @@ export default class SyncryptionPlugin extends Plugin {
 		this.include = null;
 	}
 
+	private excludesPath(): string {
+		return sharedExcludesPath(this.app.vault.configDir);
+	}
+
+	/** Read the vault's exclude list again, after it changed here or arrived from another device. */
+	async loadSharedExcludes(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const path = this.excludesPath();
+		const text = (await adapter.exists(path)) ? await adapter.read(path) : "";
+		// The raw event of this device's own write: the settings may have moved on since.
+		if (text === this.writtenExclude) return;
+		this.sharedExclude = text;
+		this.updateExcludes();
+	}
+
+	/**
+	 * The vault's exclude list from the settings. It is written to its file (which syncs like
+	 * any other config file) a second after the last keystroke, not once per keystroke.
+	 */
+	saveSharedExcludes(text: string): void {
+		this.sharedExclude = text;
+		this.updateExcludes();
+		this.writeSharedExcludes();
+	}
+
+	readonly writeSharedExcludes = debounce(
+		() => {
+			const path = this.excludesPath();
+			this.writtenExclude = this.sharedExclude;
+			void this.app.vault.adapter.write(path, this.sharedExclude).then(
+				() => this.noteChange(path),
+				(e: unknown) => new Notice(`Couldn't save the vault's exclude list: ${e instanceof Error ? e.message : String(e)}`),
+			);
+		},
+		1000,
+		true,
+	);
+
 	private filter(): PathFilter {
 		this.include ??= pathFilter({
 			configDir: this.app.vault.configDir,
 			pluginFolder: this.manifest.dir?.split("/").pop() ?? this.manifest.id,
 			exclude: parseExcludes(this.settings.exclude),
+			sharedExclude: parseExcludes(this.sharedExclude),
 		});
 		return this.include;
 	}
@@ -507,6 +555,11 @@ export default class SyncryptionPlugin extends Plugin {
 				deviceName,
 				include: (path) => this.filter()(path),
 				configDir: this.app.vault.configDir,
+				excludesPath: this.excludesPath(),
+				onExcludesChanged: () => {
+					this.writtenExclude = null;
+					return this.loadSharedExcludes();
+				},
 				keyring: { version: () => session.keyring.version, refresh: () => session.refreshKeyring() },
 				onWarning: (message) => new Notice(`Sync: ${message}`),
 				onProgress: (progress) => this.showProgress(engine, progress),

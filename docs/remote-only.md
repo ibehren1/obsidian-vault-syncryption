@@ -215,7 +215,7 @@ cryptographic:
 Obsidian reads `configDir` (`app.json`, `community-plugins.json`, the plugins' `main.js`)
 from disk before any plugin loads, so **`configDir` stays as normal files**. Remote-only
 covers notes and attachments only. `configDir` syncs as on a full device, in plaintext,
-with the usual exclude list.
+with the usual exclude lists.
 
 For every note and attachment:
 - A **zero-byte stub** sits at the file's real path. Obsidian's startup scan builds the file

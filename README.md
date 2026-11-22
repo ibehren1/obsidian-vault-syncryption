@@ -104,7 +104,7 @@ The shared secret keeps strangers from creating accounts on your server. It does
 - The plugin only writes to the clipboard, when you press a copy button for your public key or the recovery key. It never reads the clipboard.
 
 ## How it reads your vault
-The plugin syncs the whole vault in place, including the config folder (`.obsidian`, or whichever folder you set): settings, themes and other plugins. The Vault API doesn't cover the config folder, so the plugin uses `app.vault.adapter` for those files. Its own folder and `workspace*.json` are never synced, and each device can exclude more paths in the settings. This plugin and server are the simplest way to securely sync your vault and own you data. The entire experience is intended to be simple and secure!
+The plugin syncs the whole vault in place, including the config folder (`.obsidian`, or whichever folder you set): settings, themes and other plugins. The Vault API doesn't cover the config folder, so the plugin uses `app.vault.adapter` for those files. Its own folder and `workspace*.json` are never synced, and the settings exclude more paths, on one device or on all of them. This plugin and server are the simplest way to securely sync your vault and own you data. The entire experience is intended to be simple and secure!
 
 ## Documentation
 - [docs/self-hosting.md](docs/self-hosting.md): running the server

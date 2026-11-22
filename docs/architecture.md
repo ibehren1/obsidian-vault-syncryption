@@ -388,7 +388,7 @@ clean stop. CI runs it in the `container` job.
 | Module | Responsibility |
 |---|---|
 | `main`, `compat`, `device` | plugin lifecycle, commands, ribbon icon and status bar, pause and resume, event wiring, the first-sync confirmation, the `SecretStorage` check, the default device name |
-| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), exclude list. Join, passphrase, pairing, approval, first-sync and reload dialogs, the recovery key dialog, file history and restore, the status window (`ui/status`), the icons (`ui/icon`), the remote-only compliance report (`ui/compliance`) |
+| `settings`, `keys`, `ui` | settings tab: endpoint, username, vault name, device name, encryption key generation (the key goes to `SecretStorage`), the device's and the vault's exclude lists. Join, passphrase, pairing, approval, first-sync and reload dialogs, the recovery key dialog, file history and restore, the status window (`ui/status`), the icons (`ui/icon`), the remote-only compliance report (`ui/compliance`) |
 | `obsidian` | `requestUrl` transport, and the `VaultFs` over the Vault API |
 | `crypto` | OpenSSH key parser/writer, age `ssh-ed25519` recipient/identity, sshsig, keyring, file and metadata objects, path and key derivation (`kdf`), sealing under a remote-only device's local key (`local`, crypto.md 11) |
 | `api` | typed client over a `Transport` (`requestUrl` in the plugin, `fetch` in tests). `src/api/schema.ts` is generated from the server's OpenAPI with `npm run api-types` (CI checks it is current) |
@@ -600,11 +600,18 @@ sequenceDiagram
   real size and times, not the stub's.
 - Excluded paths (section 4.4) are filtered before anything is queued.
   A scan doesn't descend into excluded folders such as `node_modules`.
-- **Exclude list:** one pattern per line in the settings, kept per device in the plugin's
-  `data.json` (which is itself never synced). A pattern is vault-relative and matches the
-  path or anything inside it; `*` and `?` match within a path segment and `**` across
-  segments. Lines starting with `#` are comments. Excluding a synced path stops syncing it
-  without deleting it anywhere.
+- **Exclude lists:** two lists in the settings, one pattern per line. "Excluded paths" is
+  kept per device in the plugin's `data.json` (which is itself never synced). "Excluded
+  paths on all devices" is the file `syncryption-excludes.txt` at the top of the config
+  folder, which syncs like any other config file (encrypted, with history and merges), so
+  it applies on every device; it can also be edited by hand. A path is excluded if either
+  list matches it, and no pattern excludes that file itself. A pattern is vault-relative
+  and matches the path or anything inside it; `*` and `?` match within a path segment and
+  `**` across segments. Lines starting with `#` are comments. Excluding a synced path
+  stops syncing it without deleting it anywhere.
+- A device's first sync fetches the vault's list before the change feed, so it downloads
+  nothing the list excludes. Later changes to the list apply from the next revision the
+  device receives.
 
 ### 4.4 Sync scope
 - The whole vault is synced in place, including `app.vault.configDir`. It is not a nested
@@ -623,7 +630,8 @@ sequenceDiagram
     `desktop.ini` files, at any depth
   - hidden files and folders outside `configDir`, including other config folders (Obsidian
     doesn't index them)
-  - the paths matched by the device's exclude list (section 4.3)
+  - the paths matched by the device's or the vault's exclude list (section 4.3). A device
+    that overrides its config folder uses the vault's list in that folder
   - paths that `normPath` rejects ([crypto.md](crypto.md) section 5.2), such as a name
     with `\` on Linux or macOS. Every write and deletion checks the path again.
 - `community-plugins.json` is written last, and the user is asked to reload Obsidian. On a

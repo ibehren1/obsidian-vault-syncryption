@@ -6,6 +6,12 @@ const EXCLUDED_FOLDERS = new Set([".trash", ".git", "node_modules"]);
 /** Files that are never synced, at any depth: per-device state and OS clutter. */
 const EXCLUDED_FILES = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
 const WORKSPACE_FILES = new Set(["workspace.json", "workspace-mobile.json", "workspaces.json"]);
+/** The vault's exclude list, at the top of the config folder: synced, so it applies on every device. */
+export const SHARED_EXCLUDES = "syncryption-excludes.txt";
+
+export function sharedExcludesPath(configDir: string): string {
+	return `${configDir}/${SHARED_EXCLUDES}`;
+}
 
 export interface FilterOptions {
 	/** `app.vault.configDir`: the only hidden folder that is synced. */
@@ -14,6 +20,8 @@ export interface FilterOptions {
 	pluginFolder?: string;
 	/** The user's exclude list: one pattern per entry (see `parseExcludes`). */
 	exclude?: string[];
+	/** The vault's exclude list (`SHARED_EXCLUDES`), in the same form. Either list excludes a path. */
+	sharedExclude?: string[];
 }
 
 export interface PathFilter {
@@ -56,7 +64,8 @@ function compile(pattern: string): RegExp {
 
 export function pathFilter(opts: FilterOptions): PathFilter {
 	const pluginFolder = opts.pluginFolder ?? "vault-syncryption";
-	const patterns = (opts.exclude ?? []).map(compile);
+	const patterns = [...(opts.exclude ?? []), ...(opts.sharedExclude ?? [])].map(compile);
+	const shared = sharedExcludesPath(opts.configDir);
 	const userExcluded = (path: string) => patterns.some((p) => p.test(path));
 
 	/** Rules for a folder's own segments, shared by files and folders. */
@@ -75,6 +84,8 @@ export function pathFilter(opts: FilterOptions): PathFilter {
 	const include = ((path: string) => {
 		// A name no vault path may have (crypto.md 5.2), e.g. with `\` on Linux: never synced.
 		if (!isVaultPath(path)) return false;
+		// No pattern excludes the vault's list itself, or devices couldn't change it.
+		if (path === shared) return true;
 		const segments = path.split("/");
 		const name = segments.pop()!;
 		if (folderExcluded(segments) || EXCLUDED_FILES.has(name)) return false;
@@ -83,6 +94,7 @@ export function pathFilter(opts: FilterOptions): PathFilter {
 		if (inConfig && segments.length === 1 && WORKSPACE_FILES.has(name)) return false;
 		return !userExcluded(path);
 	}) as PathFilter;
-	include.skipsFolder = (folder) => folderExcluded(folder.split("/")) || userExcluded(folder);
+	// The config folder is always listed, for the vault's list at its top.
+	include.skipsFolder = (folder) => folderExcluded(folder.split("/")) || (folder !== opts.configDir && userExcluded(folder));
 	return include;
 }

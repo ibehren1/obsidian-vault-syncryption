@@ -241,6 +241,30 @@ describe.skipIf(noBackend)("SyncEngine", () => {
 		expect([...b.fs.files.keys()]).toEqual(["kept.md"]);
 	});
 
+	it("follows the vault's exclude list, from a new device's first sync on", async () => {
+		const [a, b] = await twoDevices();
+		a.fs.set("Video/clip.mp4", new Uint8Array([1, 2, 3]));
+		a.fs.set("kept.md", "kept");
+		await a.engine.sync();
+		// Committed after the file it excludes, but a first sync applies it before the feed.
+		a.fs.set(".obsidian/syncryption-excludes.txt", "Video\n");
+		await a.engine.sync();
+		await b.engine.sync();
+		expect([...b.fs.files.keys()].sort()).toEqual([".obsidian/syncryption-excludes.txt", "kept.md"]);
+
+		// A later change to the list applies to the revisions after it.
+		a.fs.set(".obsidian/syncryption-excludes.txt", "Video\nAudio\n");
+		await a.engine.sync();
+		a.fs.set("Audio/a.mp3", new Uint8Array([4]));
+		a.fs.set("Video/b.mp4", new Uint8Array([5]));
+		await a.engine.sync();
+		await b.engine.sync();
+		expect(b.fs.files.has("Audio/a.mp3")).toBe(false);
+		expect(b.fs.files.has("Video/b.mp4")).toBe(false);
+		expect(b.fs.text(".obsidian/syncryption-excludes.txt")).toBe("Video\nAudio\n");
+		expect(b.warnings).toEqual([]);
+	});
+
 	it("pushes changes noted from vault events", async () => {
 		const [a, b] = await twoDevices();
 		a.fs.set("a.md", "1");
