@@ -4,7 +4,10 @@
 # attest its build provenance, and publish a backend-v<version> release that names the
 # image. The public repo pushes ghcr.io/<owner>/vault-syncryption, tagged <version> and
 # latest; the beta repo ghcr.io/<owner>/vault-syncryption-beta, tagged dev-<version> and
-# dev-latest (as scripts/build.sh's Prod and PubDev). The server isn't Obsidian-specific,
+# dev-latest (as scripts/build.sh's Prod and PubDev). When the repo has the DOCKERHUB_USERNAME
+# variable and the DOCKERHUB_TOKEN secret, the same image also goes to Docker Hub as
+# <DOCKERHUB_USERNAME>/vault-syncryption with the same tags (one Docker Hub repository for
+# both, as scripts/build.sh); without them that push is skipped. The server isn't Obsidian-specific,
 # so the images don't carry the repos' names; each package belongs to the repo that pushes it. The release is never
 # marked Latest, which stays the plugin's.
 name: Backend image
@@ -44,6 +47,15 @@ jobs:
             image="ghcr.io/$owner/vault-syncryption"
             tags="$image:$version,$image:latest"
           fi
+          if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+            hub="docker.io/$DOCKERHUB_USERNAME/vault-syncryption"
+            if [[ "$GITHUB_REPOSITORY" == *-beta ]]; then
+              tags="$tags,$hub:dev-$version,$hub:dev-latest"
+            else
+              tags="$tags,$hub:$version,$hub:latest"
+            fi
+            echo "hub=$hub" >> "$GITHUB_OUTPUT"
+          fi
           {
             echo "version=$version"
             echo "tag=backend-v$version"
@@ -58,6 +70,8 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/setup-qemu-action@v3
         if: steps.version.outputs.new == 'true'
       - uses: docker/setup-buildx-action@v3
@@ -68,6 +82,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - uses: docker/login-action@v3
+        if: steps.version.outputs.new == 'true' && steps.version.outputs.hub != ''
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Build and push
         id: build
         if: steps.version.outputs.new == 'true'
@@ -88,6 +107,13 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ steps.version.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the build provenance on Docker Hub
+        if: steps.version.outputs.new == 'true' && steps.version.outputs.hub != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.version.outputs.hub }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
       - name: Publish the release

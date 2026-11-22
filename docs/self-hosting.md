@@ -1,6 +1,6 @@
 # Self-hosting Vault Syncryption
 
-The server is one container, published as `ibehren1/vault-syncryption`. The compose
+The server is one container, published as `ghcr.io/ibehren1/vault-syncryption`. The compose
 file is [`backend/docker/docker-compose.yml`](../backend/docker/docker-compose.yml): copy
 it into an empty folder on the host. `./data` below is relative to that folder.
 
@@ -20,13 +20,15 @@ it into an empty folder on the host. `./data` below is relative to that folder.
 - Obsidian 1.13 or later on every device.
 
 ## 2. Configure
-The image is on Docker Hub as `ibehren1/vault-syncryption` and on the GitHub Container
-Registry as `ghcr.io/ibehren1/vault-syncryption`, tagged with the server version
-and `latest`, for `linux/amd64` and `linux/arm64`. Each version also has a `backend-v<version>`
-release on GitHub with the image's digest, and its build provenance can be checked with
+The image is on the GitHub Container Registry as `ghcr.io/ibehren1/vault-syncryption`,
+tagged with the server version and `latest`, for `linux/amd64` and `linux/arm64`. The
+compose file uses `latest`; pin a version tag instead to choose when to upgrade. Each
+version also has a `backend-v<version>` release on GitHub with the image's digest, and
+its build provenance can be checked with
 `gh attestation verify oci://ghcr.io/ibehren1/vault-syncryption@<digest> -R ibehren1/obsidian-vault-syncryption`.
-Either image works in `image:`. Beta plugins may need a newer server: its image is
-`ghcr.io/ibehren1/vault-syncryption-beta`, tagged `dev-<version>` and `dev-latest`.
+The same image is also on Docker Hub as `ibehren1/vault-syncryption`. Beta plugins may need a newer server: its image is
+`ghcr.io/ibehren1/vault-syncryption-beta`, tagged `dev-<version>` and `dev-latest`, and on Docker Hub
+`ibehren1/vault-syncryption` with the same tags.
 
 Everything is in `docker-compose.yml`, with the variables written inline. There is no
 `.env` file. This is the whole file, with a comment on every variable:
@@ -34,7 +36,7 @@ Everything is in `docker-compose.yml`, with the variables written inline. There 
 ```yaml
 services:
   vault-syncryption:
-    image: ibehren1/vault-syncryption:latest
+    image: ghcr.io/ibehren1/vault-syncryption:latest
     restart: unless-stopped
     ports:
       - "80:80"        # Let's Encrypt HTTP-01 and the redirect to HTTPS (BEHIND_PROXY=FALSE)

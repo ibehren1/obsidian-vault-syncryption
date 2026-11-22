@@ -3,7 +3,7 @@
 # if a required one is missing or a value is invalid.
 services:
   vault-syncryption:
-    image: ibehren1/vault-syncryption:latest
+    image: ghcr.io/ibehren1/vault-syncryption:latest
     restart: unless-stopped
     ports:
       - "80:80"        # Let's Encrypt HTTP-01 and the redirect to HTTPS (BEHIND_PROXY=FALSE)
