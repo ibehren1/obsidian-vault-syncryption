@@ -4,8 +4,8 @@
 # attest its build provenance, and publish a backend-v<version> release that names the
 # image. The public repo pushes ghcr.io/<owner>/vault-syncryption, tagged <version> and
 # latest; the beta repo ghcr.io/<owner>/vault-syncryption-beta, tagged dev-<version> and
-# dev-latest (as scripts/build.sh's Prod and PubDev). When the repo has the DOCKERHUB_USERNAME
-# variable and the DOCKERHUB_TOKEN secret, the same image also goes to Docker Hub as
+# dev-latest (as scripts/build.sh's Prod and PubDev). When the repo has the DOCKERHUB_USERNAME and
+# DOCKERHUB_TOKEN secrets, the same image also goes to Docker Hub as
 # <DOCKERHUB_USERNAME>/vault-syncryption with the same tags (one Docker Hub repository for
 # both, as scripts/build.sh); without them that push is skipped. The server isn't Obsidian-specific,
 # so the images don't carry the repos' names; each package belongs to the repo that pushes it. The release is never
@@ -70,7 +70,7 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
-          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/setup-qemu-action@v3
         if: steps.version.outputs.new == 'true'
@@ -85,7 +85,7 @@ jobs:
       - uses: docker/login-action@v3
         if: steps.version.outputs.new == 'true' && steps.version.outputs.hub != ''
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Build and push
         id: build
